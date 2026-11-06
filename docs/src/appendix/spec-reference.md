@@ -219,7 +219,7 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 | `[pool.<name>] slurm` | how the pool's job runs on its Slurm site: `{ partition, time_limit, spare_nodes }`. Refused on a pool of any other cluster | none |
 | `[pool.<name>] slurm.partition` | the partition the pool's job runs in | `srtslurm.yaml`'s |
 | `[pool.<name>] slurm.time_limit` | the pool's job's time limit, over its site's, in the same format | its site's `time_limit` |
-| `[pool.<name>] slurm.spare_nodes` | nodes the pool's job holds beyond its segments, for segments that join it later inside the job, which `cargo gdl join --in-job` does not do yet ([Limitations](../operations/limitations.md#cargo-gdl-join---in-job-is-not-available-yet)) | `0` |
+| `[pool.<name>] slurm.spare_nodes` | nodes the pool's job holds beyond its segments, each with a launcher of each segment of its class, for the joiners that `cargo gdl join --in-job` starts there ([A joiner on a spare node](../guides/slurm.md#a-joiner-on-a-spare-node)) | `0` |
 | `[directory] backend` | where every pool's hub publishes its record: `dynamodb`, two DynamoDB tables, or `etcd`, one etcd that the deployment runs. Without the table, each child's hub reports to its parent's (`relay`) | no table |
 | `[directory] records_table`, `lists_table` | the DynamoDB tables' names: 3 to 255 letters, digits, `_`, `-`, and `.`. Refused with `etcd` | required with `dynamodb` |
 | `[directory] local` | the deployment runs one DynamoDB Local for the tables, which every hub uses. Compose requires it. Refused with `etcd`, which the deployment always runs | `false` |

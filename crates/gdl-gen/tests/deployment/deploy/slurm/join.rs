@@ -1,6 +1,6 @@
 //! `cargo gdl join` against the fake Slurm: a joining job's directives
-//! against the end `squeue` gives for its pool's job, and a joiner's step
-//! on a spare node, with the address it reads there.
+//! against the end `squeue` gives for its pool's job, and a joiner on a
+//! spare node of the pool's job, which the fake's real launcher starts.
 
 use super::*;
 
@@ -27,13 +27,6 @@ pub(super) fn join(
 pub(super) fn add_to_model_pool(site: &Site, line: &str) {
     let text = std::fs::read_to_string(&site.files.fleet).expect("the fleet");
     std::fs::write(&site.files.fleet, format!("{text}{line}\n")).expect("the fleet");
-}
-
-/// What `ip -4 -o addr show dev ib0` prints for one address.
-pub(super) fn ip(address: &str) -> String {
-    format!(
-        "4: ib0    inet {address}/16 brd 10.1.255.255 scope global ib0\\       valid_lft forever preferred_lft forever\n"
-    )
 }
 
 /// A joining job of `nodes` engines ends by the end `squeue` gives for its
@@ -174,284 +167,6 @@ fn join_refuses_what_it_cannot_join_before_it_submits() {
     assert_eq!(slurm.recipes.len(), submitted);
 }
 
-/// A joiner in the pool's job runs on its spare node, as a step named for
-/// its segment, listening on the address that node has on the site's
-/// interface, with the hub's address from the file the hub wrote. A
-/// second joiner finds no free spare node; once the first leaves, the
-/// node takes another.
-#[test]
-#[ignore = "in-job launches are refused until the in-job launcher lands"]
-fn a_joiner_in_the_pools_job_takes_a_free_spare_node() {
-    let mirror = Mirror::new();
-    let site = Site::new(&mirror, 1, "network_interface = \"ib0\"");
-    add_to_model_pool(&site, "slurm = { spare_nodes = 1 }");
-    let mut slurm = Fake::new(&site);
-    site.deploy(&mirror, &mut slurm, false).expect("deployed");
-    slurm.ips.insert("spare-1003-0".into(), ip("10.1.0.7"));
-    slurm.calls.borrow_mut().clear();
-    let joiner = join(
-        &site,
-        &mut slurm,
-        "model-x-01",
-        "engine",
-        gdl_gen::JoinBy::Step,
-    )
-    .expect("joined");
-    assert_eq!(joiner, gdl_gen::Joiner::Step("1003.4".into()));
-    let lines = slurm.lines();
-    assert!(
-        of(&lines, "srun").contains(
-            &"--jobid=1003 --overlap --nodes=1 --ntasks=1 --nodelist=spare-1003-0 --quiet ip -4 -o addr show dev ib0"
-                .split(' ')
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        ),
-        "{lines:?}"
-    );
-    let (started, log) = slurm.started.last().expect("a step").clone();
-    assert_eq!(
-        log,
-        site.fleet_dir.join("model-x-01/join.1003.spare-1003-0.log")
-    );
-    let args = &started.args;
-    for flag in [
-        "--jobid=1003",
-        "--overlap",
-        "--nodelist=spare-1003-0",
-        "--no-container-mount-home",
-        // The launch makes its step within the objects' wait, 5 s here, or
-        // gives up: what lets `down` call a launch abandoned.
-        "--immediate=5",
-    ] {
-        assert!(args.contains(&flag.to_string()), "{flag} in {args:?}");
-    }
-    // The step is named for its segment and its launch, which owns it.
-    let launch = args
-        .iter()
-        .find_map(|arg| arg.strip_prefix("--job-name=gdl-join-engine+"))
-        .expect("a step named for its launch");
-    assert!(
-        !launch.is_empty() && !launch.contains(['.', '+', '/']),
-        "{launch}"
-    );
-    let recipe: Value = serde_json::from_str(
-        &std::fs::read_to_string(site.fleet_dir.join("model-x-01/join-engine.yaml"))
-            .expect("the recipe"),
-    )
-    .expect("JSON");
-    let engine = &recipe["services"][1];
-    assert!(
-        args.contains(&format!(
-            "--container-image={}",
-            engine["container"].as_str().expect("an image")
-        )),
-        "{args:?}"
-    );
-    let script = args.last().expect("a script");
-    for part in [
-        "export GDL_LISTEN='10.1.0.7:0'",
-        "export GDL_HUB__HOST='node-1003'",
-        "export GDL_HUB__PUBLIC_PORT='1337'",
-        "export GDL_HUB__CONTROL_PORT='8337'",
-        "exec '/usr/local/bin/segment' '/gdl/engine.toml'",
-    ] {
-        assert!(script.contains(part), "{part} in {script}");
-    }
-    // Not the file a joining job's `resolve` writes, and no placeholder
-    // that only srt-slurm fills in.
-    assert!(!script.contains("gdl-hub.toml"), "{script}");
-    assert!(!script.contains("{node_ip}"), "{script}");
-    assert!(
-        script.contains(engine["preamble"].as_str().expect("a preamble")),
-        "{script}"
-    );
-    // The pool's variables name its region and tables, and no secret.
-    for word in [
-        "AWS_ACCESS",
-        "AWS_SECRET",
-        "AWS_SESSION",
-        "TOKEN",
-        "PASSWORD",
-        "--account",
-        "--partition",
-    ] {
-        assert!(
-            !script
-                .to_ascii_uppercase()
-                .contains(&word.to_ascii_uppercase()),
-            "{word} in {script}"
-        );
-    }
-    let others: Vec<Vec<String>> = lines
-        .iter()
-        .filter(|line| {
-            !line
-                .iter()
-                .any(|word| word.starts_with("--job-name=gdl-join-engine+"))
-        })
-        .cloned()
-        .collect();
-    no_credential(&others);
-
-    // The only spare node holds a joiner: a second is refused, and nothing
-    // starts.
-    let error = join(
-        &site,
-        &mut slurm,
-        "model-x-01",
-        "engine",
-        gdl_gen::JoinBy::Step,
-    )
-    .expect_err("no free node")
-    .to_string();
-    assert!(
-        error.contains("every spare node holds a joiner")
-            && error.contains("step 1003.4 on spare-1003-0"),
-        "{error}"
-    );
-    assert_eq!(slurm.started.len(), 1);
-
-    // Once it leaves, the node takes another.
-    let mut said = Vec::new();
-    gdl_gen::leave(
-        &site.files.fleet,
-        &joiner,
-        &slurm_waits(),
-        &mut slurm,
-        &mut |step| said.push(step.to_string()),
-    )
-    .expect("left");
-    assert!(
-        cancels(&slurm.lines()).contains(&vec!["--signal=TERM".to_string(), "1003.4".into()]),
-        "{:?}",
-        slurm.lines()
-    );
-    assert!(
-        said.iter()
-            .any(|step| step.contains("node spare-1003-0 is free")),
-        "{said:?}"
-    );
-    let again = join(
-        &site,
-        &mut slurm,
-        "model-x-01",
-        "engine",
-        gdl_gen::JoinBy::Step,
-    )
-    .expect("joined again");
-    assert_eq!(again, gdl_gen::Joiner::Step("1003.5".into()));
-    assert_eq!(slurm.started.len(), 2);
-}
-
-/// A spare node with no IPv4 address on the site's interface, or with
-/// several, gives a joiner no one address to advertise: refused in one
-/// line that names the node and the interface, before any step starts.
-#[test]
-#[ignore = "in-job launches are refused until the in-job launcher lands"]
-fn a_joiner_in_the_pools_job_needs_one_address_on_its_node() {
-    let mirror = Mirror::new();
-    let site = Site::new(&mirror, 1, "network_interface = \"ib0\"");
-    add_to_model_pool(&site, "slurm = { spare_nodes = 1 }");
-    let mut slurm = Fake::new(&site);
-    site.deploy(&mirror, &mut slurm, false).expect("deployed");
-    for (said, named) in [
-        (
-            String::new(),
-            "node spare-1003-0 has no IPv4 address on interface ib0",
-        ),
-        (
-            format!("{}{}", ip("10.1.0.7"), ip("10.2.0.7")),
-            "node spare-1003-0 has 2 IPv4 addresses on interface ib0, 10.1.0.7, 10.2.0.7",
-        ),
-    ] {
-        slurm.ips.insert("spare-1003-0".into(), said);
-        let error = join(
-            &site,
-            &mut slurm,
-            "model-x-01",
-            "engine",
-            gdl_gen::JoinBy::Step,
-        )
-        .expect_err("refused")
-        .to_string();
-        assert!(error.contains(named), "{named} in {error}");
-        assert_eq!(error.lines().count(), 1, "{error}");
-    }
-    assert!(slurm.started.is_empty());
-}
-
-/// A joiner in the pool's job needs the site's interface and a spare node
-/// in the pool: each is refused by name, before any command runs.
-#[test]
-#[ignore = "in-job launches are refused until the in-job launcher lands"]
-fn a_joiner_in_the_pools_job_needs_an_interface_and_a_spare_node() {
-    let mirror = Mirror::new();
-    let site = Site::new(&mirror, 1, "");
-    let mut slurm = Fake::new(&site);
-    site.deploy(&mirror, &mut slurm, false).expect("deployed");
-    let error = join(
-        &site,
-        &mut slurm,
-        "model-x-01",
-        "engine",
-        gdl_gen::JoinBy::Step,
-    )
-    .expect_err("no spare node")
-    .to_string();
-    assert!(error.contains("holds no spare node"), "{error}");
-    add_to_model_pool(&site, "slurm = { spare_nodes = 1 }");
-    let error = join(
-        &site,
-        &mut slurm,
-        "model-x-01",
-        "engine",
-        gdl_gen::JoinBy::Step,
-    )
-    .expect_err("no interface")
-    .to_string();
-    assert!(
-        error.contains("`[cluster.lab] network_interface`"),
-        "{error}"
-    );
-    assert!(slurm.started.is_empty());
-}
-
-/// A pool with no parent cannot drain, so `down` signals each of its
-/// instances: a joiner in its job too, which srt-slurm did not name.
-#[test]
-#[ignore = "in-job launches are refused until the in-job launcher lands"]
-fn down_signals_a_joiner_in_a_parentless_pools_job() {
-    let mirror = Mirror::new();
-    let site = Site::new(&mirror, 1, "network_interface = \"ib0\"");
-    let text = std::fs::read_to_string(&site.files.fleet).expect("the fleet");
-    let text = text.replace(
-        "[pool.global-us]\nclass = \"global\"\ncluster = \"lab\"\n",
-        "[pool.global-us]\nclass = \"global\"\ncluster = \"lab\"\nslurm = { spare_nodes = 1 }\n",
-    );
-    std::fs::write(&site.files.fleet, text).expect("the fleet");
-    let mut slurm = Fake::new(&site);
-    site.deploy(&mirror, &mut slurm, false).expect("deployed");
-    slurm.ips.insert("spare-1002-0".into(), ip("10.1.0.8"));
-    let joiner = join(
-        &site,
-        &mut slurm,
-        "global-us",
-        "front",
-        gdl_gen::JoinBy::Step,
-    )
-    .expect("joined");
-    slurm.calls.borrow_mut().clear();
-    site.down(&mut slurm).expect("down");
-    let signalled: Vec<Vec<String>> = cancels(&slurm.lines())
-        .into_iter()
-        .filter(|args| args[0] == "--signal=TERM")
-        .collect();
-    assert!(
-        signalled.contains(&vec!["--signal=TERM".to_string(), joiner.to_string()]),
-        "{signalled:?}"
-    );
-}
-
 /// A joining job's own time limit, its pool's, shorter than the
 /// `--time-min` it would be given, is refused before it is submitted:
 /// `sbatch` refuses a `--time-min` longer than `--time`.
@@ -479,13 +194,289 @@ fn a_joiner_whose_time_limit_is_shorter_than_its_least_run_is_refused() {
     assert_eq!(slurm.recipes.len(), submitted);
 }
 
-/// Two joins in a pool's job at once take turns: one that would choose a
-/// spare node while another has chosen one and not yet started its step
-/// waits for it, bounded, and is refused once the wait runs out, so that
-/// no node takes two joiners, and each caller is told its own step. It
-/// waits out the fake's 5 s bound, since both joins run on one thread.
+/// The model pool's job with `spare` spare nodes, deployed, its
+/// launchers up: job 1003, whose spare nodes are `spare-1003-<n>`.
+pub(super) fn spare_site(mirror: &Mirror, spare: u32) -> (Site, Fake) {
+    let site = Site::new(mirror, 1, "");
+    add_to_model_pool(&site, &format!("slurm = {{ spare_nodes = {spare} }}"));
+    let mut slurm = Fake::new(&site);
+    site.deploy(mirror, &mut slurm, false).expect("deployed");
+    slurm.launchers_up(1003);
+    (site, slurm)
+}
+
+/// The launch of joiner `joiner`, `<job>.<step>+<launch>`, after checking
+/// that its step is `step`.
+pub(super) fn launch_of<'a>(joiner: &'a gdl_gen::Joiner, step: &str) -> &'a str {
+    let gdl_gen::Joiner::Step(handle) = joiner else {
+        panic!("a joiner in the job: {joiner:?}");
+    };
+    let (at, launch) = handle.split_once('+').expect("a launch");
+    assert_eq!(at, step, "{handle}");
+    assert!(
+        !launch.is_empty() && !launch.contains(['.', '+', '/', ' ']),
+        "{launch}"
+    );
+    launch
+}
+
+/// Wait, a few seconds at most, until `done`.
+pub(super) fn until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(Instant::now() < deadline, "never: {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A joiner in the pool's job is the child of the launcher of its segment
+/// on a spare node: `join` records the request first, then asks the
+/// launcher through its `1.run` record, and prints the launcher's step and the launch. A
+/// second joiner finds no free spare node; once the first leaves, on one
+/// `TERM`, the node takes another, under the same step and a new launch.
 #[test]
-#[ignore = "in-job launches are refused until the in-job launcher lands"]
+fn a_joiner_in_the_pools_job_takes_a_free_spare_node() {
+    let mirror = Mirror::new();
+    let (site, mut slurm) = spare_site(&mirror, 1);
+    let dir = site.fleet_dir.join("model-x-01");
+    slurm.calls.borrow_mut().clear();
+    let mut said = Vec::new();
+    let joiner = gdl_gen::join(
+        &site.files.fleet,
+        "model-x-01",
+        "engine",
+        gdl_gen::JoinBy::Step,
+        &slurm_waits(),
+        &mut slurm,
+        &mut |line| said.push(line.to_string()),
+    )
+    .expect("joined");
+    // The spare node's placeholder is step 1003.3, and its launcher 1003.4.
+    let launch = launch_of(&joiner, "1003.4").to_string();
+    let log = dir.join(format!("join.1003.spare-1003-0.{launch}.log"));
+    assert!(
+        said.iter().any(|line| line
+            == &format!(
+                "join: step 1003.4+{launch} adds an instance of `engine` to pool `model-x-01` on node spare-1003-0, at 10.1.0.3; its output is in {}",
+                log.display()
+            )),
+        "{said:?}"
+    );
+    assert!(log.exists(), "the joiner writes its own log");
+    assert_eq!(
+        requests(&dir),
+        [format!(
+            "request 1003 spare-1003-0 engine 1003.4 1 {launch}"
+        )]
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("launch.1003/spare-1003-0/engine/1.run"))
+            .expect("its run"),
+        format!("{launch}\n")
+    );
+    let [first] = launchers::joiners(&dir)[..] else {
+        panic!("one joiner");
+    };
+    until("the joiner registers", || {
+        launchers::registered(&dir) == [first]
+    });
+    // No Slurm command starts it, and none names a credential.
+    let lines = slurm.lines();
+    assert!(of(&lines, "srun").is_empty(), "{lines:?}");
+    no_credential(&lines);
+
+    // The only spare node holds a joiner: a second is refused, and nothing
+    // starts.
+    let error = join(
+        &site,
+        &mut slurm,
+        "model-x-01",
+        "engine",
+        gdl_gen::JoinBy::Step,
+    )
+    .expect_err("no free node")
+    .to_string();
+    assert!(
+        error.contains("no spare node can take a joiner of `engine`")
+            && error.contains(&format!(
+                "node spare-1003-0 holds launch {launch} of `engine`"
+            )),
+        "{error}"
+    );
+    assert_eq!(launchers::joiners(&dir).len(), 1);
+
+    // Once it leaves, the node takes another.
+    let mut said = Vec::new();
+    gdl_gen::leave(
+        &site.files.fleet,
+        &joiner,
+        &slurm_waits(),
+        &mut slurm,
+        &mut |line| said.push(line.to_string()),
+    )
+    .expect("left");
+    assert!(
+        said.iter()
+            .any(|line| line.contains("node spare-1003-0 is free")),
+        "{said:?}"
+    );
+    assert_eq!(launchers::terms(&dir, first), 1);
+    assert!(!launchers::running(first));
+    assert_eq!(requests(&dir), Vec::<String>::new());
+    let again = join(
+        &site,
+        &mut slurm,
+        "model-x-01",
+        "engine",
+        gdl_gen::JoinBy::Step,
+    )
+    .expect("joined again");
+    assert_ne!(launch_of(&again, "1003.4"), launch);
+    assert_eq!(launchers::joiners(&dir).len(), 2);
+}
+
+/// A joiner advertises the address of its own node, which srt-slurm gives
+/// its launcher (`{node_ip}`), as it gives the pool's own instances: with
+/// two spare nodes, each joiner its own node's.
+#[test]
+fn a_joiner_in_the_pools_job_needs_one_address_on_its_node() {
+    let mirror = Mirror::new();
+    let (site, mut slurm) = spare_site(&mirror, 2);
+    let dir = site.fleet_dir.join("model-x-01");
+    let mut said = Vec::new();
+    for _ in 0..2 {
+        gdl_gen::join(
+            &site.files.fleet,
+            "model-x-01",
+            "engine",
+            gdl_gen::JoinBy::Step,
+            &slurm_waits(),
+            &mut slurm,
+            &mut |line| said.push(line.to_string()),
+        )
+        .expect("joined");
+    }
+    assert!(
+        said[0].contains("on node spare-1003-0, at 10.1.0.3;"),
+        "{said:?}"
+    );
+    assert!(
+        said[1].contains("on node spare-1003-1, at 10.1.1.3;"),
+        "{said:?}"
+    );
+    let pids = launchers::joiners(&dir);
+    assert_eq!(pids.len(), 2);
+    until("each joiner starts", || {
+        pids.iter()
+            .all(|pid| !launchers::listen(&dir, *pid).is_empty())
+    });
+    let mut listens: Vec<String> = pids
+        .into_iter()
+        .map(|pid| launchers::listen(&dir, pid))
+        .collect();
+    listens.sort();
+    assert_eq!(listens, ["10.1.0.3:0", "10.1.1.3:0"]);
+}
+
+/// A joiner in the pool's job needs a spare node in the pool, refused by
+/// name before any command runs; it no longer needs the site's
+/// `network_interface`, since srt-slurm gives the launcher its address.
+#[test]
+fn a_joiner_in_the_pools_job_needs_a_spare_node_and_no_interface() {
+    let mirror = Mirror::new();
+    let site = Site::new(&mirror, 1, "");
+    let mut slurm = Fake::new(&site);
+    site.deploy(&mirror, &mut slurm, false).expect("deployed");
+    slurm.calls.borrow_mut().clear();
+    let error = join(
+        &site,
+        &mut slurm,
+        "model-x-01",
+        "engine",
+        gdl_gen::JoinBy::Step,
+    )
+    .expect_err("no spare node")
+    .to_string();
+    assert!(error.contains("holds no spare node"), "{error}");
+    assert_eq!(slurm.lines(), Vec::<Vec<String>>::new());
+    let (site, mut slurm) = spare_site(&mirror, 1);
+    join(
+        &site,
+        &mut slurm,
+        "model-x-01",
+        "engine",
+        gdl_gen::JoinBy::Step,
+    )
+    .expect("a site with no `network_interface` takes a joiner");
+}
+
+/// A pool with no parent cannot drain, so `down` signals each of its
+/// instances. A joiner in its job gets one `TERM` through its launcher's
+/// mailbox, never through the launcher's step, and has ended before the
+/// pool's job is cancelled.
+#[test]
+fn down_signals_a_joiner_in_a_parentless_pools_job() {
+    let mirror = Mirror::new();
+    let site = Site::new(&mirror, 1, "");
+    let text = std::fs::read_to_string(&site.files.fleet).expect("the fleet");
+    let text = text.replace(
+        "[pool.global-us]\nclass = \"global\"\ncluster = \"lab\"\n",
+        "[pool.global-us]\nclass = \"global\"\ncluster = \"lab\"\nslurm = { spare_nodes = 1 }\n",
+    );
+    std::fs::write(&site.files.fleet, text).expect("the fleet");
+    let mut slurm = Fake::new(&site);
+    site.deploy(&mirror, &mut slurm, false).expect("deployed");
+    slurm.launchers_up(1002);
+    let dir = site.fleet_dir.join("global-us");
+    std::fs::write(
+        dir.join("front.toml"),
+        "[system]\nport = 9090\n[runtime]\ndrain_ms = 0\n",
+    )
+    .expect("the shortest stop grace");
+    let joiner = join(
+        &site,
+        &mut slurm,
+        "global-us",
+        "front",
+        gdl_gen::JoinBy::Step,
+    )
+    .expect("joined");
+    let launch = launch_of(&joiner, "1002.4").to_string();
+    let [pid] = launchers::joiners(&dir)[..] else {
+        panic!("one joiner");
+    };
+    slurm.calls.borrow_mut().clear();
+    site.down(&mut slurm).expect("down");
+    let signalled: Vec<Vec<String>> = cancels(&slurm.lines())
+        .into_iter()
+        .filter(|args| args[0] == "--signal=TERM")
+        .collect();
+    assert!(
+        signalled.contains(&vec!["--signal=TERM".to_string(), "1002.1".into()]),
+        "the pool's own instance: {signalled:?}"
+    );
+    assert!(
+        !signalled.iter().flatten().any(|target| target == "1002.4"),
+        "no signal to the launcher's step: {signalled:?}"
+    );
+    let records = launchers::records(&dir, 1002, "spare-1002-0", "front");
+    for record in ["1.run", "1.stop"] {
+        assert_eq!(
+            std::fs::read_to_string(records.join(record)).expect("its record"),
+            format!("{launch}\n"),
+            "{record}"
+        );
+    }
+    assert_eq!(launchers::terms(&dir, pid), 1);
+    assert_eq!(slurm.killed, Vec::<(i32, bool, usize)>::new());
+}
+
+/// Two joins in a pool's job at once take turns under the pool's registry
+/// lock: one that would choose a spare node while another holds the lock
+/// waits for it, bounded, and is refused once the wait runs out, so that
+/// no node takes two joiners. It waits out the fake's 5 s bound, since
+/// both joins run on one thread.
+#[test]
 fn concurrent_joins_do_not_claim_the_same_spare_node() {
     struct Interleaved<'a> {
         site: &'a Site,
@@ -498,11 +489,11 @@ fn concurrent_joins_do_not_claim_the_same_spare_node() {
             &mut self,
             command: &gdl_gen::SlurmCommand,
         ) -> Result<gdl_gen::Reply, gdl_gen::Error> {
-            if command.program == "srun"
-                && command.args.iter().any(|arg| arg == "ip")
+            if command.program == "squeue"
+                && command.args.iter().any(|arg| arg == "--steps")
                 && self.competing.is_none()
             {
-                // The first caller chose a node, but has not started its step.
+                // The first caller holds the lock, and has not chosen yet.
                 self.competing = Some(
                     join(
                         self.site,
@@ -516,22 +507,10 @@ fn concurrent_joins_do_not_claim_the_same_spare_node() {
             }
             gdl_gen::Slurm::run(self.fake, command)
         }
-
-        fn start(
-            &mut self,
-            command: &gdl_gen::SlurmCommand,
-            log: &Path,
-        ) -> Result<Box<dyn gdl_gen::Launched>, gdl_gen::Error> {
-            gdl_gen::Slurm::start(self.fake, command, log)
-        }
     }
 
     let mirror = Mirror::new();
-    let site = Site::new(&mirror, 1, "network_interface = \"ib0\"");
-    add_to_model_pool(&site, "slurm = { spare_nodes = 1 }");
-    let mut fake = Fake::new(&site);
-    site.deploy(&mirror, &mut fake, false).expect("deployed");
-    fake.ips.insert("spare-1003-0".into(), ip("10.1.0.7"));
+    let (site, mut fake) = spare_site(&mirror, 1);
     let mut slurm = Interleaved {
         site: &site,
         fake: &mut fake,
@@ -545,41 +524,37 @@ fn concurrent_joins_do_not_claim_the_same_spare_node() {
         &slurm_waits(),
         &mut slurm,
         &mut |_| {},
-    );
-    let competing = slurm.competing.clone();
-    assert_eq!(
-        slurm.fake.started.len(),
-        1,
-        "one spare node admits one joiner; first={first:?}, competing={competing:?}, steps={:?}",
-        slurm.fake.job(1003).steps
-    );
-    assert_eq!(
-        first.map_err(|error| error.to_string()),
-        Ok(gdl_gen::Joiner::Step("1003.4".into()))
-    );
-    let refused = competing.expect("a competing join").expect_err("it waited");
+    )
+    .expect("the first join");
+    launch_of(&first, "1003.4");
+    let refused = slurm
+        .competing
+        .clone()
+        .expect("a competing join")
+        .expect_err("it waited");
     assert!(
         refused.contains("another `cargo gdl` of pool `model-x-01` still holds"),
         "{refused}"
     );
+    assert_eq!(
+        launchers::joiners(&site.fleet_dir.join("model-x-01")).len(),
+        1,
+        "one spare node admits one joiner"
+    );
 }
 
-/// A launch whose step was never seen holds its spare node through its
-/// line in the pool's registry, and a join names it; a joiner seen on the
-/// node clears it, and so does its leave.
+/// A request whose launcher has not started it yet, from a `join` that
+/// ended before it saw the start, holds its node through its line in the
+/// pool's registry, and a join names it; once the launcher starts it, its
+/// joiner holds the node, until it leaves.
 #[test]
-#[ignore = "in-job launches are refused until the in-job launcher lands"]
 fn a_launch_not_seen_holds_its_node_until_a_joiner_is_seen_or_leaves() {
     let mirror = Mirror::new();
-    let site = Site::new(&mirror, 1, "network_interface = \"ib0\"");
-    add_to_model_pool(&site, "slurm = { spare_nodes = 1 }");
-    let mut slurm = Fake::new(&site);
-    site.deploy(&mirror, &mut slurm, false).expect("deployed");
-    slurm.ips.insert("spare-1003-0".into(), ip("10.1.0.7"));
+    let (site, mut slurm) = spare_site(&mirror, 1);
     let dir = site.fleet_dir.join("model-x-01");
-    let registry = dir.join("join.reservations");
-    let hold = "1003 spare-1003-0 l1 /a/log\n";
-    std::fs::write(&registry, hold).expect("a launch's hold");
+    // A node too slow to read its records, and a join that posted and died.
+    slurm.signal_launchers(1003, rustix::process::Signal::STOP);
+    launchers::seed(&dir, 1003, "spare-1003-0", "engine", "1003.4", "l1", true);
     let error = join(
         &site,
         &mut slurm,
@@ -590,17 +565,15 @@ fn a_launch_not_seen_holds_its_node_until_a_joiner_is_seen_or_leaves() {
     .expect_err("held")
     .to_string();
     assert!(
-        error.contains(&format!(
-            "a launch on spare-1003-0 not yet seen (l1, in {})",
-            registry.display()
-        )),
+        error.contains("node spare-1003-0 holds launch l1 of `engine`"),
         "{error}"
     );
-    assert!(slurm.started.is_empty());
+    assert!(launchers::joiners(&dir).is_empty());
 
-    // The launch's step shows after all: the next join clears its hold,
-    // and finds the node held by that joiner.
-    let step = slurm.add_step(1003, "gdl-join-engine+l1", "spare-1003-0");
+    // The launcher reads it after all, and starts it: its joiner holds
+    // the node.
+    slurm.signal_launchers(1003, rustix::process::Signal::CONT);
+    until("l1 starts", || launchers::joiners(&dir).len() == 1);
     let error = join(
         &site,
         &mut slurm,
@@ -610,23 +583,18 @@ fn a_launch_not_seen_holds_its_node_until_a_joiner_is_seen_or_leaves() {
     )
     .expect_err("held by the joiner")
     .to_string();
-    assert!(
-        error.contains(&format!("step {step} on spare-1003-0")),
-        "{error}"
-    );
-    assert!(holds(&dir).is_empty());
+    assert!(error.contains("holds launch l1"), "{error}");
 
-    // A leave clears a hold left for its launch too.
-    std::fs::write(&registry, hold).expect("a launch's hold");
+    // Its leave frees the node.
     gdl_gen::leave(
         &site.files.fleet,
-        &gdl_gen::Joiner::Step(step),
+        &gdl_gen::Joiner::Step("1003.4+l1".into()),
         &slurm_waits(),
         &mut slurm,
         &mut |_| {},
     )
     .expect("left");
-    assert!(holds(&dir).is_empty());
+    assert_eq!(requests(&dir), Vec::<String>::new());
     join(
         &site,
         &mut slurm,
@@ -637,121 +605,350 @@ fn a_launch_not_seen_holds_its_node_until_a_joiner_is_seen_or_leaves() {
     .expect("the node is free");
 }
 
-/// A leave clears only the hold of its own step's launch: another launch
-/// that holds a node keeps its hold.
+/// A leave removes only its own launch's request: another joiner, on
+/// another spare node, keeps its own.
 #[test]
 fn a_leave_clears_only_its_own_launchs_hold() {
     let mirror = Mirror::new();
-    let site = Site::new(&mirror, 1, "network_interface = \"ib0\"");
-    add_to_model_pool(&site, "slurm = { spare_nodes = 2 }");
-    let mut slurm = Fake::new(&site);
-    site.deploy(&mirror, &mut slurm, false).expect("deployed");
-    let step = slurm.add_step(1003, "gdl-join-engine+l1", "spare-1003-0");
+    let (site, mut slurm) = spare_site(&mirror, 2);
     let dir = site.fleet_dir.join("model-x-01");
-    std::fs::write(
-        dir.join("join.reservations"),
-        "1003 spare-1003-0 l1 /a/log\n1003 spare-1003-1 l2 /a/log\n",
+    let first = join(
+        &site,
+        &mut slurm,
+        "model-x-01",
+        "engine",
+        gdl_gen::JoinBy::Step,
     )
-    .expect("two holds");
+    .expect("joined");
+    let second = join(
+        &site,
+        &mut slurm,
+        "model-x-01",
+        "engine",
+        gdl_gen::JoinBy::Step,
+    )
+    .expect("joined");
+    let kept = launch_of(&second, "1003.6").to_string();
+    launch_of(&first, "1003.5");
     gdl_gen::leave(
         &site.files.fleet,
-        &gdl_gen::Joiner::Step(step),
+        &first,
         &slurm_waits(),
         &mut slurm,
         &mut |_| {},
     )
     .expect("left");
-    assert_eq!(holds(&dir), ["1003 spare-1003-1 l2 /a/log"]);
+    assert_eq!(
+        requests(&dir),
+        [format!("request 1003 spare-1003-1 engine 1003.6 1 {kept}")]
+    );
 }
 
-/// A launch whose `srun` gives up at `--immediate`, on a node too busy to
-/// take its step, exits without one: the join fails with what `srun`
-/// said, removes its hold, and the node takes the next join.
+/// A request the launcher drops, one withdrawn before it read it, leaves
+/// no hold: the join that withdrew it says so, the node stays held until
+/// the launcher reports, and then takes the next join.
 #[test]
-#[ignore = "in-job launches are refused until the in-job launcher lands"]
 fn a_launch_that_gives_up_at_its_immediate_bound_leaves_no_hold() {
-    struct Busy<'a> {
+    let mirror = Mirror::new();
+    let (site, mut slurm) = spare_site(&mirror, 1);
+    let dir = site.fleet_dir.join("model-x-01");
+    let waits = gdl_gen::Waits {
+        objects: Duration::from_millis(300),
+        ..slurm_waits()
+    };
+    slurm.signal_launchers(1003, rustix::process::Signal::STOP);
+    let error = gdl_gen::join(
+        &site.files.fleet,
+        "model-x-01",
+        "engine",
+        gdl_gen::JoinBy::Step,
+        &waits,
+        &mut slurm,
+        &mut |_| {},
+    )
+    .expect_err("not started in time")
+    .to_string();
+    assert!(
+        error.contains("so it is withdrawn") && error.contains("stays held"),
+        "{error}"
+    );
+    assert_eq!(requests(&dir).len(), 1);
+    let records = launchers::records(&dir, 1003, "spare-1003-0", "engine");
+    let launch = std::fs::read_to_string(records.join("1.run"))
+        .expect("its run")
+        .trim()
+        .to_string();
+    assert_eq!(
+        std::fs::read_to_string(records.join("1.stop")).expect("its stop"),
+        format!("{launch}\n")
+    );
+    slurm.signal_launchers(1003, rustix::process::Signal::CONT);
+    until("the launcher drops it", || {
+        std::fs::read_to_string(records.join("1.done")).is_ok_and(|text| text == "dropped\n")
+    });
+    join(
+        &site,
+        &mut slurm,
+        "model-x-01",
+        "engine",
+        gdl_gen::JoinBy::Step,
+    )
+    .expect("the node takes the next join");
+    assert!(
+        !requests(&dir).iter().any(|line| line.contains(&launch)),
+        "{:?}",
+        requests(&dir)
+    );
+    assert_eq!(
+        launchers::joiners(&dir).len(),
+        1,
+        "the dropped launch never started"
+    );
+}
+
+/// Each launcher's step asks for what the pool's own instance of its
+/// segment asks for: the fake builds it from the recipe as srt-slurm does,
+/// and checks each field that shapes the `srun` of a service.
+#[test]
+fn a_joiners_step_carries_its_segments_request() {
+    let mirror = Mirror::new();
+    let (site, slurm) = spare_site(&mirror, 2);
+    let recipe = slurm
+        .recipes
+        .iter()
+        .find(|recipe| recipe["name"] == "gdl-api-model-x-01")
+        .expect("the pool's recipe");
+    let services = recipe["services"].as_array().expect("services");
+    let engine = services
+        .iter()
+        .find(|service| service["name"] == "engine")
+        .expect("the engine");
+    let launcher = services
+        .iter()
+        .find(|service| service["name"] == "launch_engine")
+        .expect("its launcher");
+    for same in [
+        "container",
+        "env",
+        "preamble",
+        "cpus_per_task",
+        "cpu_bind",
+        "srun_options",
+    ] {
+        assert_eq!(launcher.get(same), engine.get(same), "{same}");
+    }
+    assert_eq!(launcher["placement"]["pool"], "spare");
+    drop(site);
+}
+
+/// The fleet's spare count may change while a pool's job runs with the
+/// old one: a request is tied to its launcher's step, not to names read
+/// with the fleet's count, so a later join keeps it, and takes the job's
+/// other spare node.
+#[test]
+fn a_changed_spare_count_does_not_forget_a_running_joiner() {
+    let mirror = Mirror::new();
+    let (site, mut slurm) = spare_site(&mirror, 2);
+    let dir = site.fleet_dir.join("model-x-01");
+    let first = join(
+        &site,
+        &mut slurm,
+        "model-x-01",
+        "engine",
+        gdl_gen::JoinBy::Step,
+    )
+    .expect("joined");
+    let first = launch_of(&first, "1003.5").to_string();
+    let fleet = std::fs::read_to_string(&site.files.fleet).expect("the fleet");
+    std::fs::write(
+        &site.files.fleet,
+        fleet.replace("spare_nodes = 2", "spare_nodes = 1"),
+    )
+    .expect("one spare node");
+    let second = join(
+        &site,
+        &mut slurm,
+        "model-x-01",
+        "engine",
+        gdl_gen::JoinBy::Step,
+    )
+    .expect("the job's other spare node takes a joiner");
+    launch_of(&second, "1003.6");
+    assert!(
+        requests(&dir).iter().any(|line| line.contains(&first)),
+        "{:?}",
+        requests(&dir)
+    );
+}
+
+/// A `--replace` after the fleet's spare count changed still waits for
+/// each joiner of the old job to end before it cancels the job.
+#[test]
+fn a_replace_with_fewer_spare_nodes_waits_for_the_old_jobs_joiners() {
+    struct Slow<'a> {
         fake: &'a mut Fake,
-        busy: bool,
+        resumed: bool,
     }
 
-    struct Exited;
-
-    impl gdl_gen::Launched for Exited {
-        fn exited(&mut self) -> bool {
-            true
-        }
-    }
-
-    impl gdl_gen::Slurm for Busy<'_> {
+    impl gdl_gen::Slurm for Slow<'_> {
         fn run(
             &mut self,
             command: &gdl_gen::SlurmCommand,
         ) -> Result<gdl_gen::Reply, gdl_gen::Error> {
-            gdl_gen::Slurm::run(self.fake, command)
-        }
-
-        fn start(
-            &mut self,
-            command: &gdl_gen::SlurmCommand,
-            log: &Path,
-        ) -> Result<Box<dyn gdl_gen::Launched>, gdl_gen::Error> {
-            if !self.busy {
-                return gdl_gen::Slurm::start(self.fake, command, log);
+            let reply = gdl_gen::Slurm::run(self.fake, command)?;
+            // The launcher reads its mailbox once the stop waits on it.
+            if !self.resumed
+                && command.program == "squeue"
+                && command.args.iter().any(|arg| arg == "--format=%i|%j|%N")
+                && std::fs::read_to_string(
+                    self.fake
+                        .job(1003)
+                        .dir
+                        .clone()
+                        .expect("a pool")
+                        .join("join.requests"),
+                )
+                .is_ok_and(|text| text.contains("stopping 1003"))
+            {
+                self.resumed = true;
+                self.fake
+                    .signal_launchers(1003, rustix::process::Signal::CONT);
             }
-            std::fs::write(
-                log,
-                "srun: error: Unable to create step for job 1003: Requested nodes are busy\n",
-            )
-            .expect("the log");
-            Ok(Box::new(Exited))
+            Ok(reply)
         }
     }
 
     let mirror = Mirror::new();
-    let site = Site::new(&mirror, 1, "network_interface = \"ib0\"");
-    add_to_model_pool(&site, "slurm = { spare_nodes = 1 }");
-    let mut fake = Fake::new(&site);
-    site.deploy(&mirror, &mut fake, false).expect("deployed");
-    fake.ips.insert("spare-1003-0".into(), ip("10.1.0.7"));
-    let mut slurm = Busy {
+    let (site, mut fake) = spare_site(&mirror, 2);
+    join(
+        &site,
+        &mut fake,
+        "model-x-01",
+        "engine",
+        gdl_gen::JoinBy::Step,
+    )
+    .expect("joined");
+    fake.signal_launchers(1003, rustix::process::Signal::STOP);
+    let fleet = std::fs::read_to_string(&site.files.fleet).expect("the fleet");
+    std::fs::write(
+        &site.files.fleet,
+        fleet.replace("spare_nodes = 2", "spare_nodes = 1"),
+    )
+    .expect("one spare node");
+    let how = gdl_gen::Deploy {
+        spec: site.files.spec.clone(),
+        fleet: site.files.fleet.clone(),
+        target: mirror.target(),
+        out: None,
+        waits: slurm_waits(),
+        sources: gdl_gen::Sources::Fetched,
+        allow_pool_restart: false,
+        images: Some(site.images.clone()),
+        replace: true,
+    };
+    let log = Log::default();
+    let mut slow = Slow {
         fake: &mut fake,
-        busy: true,
+        resumed: false,
     };
-    let join_with = |slurm: &mut Busy<'_>| {
-        gdl_gen::join(
-            &site.files.fleet,
-            "model-x-01",
-            "engine",
-            gdl_gen::JoinBy::Step,
-            &slurm_waits(),
-            slurm,
-            &mut |_| {},
-        )
-    };
-    let error = join_with(&mut slurm).expect_err("busy").to_string();
-    for said in [
-        "exited without making step `gdl-join-engine+",
-        "Requested nodes are busy",
-        "node spare-1003-0 is free again",
-    ] {
-        assert!(error.contains(said), "{said} in {error}");
-    }
-    assert!(holds(&site.fleet_dir.join("model-x-01")).is_empty());
-    slurm.busy = false;
-    join_with(&mut slurm).expect("the node takes the next join");
+    let result = gdl_gen::deploy(
+        &how,
+        &mut Docker {
+            log: Rc::clone(&log),
+            fail: false,
+        },
+        &mut Kube::new(&log),
+        &mut slow,
+        &mut |_| {},
+    );
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(fake.killed, Vec::<(i32, bool, usize)>::new());
 }
 
-/// `join --in-job` is refused before it runs any Slurm command, in one line
-/// that says a join by a job of its own works.
+/// A join that read its pool's job before a `--replace` submitted another,
+/// and took the registry's lock after another join of the new job, keeps
+/// that join's request: it forgets only what a job that Slurm no longer
+/// lists asked for, and fails since its own job is gone.
 #[test]
-fn a_join_in_the_pools_job_is_refused_before_any_slurm_command() {
+fn a_stale_join_keeps_another_jobs_requests() {
+    struct Replaced<'a> {
+        site: &'a Site,
+        mirror: &'a Mirror,
+        fake: &'a mut Fake,
+        replacement: Option<gdl_gen::Joiner>,
+    }
+
+    impl gdl_gen::Slurm for Replaced<'_> {
+        fn run(
+            &mut self,
+            command: &gdl_gen::SlurmCommand,
+        ) -> Result<gdl_gen::Reply, gdl_gen::Error> {
+            let reply = gdl_gen::Slurm::run(self.fake, command)?;
+            if self.replacement.is_none()
+                && command.program == "squeue"
+                && command.args.iter().any(|arg| arg == "--me")
+            {
+                self.site.change(2);
+                self.site
+                    .deploy(self.mirror, self.fake, true)
+                    .expect("replaced");
+                self.fake.launchers_up(1004);
+                self.replacement = Some(
+                    join(
+                        self.site,
+                        self.fake,
+                        "model-x-01",
+                        "engine",
+                        gdl_gen::JoinBy::Step,
+                    )
+                    .expect("the new job takes a joiner"),
+                );
+            }
+            Ok(reply)
+        }
+    }
+
     let mirror = Mirror::new();
-    let site = Site::new(&mirror, 1, "network_interface = \"ib0\"");
-    add_to_model_pool(&site, "slurm = { spare_nodes = 1 }");
-    let mut slurm = Fake::new(&site);
-    site.deploy(&mirror, &mut slurm, false).expect("deployed");
-    slurm.calls.borrow_mut().clear();
+    let (site, mut fake) = spare_site(&mirror, 1);
+    let mut slurm = Replaced {
+        site: &site,
+        mirror: &mirror,
+        fake: &mut fake,
+        replacement: None,
+    };
+    let stale = gdl_gen::join(
+        &site.files.fleet,
+        "model-x-01",
+        "engine",
+        gdl_gen::JoinBy::Step,
+        &slurm_waits(),
+        &mut slurm,
+        &mut |_| {},
+    );
+    let replacement = slurm.replacement.take().expect("another join ran");
+    let launch = launch_of(&replacement, "1004.4").to_string();
+    assert!(stale.is_err(), "its job is gone: {stale:?}");
+    let dir = site.fleet_dir.join("model-x-01");
+    assert!(
+        requests(&dir).iter().any(|line| line.contains(&launch)),
+        "{:?}",
+        requests(&dir)
+    );
+}
+
+/// A request whose `run` record may have reached the launcher is kept when
+/// the write fails: here the launcher's directory takes no new file. The
+/// join fails, withdraws the launch as best it can, and the node stays
+/// held.
+#[test]
+fn a_failed_post_keeps_its_request() {
+    let mirror = Mirror::new();
+    let (site, mut slurm) = spare_site(&mirror, 1);
+    let dir = site.fleet_dir.join("model-x-01");
+    use std::os::unix::fs::PermissionsExt as _;
+    let records = launchers::records(&dir, 1003, "spare-1003-0", "engine");
+    std::fs::set_permissions(&records, std::fs::Permissions::from_mode(0o555))
+        .expect("a directory that takes no new file");
     let error = join(
         &site,
         &mut slurm,
@@ -759,14 +956,122 @@ fn a_join_in_the_pools_job_is_refused_before_any_slurm_command() {
         "engine",
         gdl_gen::JoinBy::Step,
     )
-    .expect_err("refused")
+    .expect_err("the post failed")
     .to_string();
-    assert!(
-        error.contains("`cargo gdl join --in-job` is not available yet")
-            && error.contains("without `--in-job`"),
-        "{error}"
+    assert!(error.contains("stays held"), "{error}");
+    assert_eq!(requests(&dir).len(), 1, "{:?}", requests(&dir));
+    std::fs::set_permissions(&records, std::fs::Permissions::from_mode(0o755))
+        .expect("writable again");
+}
+
+/// A `run` record that another launch wrote first is not this join's: the
+/// join fails, withdraws its request, and keeps it, so that its node stays
+/// held until the launcher says how the request ended. It never reports
+/// another launch's joiner as its own.
+#[test]
+fn a_run_that_another_launch_wrote_first_keeps_its_request() {
+    let mirror = Mirror::new();
+    let (site, mut slurm) = spare_site(&mirror, 1);
+    let dir = site.fleet_dir.join("model-x-01");
+    let records = launchers::records(&dir, 1003, "spare-1003-0", "engine");
+    std::fs::write(
+        records.join("1.run"),
+        "another
+",
+    )
+    .expect("another launch's run");
+    let error = join(
+        &site,
+        &mut slurm,
+        "model-x-01",
+        "engine",
+        gdl_gen::JoinBy::Step,
+    )
+    .expect_err("the run is another launch's")
+    .to_string();
+    assert!(error.contains("stays held"), "{error}");
+    assert_eq!(requests(&dir).len(), 1, "{:?}", requests(&dir));
+    let launch = requests(&dir)[0]
+        .split_whitespace()
+        .last()
+        .expect("a launch")
+        .to_string();
+    assert_eq!(
+        std::fs::read_to_string(records.join("1.run")).expect("the run"),
+        "another
+"
     );
-    assert_eq!(error.lines().count(), 1, "{error}");
-    assert_eq!(slurm.lines(), Vec::<Vec<String>>::new());
-    assert!(slurm.started.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(records.join("1.stop")).expect("withdrawn"),
+        format!(
+            "{launch}
+"
+        )
+    );
+}
+
+/// A `down` run with a fleet that no longer gives a pool spare nodes still
+/// closes its running job to joiners: the job may run launchers, and a
+/// login node with the fleet that submitted it may join meanwhile.
+#[test]
+fn down_closes_a_jobs_launchers_whatever_the_fleet_says_now() {
+    struct AtCancel<'a> {
+        fake: &'a mut Fake,
+        fleet: PathBuf,
+        refused: Option<String>,
+    }
+
+    impl gdl_gen::Slurm for AtCancel<'_> {
+        fn run(
+            &mut self,
+            command: &gdl_gen::SlurmCommand,
+        ) -> Result<gdl_gen::Reply, gdl_gen::Error> {
+            if self.refused.is_none() && command.program == "scancel" && command.args == ["1003"] {
+                // Another login node, with the fleet that submitted the job.
+                self.refused = Some(
+                    gdl_gen::join(
+                        &self.fleet,
+                        "model-x-01",
+                        "engine",
+                        gdl_gen::JoinBy::Step,
+                        &slurm_waits(),
+                        self.fake,
+                        &mut |_| {},
+                    )
+                    .expect_err("the job is stopping")
+                    .to_string(),
+                );
+            }
+            gdl_gen::Slurm::run(self.fake, command)
+        }
+    }
+
+    let mirror = Mirror::new();
+    let (site, mut fake) = spare_site(&mirror, 1);
+    let dir = site.fleet_dir.join("model-x-01");
+    assert!(!dir.join("join.requests").exists());
+    let fleet = std::fs::read_to_string(&site.files.fleet).expect("the fleet");
+    let other = site.files.fleet.with_file_name("submitted.toml");
+    std::fs::write(&other, &fleet).expect("the other login node's fleet");
+    std::fs::write(
+        &site.files.fleet,
+        fleet.replace("spare_nodes = 1", "spare_nodes = 0"),
+    )
+    .expect("this login node's fleet");
+    let mut slurm = AtCancel {
+        fake: &mut fake,
+        fleet: other,
+        refused: None,
+    };
+    let result = gdl_gen::down(
+        &site.files.fleet,
+        &slurm_waits(),
+        &mut Kube::new(&Log::default()),
+        &mut slurm,
+        &mut |_| {},
+    );
+    assert!(result.is_ok(), "{result:?}");
+    let refused = slurm.refused.take().expect("the other join ran");
+    assert!(refused.contains("is being stopped"), "{refused}");
+    assert_eq!(fake.killed, Vec::<(i32, bool, usize)>::new());
 }

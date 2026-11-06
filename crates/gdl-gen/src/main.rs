@@ -16,7 +16,7 @@
 //! cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--local] [--allow-pool-restart] [--images <images.json>] [--replace] [--target-dir <dir>]
 //! cargo gdl down --fleet <fleet.toml> [--spec <gdl.toml>] [--target-dir <dir>]
 //! cargo gdl join --fleet <fleet.toml> --pool <pool> --segment <segment> [--nodes <n> | --in-job]
-//! cargo gdl leave --fleet <fleet.toml> (--job <id> | --step <job>.<step>)
+//! cargo gdl leave --fleet <fleet.toml> (--job <id> | --step <job>.<step>+<launch>)
 //! cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]
 //! ```
 //!
@@ -102,9 +102,10 @@
 //! each pool's job children first, after a drain, and the directory's job
 //! last. `join` adds instances of a segment to a running pool on Slurm, from
 //! the recipes `deploy` wrote: by a job of `--nodes` nodes (1 by default),
-//! submitted to end by the pool's job's end, whose id it prints. `--in-job`,
-//! a step on a spare node of the pool's job, is not available yet, and is
-//! refused before any Slurm command runs. `leave` removes one with a single `SIGTERM` and waits until it
+//! submitted to end by the pool's job's end, whose id it prints; or, with
+//! `--in-job`, one instance that the launcher of the segment on a spare
+//! node of the pool's job starts, which it prints as
+//! `<job>.<step>+<launch>`. `leave` removes one with a single `SIGTERM` and waits until it
 //! has ended, or cancels a joining job that still waits in the queue.
 //! `export` writes the generated crates as a `.tar.gz` with
 //! `build-all.sh`, to build each segment on its own. Programs are built in `--target-dir`, else `$CARGO_TARGET_DIR`,
@@ -130,7 +131,7 @@ const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <d
        cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--local] [--allow-pool-restart] [--images <images.json>] [--replace] [--target-dir <dir>]
        cargo gdl down --fleet <fleet.toml> [--spec <gdl.toml>] [--target-dir <dir>]
        cargo gdl join --fleet <fleet.toml> --pool <pool> --segment <segment> [--nodes <n> | --in-job]
-       cargo gdl leave --fleet <fleet.toml> (--job <id> | --step <job>.<step>)
+       cargo gdl leave --fleet <fleet.toml> (--job <id> | --step <job>.<step>+<launch>)
        cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]";
 
 enum Command {
@@ -358,7 +359,7 @@ fn args() -> Result<Args, String> {
             let by = match (nodes.take(), std::mem::take(&mut in_job)) {
                 (Some(_), true) => {
                     return Err(format!(
-                        "join: --nodes adds a job of its own, and --in-job one step in the pool's job: give one\n{USAGE}"
+                        "join: --nodes adds a job of its own, and --in-job one instance in the pool's job: give one\n{USAGE}"
                     ));
                 }
                 (None, true) => gdl_gen::JoinBy::Step,
@@ -383,7 +384,7 @@ fn args() -> Result<Args, String> {
                 (None, Some(step)) => gdl_gen::Joiner::Step(step),
                 _ => {
                     return Err(format!(
-                        "leave: give --job <id> for a joining job, or --step <job>.<step> for a joiner in a pool's job\n{USAGE}"
+                        "leave: give --job <id> for a joining job, or --step <job>.<step>+<launch> for a joiner in a pool's job\n{USAGE}"
                     ));
                 }
             },

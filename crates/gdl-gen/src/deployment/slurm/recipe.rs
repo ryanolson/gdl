@@ -13,6 +13,7 @@ use gdl_model::{
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 
+use super::launcher::{self, LAUNCH, SPARE};
 use crate::deployment::etcd;
 use crate::deployment::k8s::{Named, Naming, Prepared, SYSTEM_HOST, image, is_system, parse_port};
 use crate::deployment::pools::{self, DYNAMODB_LOCAL};
@@ -45,7 +46,6 @@ const LOCAL_PORT: u16 = 8000;
 
 /// The names of a recipe's own services: a segment may not take one.
 const HUB: &str = "hub";
-const SPARE: &str = "spare";
 const RESOLVE: &str = "resolve";
 const OWN: [&str; 3] = [HUB, SPARE, RESOLVE];
 
@@ -199,12 +199,12 @@ impl Render<'_> {
         segment: &str,
     ) -> Result<Option<Segment>, Error> {
         check_segment_name(segment)?;
-        if OWN.contains(&segment) {
+        if OWN.contains(&segment) || segment.starts_with(LAUNCH) {
             self.problems.push(Problem::at(
                 Some(format!("segment.{segment}")),
                 None,
                 format!(
-                    "segment `{segment}` takes the name of a service that a pool's recipe has of its own (`{}`): rename the segment to run it on a Slurm site",
+                    "segment `{segment}` takes the name of a service that a pool's recipe has of its own (`{}`, or `{LAUNCH}<segment>` for the launcher of a segment that joins on a spare node): rename the segment to run it on a Slurm site",
                     OWN.join("`, `")
                 ),
             ));
@@ -366,14 +366,15 @@ impl Render<'_> {
             (HUB_CONTROL_PORT, "TCP".to_string()),
         ];
         let mut images = BTreeMap::new();
+        // Each segment's launcher on the spare nodes is its service, as
+        // that segment runs in this job: whether or not the job runs any
+        // instance of it.
+        let mut launchers = Vec::new();
         for segment in segments {
             let image = self.pulled(site_name, &segment.repository)?;
             images.insert(segment.name.as_str(), image.clone());
             let nodes = pool.quorum(&segment.name);
-            if nodes == 0 {
-                continue;
-            }
-            services.push(json!({
+            let service = json!({
                 "name": segment.name,
                 "type": "generic",
                 "nodes": nodes,
@@ -382,7 +383,12 @@ impl Render<'_> {
                 "env": segment_env,
                 "preamble": segment_preamble(&self.fleet_dir(site), self.store),
                 "readiness": segment_readiness(segment),
-            }));
+            });
+            launchers.push(launcher::service(&service, SETTINGS));
+            if nodes == 0 {
+                continue;
+            }
+            services.push(service);
             placed.push(Placed {
                 name: &segment.name,
                 nodes,
@@ -401,6 +407,7 @@ impl Render<'_> {
                 "container": hub_image,
                 "command": ["sleep", "infinity"],
             }));
+            services.extend(launchers);
         }
         if placed.is_empty() && spare == 0 {
             self.problems.push(Problem::at(
@@ -433,6 +440,21 @@ impl Render<'_> {
             .as_array_mut()
             .expect("job_end writes a teardown")
             .push(format!("rm -f {}/{HUB_ADDRESS}", sh_quote(&pool_dir)).into());
+        if spare > 0 {
+            // The launchers' mailboxes and statuses, which no later job
+            // reads; the joiners' logs stay. Every node runs the teardown,
+            // and one that finds the files gone already has nothing to do.
+            job["host_setup"]["teardown"]
+                .as_array_mut()
+                .expect("job_end writes a teardown")
+                .push(
+                    format!(
+                        "rm -rf {}/launch.$SLURM_JOB_ID 2>/dev/null || true",
+                        sh_quote(&pool_dir)
+                    )
+                    .into(),
+                );
+        }
         let fleet_name = self.fleet_name;
         // Each job's hash covers the settings it reads: a pool's, all of
         // them; a join job's, its segment's alone.

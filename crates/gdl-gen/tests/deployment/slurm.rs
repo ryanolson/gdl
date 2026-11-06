@@ -179,7 +179,7 @@ fn a_pool_is_one_job_with_its_hub_on_the_head_node() {
     );
     assert_eq!(pool["slurm"]["partition"], "gpu");
     assert_eq!(pool["slurm"]["time_limit"], "08:00:00");
-    assert_eq!(names(&pool), ["hub", "engine", "spare"]);
+    assert_eq!(names(&pool), ["hub", "engine", "spare", "launch_engine"]);
 
     let hub = service(&pool, "hub");
     assert_eq!(hub["placement"]["node"], "head");
@@ -228,6 +228,45 @@ fn a_pool_is_one_job_with_its_hub_on_the_head_node() {
     let spare = service(&pool, "spare");
     assert_eq!(spare["nodes"], 1);
     assert_eq!(words(&spare["command"]), ["sleep", "infinity"]);
+
+    // Each segment's launcher rides on the spare nodes as the segment's own
+    // service, with only its name, its placement, and its command changed:
+    // srt-slurm starts its step as the segment's, and a joiner, its child,
+    // has what an instance of the segment has.
+    let launcher = service(&pool, "launch_engine");
+    assert_eq!(launcher["placement"], serde_json::json!({"pool": "spare"}));
+    for same in ["type", "container", "env", "preamble"] {
+        assert_eq!(launcher[same], engine[same], "{same}");
+    }
+    for own in ["nodes", "readiness", "critical", "terminal"] {
+        assert!(launcher.get(own).is_none(), "{own} in {launcher}");
+    }
+    let command = words(&launcher["command"]);
+    assert_eq!(
+        command,
+        [
+            "/usr/local/bin/segment",
+            "--launch",
+            "--root",
+            "/gdl",
+            "--node",
+            "{node}",
+            "--segment",
+            "engine",
+            "--",
+            "/usr/local/bin/segment",
+            "/gdl/engine.toml"
+        ]
+    );
+    // The job's teardown removes the launchers' files, not the joiners'
+    // logs.
+    let teardown = words(&pool["host_setup"]["teardown"]);
+    assert!(
+        teardown.contains(
+            &"rm -rf '/shared/gdl-runs/api/model-x-01'/launch.$SLURM_JOB_ID 2>/dev/null || true"
+        ),
+        "{teardown:?}"
+    );
 
     // Each image by its digest, as Pyxis names a registry's: the registry,
     // then `#`.
@@ -537,8 +576,9 @@ fn a_jobs_processes_read_the_directorys_address_when_they_start() {
             read += 1;
         }
     }
-    // A pool's hub and engine, and a joining job's resolve and engine.
-    assert_eq!(read, 4);
+    // A pool's hub, engine, and engine's launcher on its spare node, and a
+    // joining job's resolve and engine.
+    assert_eq!(read, 5);
 
     // The hash covers what a pool runs, not where its directory landed.
     let again = render(&mirror, &spec(&mirror), &fleet(&fleet_text())).expect("the recipes");
@@ -676,19 +716,31 @@ fn a_join_recipe_resolves_its_pools_hub_when_it_starts() {
 
 /// The nodes of a pool's job each process runs on, as srt-slurm places
 /// them: a service that owns nodes takes the next ones, in the order
-/// declared, and one placed on the head runs on the first.
+/// declared, one that rides on another's (`placement.pool`) runs on each
+/// of those, and one placed on the head runs on the first.
 fn placed_nodes(recipe: &Value) -> Vec<(String, Vec<usize>)> {
     let mut next = 0;
-    let mut placed = Vec::new();
+    let mut placed: Vec<(String, Vec<usize>)> = Vec::new();
     for service in recipe["services"].as_array().expect("services") {
         let name = service["name"].as_str().expect("a name").to_string();
-        match service["nodes"].as_u64() {
-            Some(count) => {
+        match (
+            service["nodes"].as_u64(),
+            service["placement"]["pool"].as_str(),
+        ) {
+            (Some(count), _) => {
                 let count = usize::try_from(count).expect("a count");
                 placed.push((name, (next..next + count).collect()));
                 next += count;
             }
-            None => {
+            (None, Some(owner)) => {
+                let nodes = placed
+                    .iter()
+                    .find(|(name, _)| name == owner)
+                    .map(|(_, nodes)| nodes.clone())
+                    .expect("its owner, declared before it");
+                placed.push((name, nodes));
+            }
+            (None, None) => {
                 assert_eq!(service["placement"]["node"], "head", "{service}");
                 placed.push((name, vec![0]));
             }
@@ -747,6 +799,12 @@ fn every_listener_on_a_node_has_a_port_of_its_own() {
         let services = recipe["services"].as_array().expect("services");
         let mut on: BTreeMap<usize, Vec<(String, u16)>> = BTreeMap::new();
         for ((name, nodes), service) in placed_nodes(&recipe).into_iter().zip(services) {
+            // A launcher binds nothing. Its joiner binds its segment's ports
+            // on a spare node, where no other process listens, one joiner
+            // at a time.
+            if name.starts_with("launch_") {
+                continue;
+            }
             for node in nodes {
                 for port in listeners(&files, dir, service, &published) {
                     on.entry(node).or_default().push((name.clone(), port));
@@ -888,19 +946,26 @@ fn what_a_site_cannot_run_is_refused() {
     assert!(refused.contains("no Slurm site"), "{refused}");
 }
 
-/// A segment whose name a recipe's own service takes is refused.
+/// A segment whose name a recipe's own service takes is refused: `spare`,
+/// and a name that starts with `launch_`, which another segment's launcher
+/// could take.
 #[test]
 fn a_segment_named_for_a_recipes_own_service_is_refused() {
     let mirror = Mirror::new();
-    let placement = SPLIT
-        .replace("segment.engine", "segment.spare")
-        .replace("segments = [\"engine\"]", "segments = [\"spare\"]");
-    let spec = placed(&mirror, &placement);
-    let text = fleet_text().replace("engine = ", "spare = ");
-    let refused = render_with(&mirror, &spec, &fleet(&text), &digests())
-        .expect_err("refused")
-        .to_string();
-    assert!(refused.contains("`spare`"), "{refused}");
+    for name in ["spare", "launch_engine"] {
+        let placement = SPLIT
+            .replace("segment.engine", &format!("segment.{name}"))
+            .replace(
+                "segments = [\"engine\"]",
+                &format!("segments = [\"{name}\"]"),
+            );
+        let spec = placed(&mirror, &placement);
+        let text = fleet_text().replace("engine = ", &format!("{name} = "));
+        let refused = render_with(&mirror, &spec, &fleet(&text), &digests())
+            .expect_err("refused")
+            .to_string();
+        assert!(refused.contains(&format!("segment `{name}`")), "{refused}");
+    }
 }
 
 /// Each service's environment as srt-slurm's bash wrapper sets it: one
@@ -1348,7 +1413,8 @@ pub(super) fn every_segment_a_recipe_starts_gets_the_glibc_tunables(mirror: &Mir
                 path.display()
             );
             let preamble = service["preamble"].as_str().unwrap_or("true");
-            let segment = matches!(name, "front" | "engine");
+            // A launcher runs its segment's preamble, for its joiner.
+            let segment = matches!(name, "front" | "engine" | "launch_front" | "launch_engine");
             for own in [None, Some("glibc.malloc.arena_max=4"), Some("")] {
                 let expected = match segment {
                     true => Some(gdl_model::segment_tunables(own)),
@@ -1364,8 +1430,9 @@ pub(super) fn every_segment_a_recipe_starts_gets_the_glibc_tunables(mirror: &Mir
             segments += usize::from(segment);
         }
     }
-    // Three pools and three join jobs, one segment service each.
-    assert_eq!(segments, 6);
+    // Three pools and three join jobs, one segment service each, and the
+    // launcher of the one pool with a spare node.
+    assert_eq!(segments, 7);
 }
 
 #[path = "slurm/etcd.rs"]

@@ -16,6 +16,7 @@ mod declared;
 mod dist;
 #[cfg(feature = "json-lines")]
 mod json;
+mod launcher;
 mod process;
 mod wire;
 mod zstd;
@@ -62,6 +63,7 @@ pub use gdl_pools::PoolState;
 pub use json::probe as __json;
 #[cfg(feature = "json-lines")]
 pub use json::{Json, JsonItem, JsonRequest, reads_json, serve_json_lines, writes_json};
+pub use launcher::launched;
 pub use process::{Drains, Hosted, Launch, Process, ProcessConfig};
 /// The velo version this runtime is built on: a deployment's nodes are
 /// velo nodes, and generated segment crates reach velo through here so they
@@ -138,6 +140,8 @@ macro_rules! segment {
 /// Support for macro expansions. Not a stable interface.
 #[doc(hidden)]
 pub mod __private {
+    #[cfg(target_os = "linux")]
+    pub use crate::launcher::run_launcher;
     pub use crate::wire::probe::{Probe, ViaLocal, ViaWire};
     #[cfg(feature = "fault-injection")]
     pub use crate::zstd::frames as zstd_frames;

@@ -35,7 +35,7 @@ use site::{
     Answer, Driven, Readiness, RenderInput, Running, Scope, Site, Stopping, Which, Withdrawal,
 };
 use slurm::SlurmPlace;
-pub use slurm::{JoinBy, Joiner, Launched, Slurm, SlurmCli, SlurmCommand};
+pub use slurm::{JoinBy, Joiner, Slurm, SlurmCli, SlurmCommand};
 
 /// What `deploy` deploys, and where it builds.
 #[derive(Debug, Clone)]
@@ -591,8 +591,8 @@ fn healthy(site: &mut dyn Site, pools: &[(String, String)], waits: &Waits) -> Re
 }
 
 /// Add instances of `segment` to running pool `pool` of the fleet in file
-/// `fleet`, on its Slurm site, `by` a job of their own or a step on a
-/// spare node of the pool's job; say each step to `say`. Returns what
+/// `fleet`, on its Slurm site, `by` a job of their own or one instance on
+/// a spare node of the pool's job; say each step to `say`. Returns what
 /// started, which [`leave`] takes.
 ///
 /// A joining job is submitted from the pool's `join-<segment>.yaml`, which
@@ -602,17 +602,17 @@ fn healthy(site: &mut dyn Site, pools: &[(String, String)], waits: &Waits) -> Re
 /// its pool. Its `resolve` step finds the pool's hub when it starts, and
 /// fails the job at once when the pool is gone or draining.
 ///
-/// A step on a spare node of the pool's job ([`JoinBy::Step`]) is refused
-/// for now, before any Slurm command runs: its `srun` would run detached
-/// on the login node, and a `down` that runs meanwhile can cancel the
-/// joiner it starts unsignalled. It returns with a launcher inside the
-/// pool's job; the code below the refusal stays, and is tested.
+/// An instance on a spare node of the pool's job ([`JoinBy::Step`]) is
+/// asked of the launcher of `segment` there, which the pool's job runs: it
+/// starts the segment as its own child, in its own step, so no process
+/// outside the job holds it.
 ///
 /// # Errors
 ///
-/// A step on a spare node, refused; the fleet is not on Slurm; the pool
-/// has no running job, or the render no recipe that joins `segment` to
-/// it; or the pool's job ends too soon.
+/// The fleet is not on Slurm; the pool has no running job, or the render
+/// no recipe that joins `segment` to it; the pool's job ends too soon; or,
+/// on a spare node, no node is free, the job is being stopped, or no
+/// launcher started the instance within the objects' wait.
 pub fn join(
     fleet: &Path,
     pool: &str,
@@ -622,11 +622,6 @@ pub fn join(
     slurm: &mut dyn Slurm,
     say: &mut dyn FnMut(&str),
 ) -> Result<Joiner, Error> {
-    if by == JoinBy::Step {
-        return Err(Error::new(
-            "`cargo gdl join --in-job` is not available yet: a joiner in the pool's job needs a launcher inside the job, which gdl does not have yet. A join by a job of its own works: run `cargo gdl join` without `--in-job`",
-        ));
-    }
     let fleet = slurm_fleet(fleet, "join")?;
     SlurmPlace::new(slurm, &fleet, *waits, false)?.join(&fleet, pool, segment, by, say)
 }

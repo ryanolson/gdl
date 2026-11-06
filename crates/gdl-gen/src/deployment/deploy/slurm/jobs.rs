@@ -9,6 +9,7 @@ use serde_json::Value;
 use super::super::order::{Note, Parentage};
 use super::super::site::Withdrawal;
 use crate::Error;
+use crate::deployment::slurm::launcher::LAUNCH;
 
 /// One job of the fleet.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,15 +214,19 @@ impl Ran {
 /// --steps` printed, one per line as `id|name`: srt-slurm names each
 /// service's step `service_<service>`, or `service_<service>_<node>` for
 /// one instance of several, where a node's name may hold dots, and the
-/// hub's `service_hub`; `cargo gdl join --in-job` names each of its steps
-/// `gdl-join-<segment>+<launch>` ([`JOIN_STEP`]). A step that prepares a
-/// container,
+/// hub's `service_hub`. A launcher on a spare node (`service_launch_*`) is
+/// not one: its joiner is stopped through its mailbox, and a site that
+/// signals every process of a step would give the joiner a second `TERM`
+/// with the step's. A step that prepares a container,
 /// `<step>.container-prepare`, is passed over.
 pub(super) fn segment_steps(text: &str) -> Vec<String> {
     text.lines()
         .filter_map(|line| line.trim().split_once('|'))
         .filter(|(_, name)| {
-            (name.starts_with("service_") || name.starts_with(JOIN_STEP))
+            name.starts_with("service_")
+                // Never a launcher: a step TERM, on a site that signals every
+                // process of a step, would be its joiner's second TERM.
+                && !name.starts_with(&format!("service_{LAUNCH}"))
                 && *name != "service_hub"
                 && !name.ends_with(".container-prepare")
         })
@@ -249,13 +254,6 @@ pub(super) fn joining_steps(text: &str, segment: &str) -> Vec<String> {
         .collect()
 }
 
-/// The start of the name of each step that `cargo gdl join --in-job`
-/// starts in a pool's job, `gdl-join-<segment>+<launch>`: the segment, and
-/// the launch that started it, which owns it and the file that holds its
-/// node while it starts. A segment's name never holds `+`. srt-slurm
-/// names its own steps `service_<service>`.
-pub(super) const JOIN_STEP: &str = "gdl-join-";
-
 /// One step of a job, as `squeue --steps --format=%i|%j|%N` lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Step {
@@ -282,30 +280,14 @@ impl Step {
             .collect()
     }
 
-    /// Whether it holds a spare node of a pool's job: srt-slurm's
-    /// `service_spare`, or `service_spare_<node>` for one of several.
-    pub(super) fn spare(&self) -> bool {
-        (self.name == "service_spare" || self.name.starts_with("service_spare_"))
+    /// Whether it is a launcher on a spare node of a pool's job: srt-slurm
+    /// names it `service_launch_<segment>`, or `service_launch_<segment>_<node>`
+    /// when the job has several spare nodes. Its segment is not read from
+    /// its name: segment `a` on node `b` and segment `a_b` take the same
+    /// one. A launcher says its own step once it is up.
+    pub(super) fn launcher(&self) -> bool {
+        self.name.starts_with(&format!("service_{LAUNCH}"))
             && !self.name.ends_with(".container-prepare")
-    }
-
-    /// The segment it runs, when `cargo gdl join --in-job` started it.
-    pub(super) fn joined(&self) -> Option<&str> {
-        self.joiner().map(|(segment, _)| segment)
-    }
-
-    /// The launch that started it, when `cargo gdl join --in-job` did.
-    pub(super) fn launch(&self) -> Option<&str> {
-        self.joiner().map(|(_, launch)| launch)
-    }
-
-    /// Its segment and its launch, from `gdl-join-<segment>+<launch>`.
-    fn joiner(&self) -> Option<(&str, &str)> {
-        self.name
-            .strip_prefix(JOIN_STEP)
-            .filter(|rest| !rest.ends_with(".container-prepare"))?
-            .split_once('+')
-            .filter(|(segment, launch)| !segment.is_empty() && !launch.is_empty())
     }
 }
 
@@ -343,23 +325,6 @@ pub(super) fn timestamp(text: &str) -> bool {
                 b'd' => byte.is_ascii_digit(),
                 want => byte == want,
             })
-}
-
-/// The IPv4 addresses in what `ip -4 -o addr show dev <interface>`
-/// printed: one line per address, `<n>: <name> inet <address>/<prefix>
-/// ...`.
-pub(super) fn addresses(text: &str) -> Vec<String> {
-    text.lines()
-        .filter_map(|line| {
-            let mut words = line.split_whitespace();
-            words.find(|word| *word == "inet")?;
-            let address = words.next()?.split('/').next()?;
-            address
-                .parse::<std::net::Ipv4Addr>()
-                .ok()
-                .map(|address| address.to_string())
-        })
-        .collect()
 }
 
 /// How job `id` ended, from what `sacct` printed: `id|state|exit code`
@@ -420,33 +385,15 @@ mod tests {
         }
     }
 
-    /// One IPv4 address per `inet` line of `ip -4 -o addr show`.
+    /// A launcher, by its name, whatever its segment and node; srt-slurm's
+    /// container preparation is no launcher, and neither is the spare
+    /// nodes' placeholder.
     #[test]
-    fn addresses_are_read_from_each_inet_line() {
-        let text = "4: ib0    inet 10.1.0.7/16 brd 10.1.255.255 scope global ib0\\       valid_lft forever\n\
-                    4: ib0    inet 10.2.0.7/16 scope global secondary ib0:1\\       valid_lft forever\n";
-        assert_eq!(addresses(text), ["10.1.0.7", "10.2.0.7"]);
-        assert!(addresses("").is_empty());
-        assert!(addresses("Device \"ib0\" does not exist.\n").is_empty());
-    }
-
-    /// A spare node's placeholder, and a joiner's step, by their names;
-    /// srt-slurm's container preparation is neither.
-    #[test]
-    fn steps_are_told_apart_by_their_names() {
+    fn launchers_are_told_apart_by_their_names() {
         let steps = Step::list(
-            "9.0|service_hub|n0\n9.3|service_spare|n3\n9.4|service_spare_n4|n4\n9.5|gdl-join-engine+a1|n3\n9.6|service_spare.container-prepare|n3\n",
+            "9.3|service_launch_a_b|b\n9.4|service_launch_a_b_c|c\n9.5|service_launch_a_b.container-prepare|b\n9.6|service_spare|b\n",
         );
-        let spare: Vec<&str> = steps
-            .iter()
-            .filter(|s| s.spare())
-            .map(|s| s.id.as_str())
-            .collect();
-        assert_eq!(spare, ["9.3", "9.4"]);
-        let joined: Vec<Option<&str>> = steps.iter().map(Step::joined).collect();
-        assert_eq!(joined, [None, None, None, Some("engine"), None]);
-        assert_eq!(steps[3].launch(), Some("a1"));
-        assert_eq!(Step::list("9.7|gdl-join-engine|n3\n")[0].joined(), None);
-        assert_eq!(steps[3].nodes, "n3");
+        let launchers: Vec<bool> = steps.iter().map(Step::launcher).collect();
+        assert_eq!(launchers, [true, true, false, false]);
     }
 }

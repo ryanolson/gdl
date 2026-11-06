@@ -176,6 +176,7 @@ fn a_jobs_processes_read_etcds_address_when_they_start() {
             read += 1;
         }
     }
-    // A pool's hub and engine, and a joining job's resolve and engine.
-    assert_eq!(read, 4);
+    // A pool's hub, engine, and engine's launcher on its spare node, and a
+    // joining job's resolve and engine.
+    assert_eq!(read, 5);
 }

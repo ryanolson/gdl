@@ -13,7 +13,8 @@
     "nodes": "all",
     "teardown": [
       "rm -f '/shared/gdl-runs/api/model-x-01'/job.$SLURM_JOB_ID.end",
-      "rm -f '/shared/gdl-runs/api/model-x-01'/hub.$SLURM_JOB_ID.address"
+      "rm -f '/shared/gdl-runs/api/model-x-01'/hub.$SLURM_JOB_ID.address",
+      "rm -rf '/shared/gdl-runs/api/model-x-01'/launch.$SLURM_JOB_ID 2>/dev/null || true"
     ]
   },
   "model": {
@@ -29,7 +30,7 @@
   },
   "resources": {},
   "sbatch_directives": {
-    "comment": "gdl:api:model-x-01:pool:67c7b1c17196919f",
+    "comment": "gdl:api:model-x-01:pool:c84e93d503091e5d",
     "exclusive": "",
     "no-kill": "",
     "no-requeue": "",
@@ -116,6 +117,43 @@
       "container": "registry.example#gdl/api-hub@sha256:0000000000000000000000000000000000000000000000000000000000000001",
       "name": "spare",
       "nodes": 1,
+      "type": "generic"
+    },
+    {
+      "command": [
+        "/usr/local/bin/segment",
+        "--launch",
+        "--root",
+        "/gdl",
+        "--node",
+        "{node}",
+        "--segment",
+        "engine",
+        "--",
+        "/usr/local/bin/segment",
+        "/gdl/engine.toml"
+      ],
+      "container": "registry.example#gdl/api-engine@sha256:0000000000000000000000000000000000000000000000000000000000000003",
+      "env": {
+        "GDL_HUB__HOST": "{head_ip}",
+        "GDL_LISTEN": "{node_ip}:0",
+        "GDL_POOL__AWS_REGION": "slurm-lab",
+        "GDL_POOL__CLASS": "model_x",
+        "GDL_POOL__DIRECTORY": "dynamodb",
+        "GDL_POOL__HUB": "{head_ip}:1337",
+        "GDL_POOL__LISTS_TABLE": "gdl-pool-lists",
+        "GDL_POOL__NAME": "model-x-01",
+        "GDL_POOL__PARENTS": "global",
+        "GDL_POOL__READY__ENGINE": "2",
+        "GDL_POOL__RECORDS_TABLE": "gdl-pools",
+        "GDL_POOL__REGION": "slurm-lab",
+        "GDL_POOL__SUMMARY_MS": "10000"
+      },
+      "name": "launch_engine",
+      "placement": {
+        "pool": "spare"
+      },
+      "preamble": "a=$(cat /fleet/directory.endpoint 2>/dev/null || true); case \"$a\" in http://?*:[0-9]*) export GDL_POOL__ENDPOINT=\"$a\" ;; *) echo \"gdl: /shared/gdl-runs/api/directory.endpoint names no DynamoDB Local: submit the fleet's directory job, and wait for it to write the file\" >&2; exit 1 ;; esac; export GLIBC_TUNABLES=\"${GLIBC_TUNABLES-glibc.malloc.hugetlb=0}\"; end=$(cat /gdl/job.$SLURM_JOB_ID.end 2>/dev/null || true); case \"$end\" in ''|*[!0-9]*) ;; *) export GDL_RUNTIME__LEAVE_BY=\"$end\"000 ;; esac",
       "type": "generic"
     }
   ],

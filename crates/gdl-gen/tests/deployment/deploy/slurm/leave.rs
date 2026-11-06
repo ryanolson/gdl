@@ -122,10 +122,17 @@ fn leave_refuses_what_is_not_a_joiner() {
             "job 2000 is no job of fleet `api`",
         ),
         (
-            gdl_gen::Joiner::Step("1003.1".into()),
-            "step 1003.1 is `service_engine`, not a joiner",
+            gdl_gen::Joiner::Step("1003.1+l1".into()),
+            "step 1003.1 is `service_engine`, not a launcher on a spare node",
         ),
-        (gdl_gen::Joiner::Step("1003".into()), "`1003` is not a step"),
+        (
+            gdl_gen::Joiner::Step("1003.1".into()),
+            "`1003.1` is not a joiner, `<job>.<step>+<launch>`",
+        ),
+        (
+            gdl_gen::Joiner::Step("1003+l1".into()),
+            "`1003+l1` is not a joiner",
+        ),
     ] {
         let error = leave(&site, &mut slurm, &joiner)
             .expect_err("refused")

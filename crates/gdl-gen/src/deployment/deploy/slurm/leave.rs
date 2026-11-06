@@ -1,9 +1,8 @@
 //! `cargo gdl leave`: a joiner of a running pool on a Slurm site removed
 //! cleanly. One `SIGTERM` reaches its instances, which retire through
-//! their hub, drain, and exit; then it is waited for until Slurm no longer
-//! lists it. A retire through the hub alone would not do: a retired
-//! instance holds after its drain until a signal ends it. See
-//! `docs/src/guides/slurm.md`.
+//! their hub, drain, and exit; then it is waited for until it has ended.
+//! A retire through the hub alone would not do: a retired instance holds
+//! after its drain until a signal ends it. See `docs/src/guides/slurm.md`.
 
 use std::time::{Duration, Instant};
 
@@ -11,13 +10,15 @@ use super::SlurmPlace;
 use super::cli::Lines;
 use super::jobs::{self, Job, Kind, Step};
 use super::join::{Joiner, grace};
-use super::reservations::Registry;
+use super::requests::Registry;
 use crate::Error;
+use crate::deployment::slurm::launcher;
+use gdl_model::launch::Done;
 
 impl SlurmPlace<'_> {
-    /// Remove `joiner`, which `join` started: a joining job, or a step that
-    /// runs a joiner on a spare node of a pool's job. Refused, with nothing
-    /// signalled, for any other job or step.
+    /// Remove `joiner`, which `join` started: a joining job, or a joiner
+    /// that a launcher started on a spare node of a pool's job. Refused,
+    /// with nothing signalled, for any other job, step, or launch.
     pub(in super::super) fn leave_joiner(
         &mut self,
         joiner: &Joiner,
@@ -164,18 +165,27 @@ impl SlurmPlace<'_> {
         }
     }
 
-    /// Remove step `id`, `<job>.<step>`, which `join --in-job` started in a
-    /// pool's job: signal it once, and wait until the job no longer lists
-    /// it. Its spare node is then free for another joiner.
+    /// Remove joiner `id`, `<job>.<step>+<launch>`, which `join --in-job`
+    /// started as the child of a launcher on a spare node of a pool's job:
+    /// under the pool's registry lock, ask that launcher to stop launch
+    /// `<launch>`, on which it sends its child one `SIGTERM`; then wait
+    /// until it says the child has exited, which must be with code 0: the
+    /// instance left on the signal. Its spare node is then free for
+    /// another joiner. Refused, with nothing asked, for a step that is no
+    /// launcher, and a launch that it did not start or that has ended.
     fn leave_step(&mut self, id: &str, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
-        let Some((job_id, _)) = id
-            .split_once('.')
-            .filter(|(job, step)| digits(job) && digits(step))
-        else {
+        let Some((step_id, launch)) = id.split_once('+').filter(|(step, launch)| {
+            !launch.is_empty()
+                && !launch.contains(char::is_whitespace)
+                && step
+                    .split_once('.')
+                    .is_some_and(|(job, step)| digits(job) && digits(step))
+        }) else {
             return Err(Error::new(format!(
-                "`{id}` is not a step, `<job>.<step>`, as `cargo gdl join --in-job` prints it"
+                "`{id}` is not a joiner, `<job>.<step>+<launch>`, as `cargo gdl join --in-job` prints it"
             )));
         };
+        let (job_id, _) = step_id.split_once('.').unwrap_or_default();
         let job = self
             .list()?
             .into_iter()
@@ -188,62 +198,102 @@ impl SlurmPlace<'_> {
             })?;
         let Kind::Pool(pool) = job.kind.clone() else {
             return Err(Error::new(format!(
-                "job {job_id} is not a pool's job: a step joins a pool in the pool's own job"
+                "job {job_id} is not a pool's job: a joiner joins a pool in the pool's own job"
             )));
         };
-        let what = format!("removing step {id} of pool `{pool}`'s job");
+        let what = format!("removing joiner {id} of pool `{pool}`'s job");
         let listed = self.placed(job_id, &what)?;
         let step = listed
             .iter()
-            .find(|step| step.id == id)
-            .ok_or_else(|| Error::new(format!("{what}: Slurm lists no step {id}: it has ended")))?;
-        let (Some(segment), Some(launch)) = (
-            step.joined().map(str::to_string),
-            step.launch().map(str::to_string),
-        ) else {
-            return Err(Error::new(format!(
-                "step {id} is `{}`, not a joiner that `cargo gdl join --in-job` started: `cargo gdl down` stops a pool's own processes",
-                step.name
-            )));
+            .find(|step| step.id == step_id)
+            .ok_or_else(|| {
+                Error::new(format!(
+                    "{what}: Slurm lists no step {step_id}: its launcher has ended, and its joiner with it"
+                ))
+            })?
+            .clone();
+        let dir = self.home.dir.join(&pool);
+        let request = {
+            let registry = Registry::open(&dir, &pool, &self.waits, None)?;
+            let Some(request) = registry
+                .requests
+                .iter()
+                .find(|request| request.job == job_id && request.launch == launch)
+                .cloned()
+            else {
+                return Err(Error::new(match step.launcher() {
+                    true => format!(
+                        "{what}: {} holds no launch {launch} of job {job_id}: it has ended, or `cargo gdl join` did not ask for it",
+                        Registry::path(&dir).display()
+                    ),
+                    false => format!(
+                        "step {step_id} is `{}`, not a launcher on a spare node: `cargo gdl down` stops a pool's own processes",
+                        step.name
+                    ),
+                }));
+            };
+            if request.step != step_id {
+                return Err(Error::new(format!(
+                    "{what}: launch {launch} runs in step {}, not {step_id}",
+                    request.step
+                )));
+            }
+            if let Some(done) = request.done(&dir) {
+                return Err(Error::new(format!(
+                    "{what}: launch {launch} on node {} has ended already ({done})",
+                    request.node
+                )));
+            }
+            if !request.started(&dir) {
+                return Err(Error::new(format!(
+                    "{what}: the launcher of `{}` on node {} has not started launch {launch}",
+                    request.segment, request.node
+                )));
+            }
+            request.stop(&dir)?;
+            request
         };
-        let node = step.nodes.clone();
-        let grace = grace(&self.home.dir.join(&pool), &segment)?;
-        let reply = self
-            .slurm
-            .run(&Lines::terminate(&[id], self.waits.objects))?;
-        if !reply.success && self.placed(job_id, &what)?.iter().any(|step| step.id == id) {
-            return Err(Error::new(format!(
-                "{what}: `scancel --signal=TERM {id}` failed: {}",
-                reply.stderr.trim()
-            )));
-        }
+        let (segment, node) = (request.segment.clone(), request.node.clone());
+        let grace = grace(&dir, &segment)?;
         say(&format!(
-            "leave: step {id}'s instance of `{segment}` leaves pool `{pool}` on SIGTERM"
+            "leave: joiner {id}'s instance of `{segment}` leaves pool `{pool}` on SIGTERM"
         ));
         let bound = Duration::from_secs(grace) + self.waits.drain;
+        let mut ended = None;
         self.until(bound, &what, |place| {
-            Ok(!place
-                .placed(job_id, &what)?
-                .iter()
-                .any(|step| step.id == id))
+            if let Some(done) = request.done(&dir) {
+                ended = Some(done);
+                return Ok(true);
+            }
+            if !place.placed(job_id, &what)?.iter().any(|step| step.id == step_id) {
+                return Err(Error::new(format!(
+                    "{what}: its launcher, step {step_id}, ended before it said the joiner exited, and the joiner ended with it"
+                )));
+            }
+            Ok(false)
         })?;
-        // A join that did not see this step start left its launch's hold
-        // on the node; another launch's hold is its own.
-        let dir = self.home.dir.join(&pool);
         let mut registry = Registry::open(&dir, &pool, &self.waits, None)?;
-        let before = registry.held.len();
-        registry.held.retain(|held| held.launch != launch);
-        if registry.held.len() != before {
+        let before = registry.requests.len();
+        registry.requests.retain(|kept| kept.launch != launch);
+        if registry.requests.len() != before {
             registry.save()?;
         }
+        drop(registry);
+        if ended != Some(Done::Exited(0)) {
+            return Err(Error::new(format!(
+                "{what}: its instance {}, not exited 0, so it may not have drained; see {}",
+                ended.map_or_else(|| "ended".to_string(), |done| done.to_string()),
+                launcher::log(&dir, job_id, &node, launch).display()
+            )));
+        }
         say(&format!(
-            "leave: step {id} ended; node {node} is free for another joiner"
+            "leave: joiner {id} exited; node {node} is free for another joiner"
         ));
         Ok(())
     }
 
     /// The steps of job `id`.
-    fn placed(&mut self, id: &str, what: &str) -> Result<Vec<Step>, Error> {
+    pub(super) fn placed(&mut self, id: &str, what: &str) -> Result<Vec<Step>, Error> {
         Ok(Step::list(
             &self.run(&Lines::placed_steps(id, self.waits.objects), what)?,
         ))

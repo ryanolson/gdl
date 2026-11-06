@@ -123,9 +123,11 @@ cargo gdl down --fleet fleet.toml
 
 1. It cancels each job that waits to join the pool (`PENDING`), with `scancel --state=PENDING --ctld`, so that the controller applies the filter as it cancels: the pool will have no hub to join. A joiner that starts meanwhile is left to the pool's drain, and cancelled with the pool.
 2. A pool with a parent drains: `POST /v1/ext/gdl-pool/drain` on its hub, then a wait until its hub's `/v1/ext/gdl-pool/withdrawn` says that the directory holds its withdrawal. Then `scancel` cancels its job, and the jobs that joined it.
-3. A pool with no parent, such as a global pool, cannot drain: its hub refuses a drain. `scancel --signal=TERM` goes to each of its segments' steps, not its hub's, and to the segment's steps of each job that joined it, not its batch shell, once each, so that each instance retires and leaves: a second `SIGTERM` would stop an instance at once and cut its drain. The steps and the joining jobs are read again while it waits, and one that starts meanwhile, such as a joining job's segment that srt-slurm starts late, gets its signal then. Once its hub lists no instance on `/v1/ext/gdl-pool/instances`, and a listing of the steps taken after that list shows each step signalled, `scancel` cancels its job. An empty list says that no instance is registered, not that none is still starting.
+3. A pool with no parent, such as a global pool, cannot drain: its hub refuses a drain. `scancel --signal=TERM` goes to each of its segments' steps, not its hub's and not a launcher's on a spare node, whose joiner its records stop ([Leave](#leave)), and to the segment's steps of each job that joined it, not its batch shell, once each, so that each instance retires and leaves: a second `SIGTERM` would stop an instance at once and cut its drain. The steps and the joining jobs are read again while it waits, and one that starts meanwhile, such as a joining job's segment that srt-slurm starts late, gets its signal then. Once its hub lists no instance on `/v1/ext/gdl-pool/instances`, and a listing of the steps taken after that list shows each step signalled, `scancel` cancels its job. An empty list says that no instance is registered, not that none is still starting.
 4. A pool's job that still waits in the queue has no hub and no record, and one that is ending (`COMPLETING`) is being stopped: each is cancelled at once. A waiting job is cancelled only while it still waits: one that starts after it was listed is left running, undrained, and `down` stops; run it again to drain it.
 5. A pool whose job is gone, because it was killed, preempted, or lost with its hub's node, has a recipe in the fleet's directory but no job in `squeue`. Its record may still be in the directory, where its parents hold it as missing. If the pool has a parent, `down` withdraws the record once, through the hub of a running pool of its parent's class, its `home` first. The call is `POST /v1/ext/gdl-pool/children/<class>/<pool>/withdraw` on that hub's control port. Under DynamoDB and etcd, no parent's hub holds the record. So the parent's hub writes the withdrawal in the directory, at an epoch past the pool's last record, and answers 204 once the directory has stored it. A hub that holds no record of the pool answers 404, and the next pool of the class is asked: the pool's recipe is the last render, which may name another home than the one its job ran under. When none holds a record, for example after an earlier withdrawal, nothing is left to withdraw. A hub that still hears the pool, within its record's lease on the hub's own clock, refuses with 409 and how long until the lease passes: `down` says so, waits that long, at most one lease, lists the jobs again, and asks once more. A pool whose hub has just died is then withdrawn. A pool submitted again during the wait is not: `down` stops, as for a pool submitted again before the withdrawal. A pool still heard, such as one that another user's job runs, which `squeue --me` does not list, stops `down` before any pool above it stops, with one line that names the pool. Any other answer stops `down` the same way. If no parent's hub runs, `down` names the pool and goes on ([Limitations](../operations/limitations.md#a-pool-whose-job-is-gone-keeps-its-record-while-no-parents-hub-runs)).
+
+Each pool's job is closed to joiners first, whatever the fleet now says of its spare nodes, and each joiner on its spare nodes has exited before its job is cancelled ([Leave](#leave)).
 
 The directory's job goes last, once no hub uses it. Each cancel waits, up to 300 s, until `squeue` no longer lists the job, `COMPLETING` included. A job that ended before its `scancel` or its `SIGTERM` reached it is passed over. The fleet's directory on the shared file system stays. `down` refuses a pool with two jobs, and a pool whose job runs but whose hub has not written its address yet, which cannot drain; it cancels nothing then.
 
@@ -139,7 +141,8 @@ A pool's recipe has no frontend (`frontend.type: none`) and these services, whic
 
 - `hub`, on the head node: `critical` and `terminal`, so the job ends when the hub exits. It is ready when its own `/v1/health` answers 200 on port 1337. It publishes `{node_ip}:1337` as its pool's hub, and drains its pool on the first `SIGTERM` (`GDL_POOL__DRAIN_ON_STOP=true`, for the pool's `stop_wait_ms`). Before it starts, it writes `{node_ip}:1337 {node_ip}:8337` to `hub.<job id>.address` in the pool's directory, where `cargo gdl deploy` and `down` read where to reach it; a hub that cannot write the file does not start. The job's teardown removes the file.
 - one service per segment of the pool's class, in name order, on nodes of its own: one instance per node, as many as the pool's `ready` count. Each finds its hub at `{head_ip}` and gives velo `{node_ip}:0`, a port the OS chooses. A segment with `ready` 0 has no service.
-- `spare`, when the pool has `slurm.spare_nodes`: a placeholder that holds those nodes for segments that join inside the job ([A step on a spare node](#a-step-on-a-spare-node)).
+- `spare`, when the pool has `slurm.spare_nodes`: a placeholder that holds those nodes for joiners in the job.
+- `launch_<segment>`, when the pool has `slurm.spare_nodes`: for each segment of the pool's class, a launcher on each spare node, which starts the segment there as its child when `cargo gdl join --in-job` asks ([A joiner on a spare node](#a-joiner-on-a-spare-node)).
 
 Each segment's preamble sets `GLIBC_TUNABLES=glibc.malloc.hugetlb=0` when the job's environment has none, and keeps the user's value when it has one ([Binary](../appendix/spec-reference.md#binary)).
 
@@ -175,7 +178,7 @@ The directory's job takes no `signal`. Each pool withdraws its record from the d
 
 ## Grow and shrink a running pool
 
-A running pool takes more instances of a segment of its class as a job of their own, which waits in Slurm's queue like any job. `cargo gdl join` adds them, and prints the job's id; `cargo gdl leave` removes them. A step on a spare node of the pool's job is not available yet ([A step on a spare node](#a-step-on-a-spare-node)). Both run on a login node of the site, as `deploy` does, and read the recipes `deploy` wrote: they take no spec.
+A running pool takes more instances of a segment of its class as a job of their own, which waits in Slurm's queue like any job, or as one instance on a spare node of the pool's own job, with no wait ([A joiner on a spare node](#a-joiner-on-a-spare-node)). `cargo gdl join` adds them, and prints the job's id or the joiner's; `cargo gdl leave` removes them. Both run on a login node of the site, as `deploy` does, and read the recipes `deploy` wrote: they take no spec.
 
 ```bash
 cargo gdl join --fleet fleet.toml --pool model-x-01 --segment engine --nodes 2   # prints the job's id
@@ -210,19 +213,94 @@ sequenceDiagram
 
 `cargo gdl join --pool <pool> --segment <segment> [--nodes <n>]` submits that recipe through `srtctl`, with `n` instances, one per node (1 when unsaid). It refuses a pool whose job does not run, or a segment the pool's class does not run, before it submits anything. A joiner never outlives its pool: `join` reads the pool's job's end and time left with `squeue -o %e|%L`, and submits the recipe with `sbatch --deadline=<that end>` and a `--time-min` that covers the joiner's leave, the longer of the site's `signal_lead_s` and the segment's stop grace, and 600 s of service. Slurm then shortens the joiner's time limit to end by the deadline, and starts it only while that leaves it its `--time-min`. A pool's job that ends sooner than that is refused, naming its end, and so is a joiner whose own time limit, its pool's `slurm.time_limit` or the site's, is shorter, which `sbatch` would refuse. A pool's job with no time limit takes a joiner with neither. These directives go in a copy of the recipe for this submission alone: `join-<segment>.yaml` stays as `deploy` wrote it, and its hash in the job's comment is the same. `join` prints the job's id, and returns once Slurm has it: the job may wait in the queue.
 
-### A step on a spare node
+### A joiner on a spare node
 
-`cargo gdl join --in-job` would start one instance as a step of the pool's own job, on one of the nodes that `slurm = { spare_nodes = <n> }` holds, with no wait in the queue. It is not available yet: it fails at once, before it runs any Slurm command, in one line that says to join by a job of its own. Such a step would be started by an `srun` on the login node, detached from `cargo gdl`, and the step exists only once that `srun` has made it. A `down` that runs meanwhile cannot be sure that every such launch has made its step and had its signal before it cancels the pool's job, and in review it could cancel a joiner unsignalled ([Limitations](../operations/limitations.md#cargo-gdl-join---in-job-is-not-available-yet)). A launcher inside the pool's job, which starts joiners on its spare nodes itself, will lift this. A pool's spare nodes are still held, by srt-slurm's placeholder.
+`cargo gdl join --in-job` adds one instance to the pool's own job, on one of the nodes that `slurm = { spare_nodes = <n> }` holds, with no wait in the queue. The pool's job runs a launcher for each segment of its class on each spare node: the service `launch_<segment>`. The launcher starts the segment as its own child, in its own step, when `join` asks, and stops it when `leave` or `down` asks. srt-slurm started that step and owns it, so no process outside the job holds the joiner: it outlives `cargo gdl` and the login session, and it ends with the job.
+
+srt-slurm runs every `generic` service in a container, and a container has no Slurm client. So a launcher cannot start a joiner as a step of its own, and a `srun` on the login node would hold the joiner from outside the job. A service in the hub's image could not run a segment's image. So each launcher is the segment's own binary, in a mode of its own, in its own segment's image.
+
+`launch_<segment>` is the segment's own service in the pool's recipe, with only its name, its placement, and its command changed. It keeps the image, the environment, the preamble, and every field that shapes srt-slurm's `srun` (`cpus_per_task`, `cpu_bind`, `srun_options`, `placement.per`). It rides on the `spare` service's nodes (`placement: {pool: spare}`), one instance on each, and srt-slurm starts its step as it starts the segment's own, with `--overlap`. Its command is:
+
+```
+/usr/local/bin/segment --launch --root /gdl --node {node} --segment <segment> -- /usr/local/bin/segment /gdl/<segment>.toml
+```
+
+A joiner is a plain child of its launcher, so it inherits that step's CPUs, memory, GPUs, and environment, `{node_ip}`, `{head_ip}`, the directory's address, and the job's leave time among them. It gets what the pool's own instance of its segment gets on a full node. The launchers on one node share it through `--overlap`, as the hub shares the head node with the first segment instance. A node takes one joiner at a time, whatever its segment, since each binds the default ports. An idle launcher costs one container per segment on each spare node, pulled when the job starts, and a few MB: the launcher, its canary, and no GPU work. The spare nodes are whole nodes of an `exclusive` job, so nothing else uses them while the pool runs: that is what `spare_nodes` is for.
+
+#### Records
+
+`join`, `leave`, `down`, and the launcher talk through records in the launcher's directory, `<run_dir>/<fleet>/<pool>/launch.<job id>/<node>/<segment>/`:
+
+| Record | Written by | Holds |
+|---|---|---|
+| `up` | the launcher, once it starts | `<address> <job>.<step>`: where its joiners listen, and its own step, from Slurm's environment |
+| `<n>.run` | `join`, under `join.lock` | the launch's name: ask for request `n`'s joiner |
+| `<n>.stop` | `join`, `leave`, or `down`, under `join.lock` | the launch's name: stop request `n` |
+| `<n>.started` | the launcher | the joiner's pid |
+| `<n>.done` | the launcher | how request `n` ended, its one terminal record: `exited <code>`, `killed <signal>`, `dropped` (stopped before it started, or with no `run`), or `refused closed` |
+| `closed` | the launcher | that it has taken a `SIGTERM`, and starts nothing more |
+
+Each record is written once: to a name of its own in the same directory, flushed, then linked to its name, which fails if the name is taken, so a record is never rewritten. The launcher handles its requests strictly in order, `1`, `2`, ..., and opens the next request's `<n>.run` and `<n>.stop` by name, once a second; nothing reads a directory's listing. This rests on one property of NFS: a file linked or renamed into place on one client is seen by an `open` by name on another, with close-to-open consistency. A name not yet seen may take as long as the client's attribute cache (about a minute) to appear, which delays a reader and never misleads it. A write cut short leaves only the staged file, which no one opens. An NFS `LINK` is not idempotent: when its reply is lost, the client sends it again, and the server can answer that the name is taken for a link that made it. So when a link fails that way, the writer compares the name with its staged file: the same file is its own record; another is an earlier write's, which stays.
+
+Every request reaches exactly one `<n>.done`, whatever records it has. A `stop` with no `run`, as from a `join` that ended after it recorded the request and before it wrote the `run`, is `dropped`; so is a `run` and a `stop` read together. A `run` read after the launcher has taken a `SIGTERM`, its own or its canary's, is `refused closed`: a joiner started then would get none.
+
+#### Asking for a joiner
+
+`join --in-job` mints a launch name, `<pid>x<time>` in hex, and works under the pool's `join.lock`. Under the lock it lists the fleet's jobs again: a job read before the lock may have been replaced since. It refuses a job that no longer runs, or that `down` is stopping. It forgets the requests of jobs that Slurm no longer lists, and those of its own job that have ended: their launcher wrote `<n>.done`, or the launcher's step is gone. Then it takes the first spare node that no live request holds and whose launcher of the segment is up, not closed, and in a step that Slurm lists: the step the launcher's `up` names, never one read from a step's name, which two segments' launchers can share (`a` on node `b`, and `a_b`). It takes the launcher's next request number from `join.requests`, records the request there, with that step and number, and only then writes `<n>.run`, so `down` knows of every request that a launcher can read. Then it waits, up to 300 s, for `<n>.started`, and prints:
+
+```
+join: step <job>.<step>+<launch> adds an instance of `<segment>` to pool `<pool>` on node <node>, at <address>; its output is in <run_dir>/<fleet>/<pool>/join.<job>.<node>.<launch>.log
+```
+
+`<job>.<step>` is the launcher's step, and `<launch>` is the joiner. A launcher's step outlives each joiner it starts, so the launch tells a joiner apart from the next one on that node. A request that is not started within the wait is withdrawn with `<n>.stop`; its node stays held until the launcher writes `<n>.done`. A step listing that fails within the wait, as a busy controller's can, does not end it. A `run` that may not have been written whole, or that another launch wrote first, keeps its request, withdrawn the same way. `join.requests` is written to a file beside it and renamed into place, so a write that fails leaves it as it was.
+
+#### Removing a joiner
+
+`cargo gdl leave --step <job>.<step>+<launch>` writes `<n>.stop` for that request. It refuses a step that is no launcher, and a launch that `join.requests` does not hold, that its launcher did not start, or that has ended. The launcher sends its child one `SIGTERM`, on which the instance retires, drains, and exits. `leave` waits for `<n>.done` to say `exited 0`, bounded by the segment's stop grace and 60 s, and then frees the node.
+
+#### Signals and containment
+
+The launcher is one single-threaded event loop: its `SIGTERM`s, its children's ends (`SIGCHLD`), and a timer for the next request's records. Each `SIGTERM` to a joiner is decided there, with every input in hand, and a joiner gets at most one from the launcher: on its `<n>.stop`, or on the launcher's own `SIGTERM`, whichever comes first. The launcher's `SIGTERM` comes from srt-slurm's cleanup, or from the job's `--signal=TERM@<lead>`: `down` and `leave` stop a joiner through its records alone. With the default `proctrack/cgroup`, Slurm signals only a step's tasks, so a joiner gets no `SIGTERM` of its own. A site that signals every process of a step (`SignalChildrenProcesses=yes`, `proctrack/pgid`, or `proctrack/linuxproc`) signals the joiner too. The launcher's canary, `segment --launch-canary`, a child in the same place as a joiner that only waits for a signal, then dies of the same `SIGTERM`, and the launcher sends none of its own. It resumes the canary before it asks, so that a stopped one does not hold the `SIGTERM`.
+
+A joiner is started as `segment --launched-by <launcher pid> <its settings>`. First, before it does any work, it sets its death signal to `SIGKILL`, then checks that its parent is still that launcher, and exits at once if not. So a joiner dies with its launcher, under any `proctrack`. The death signal follows the thread that started the child, so the launcher starts every child from its loop's own thread, which lives as long as it does. The launcher is also a child subreaper: an orphan its joiner leaves is its to reap, and it never takes an orphan's exit for its joiner's, which it reaps only through the joiner's pidfd. A stopped joiner has not exited: the launcher waits only for an exit.
+
+The launcher needs Linux 5.4 or later, for pidfd: `pidfd_open` and `waitid` on a pidfd. On an older kernel it refuses to start, in one line that names the kernel. `--launch`, `--launch-canary`, and `--launched-by` are taken only as a segment binary's first argument, and only on Linux.
+
+```mermaid
+sequenceDiagram
+    participant J as join / leave / down (login node)
+    participant F as launcher's records (NFS)
+    participant L as launch_engine (a step on a spare node)
+    participant C as joiner (L's child)
+    participant H as pool's hub
+    L->>F: up: <address> <job>.<step>
+    J->>F: under join.lock: request n recorded in join.requests; n.run
+    L->>C: segment --launched-by <pid> engine.toml
+    L->>F: n.started
+    C->>H: register, ready
+    J->>F: leave, under join.lock: n.stop
+    L->>C: one SIGTERM
+    C->>H: retire, drain
+    C-->>L: exit 0
+    L->>F: n.done: exited 0
+```
+
+On a real cluster, check what the fake Slurm cannot:
+
+- A joiner engine sees its node's GPUs: `CUDA_VISIBLE_DEVICES` and `nvidia-smi -L` in its log match those of a pool's own engine instance on another node.
+- Two launchers share one spare node.
+- A joiner runs on after `cargo gdl` exits and the login session ends.
+- The site's shared file system shows a record that one client links into place to an `open` by name on another.
 
 ### Leave
 
 `cargo gdl leave --job <id>` removes a joining job. Each step of its segment gets one `scancel --signal=TERM <job>.<step>`, never the batch shell: each instance retires through its hub, drains, and exits 0, and the job ends `COMPLETED`. A second `SIGTERM` would stop an instance at once, so each step gets one. srt-slurm may still be starting the segment when the job runs, so `leave` reads the job's steps until the job ends, and signals each as it appears. It waits until Slurm no longer lists the job, bounded by the segment's stop grace and 60 s, and then reads how it ended from `sacct`: it stops with the state when the job ended other than `COMPLETED`, and when Slurm's accounting keeps no record of it within 60 s, since then nothing says the job completed. A joining job that still waits in the queue is cancelled with `scancel --state=PENDING --ctld`, which needs Slurm 23.11.6 or later, as `down` does; one that starts meanwhile gets the signal, and one that started and ended before the cancel reached it must have ended `CANCELLED` or `COMPLETED` by `sacct`.
 
-A retire through the hub alone (`POST /v1/ext/gdl-pool/instances/{id}/retire`) would not do: a retired instance holds after its drain until a signal ends it. `cargo gdl leave --step <job>.<step>` is for a joiner in a pool's job, which `join` does not start yet.
+A retire through the hub alone (`POST /v1/ext/gdl-pool/instances/{id}/retire`) would not do: a retired instance holds after its drain until a signal ends it. `cargo gdl leave --step <job>.<step>+<launch>` removes a joiner on a spare node ([A joiner on a spare node](#a-joiner-on-a-spare-node)).
 
 `leave` refuses a pool's job and the directory's job, before it signals anything: `cargo gdl down` stops those.
 
-`down` stops a pool's joiners with it: it cancels each joining job that still waits, and a pool's drain reaches every running joiner. A pool with no parent cannot drain, so `down` signals each of its segments' steps, and the segment's steps of each joining job that runs ([Take the fleet down](#take-the-fleet-down)).
+`down` stops a pool's joiners with it: it cancels each joining job that still waits, and a pool's drain reaches every running joiner. A pool with no parent cannot drain, so `down` signals each of its segments' steps, and the segment's steps of each joining job that runs ([Take the fleet down](#take-the-fleet-down)). For every pool whose job runs, whatever the fleet now says of its spare nodes, `down` first marks the pool's job stopping in `join.requests`, under `join.lock`, so that no `join --in-job` asks for another joiner. It writes `<n>.stop` for each joiner that its launchers were asked for and have not said ended ([A joiner on a spare node](#a-joiner-on-a-spare-node)). A launch that has not started never will, and one that has gets one `SIGTERM`. A launcher's records that the login node does not see yet, as NFS may cache that a name is missing, get their `<n>.stop` as `down` waits, once it sees them. Before it cancels the pool's job, `down` waits until each launcher has written its joiner's `<n>.done`, or the launcher's step is gone, bounded by the pool's stop grace and 60 s. Past that bound it cancels nothing, and names the joiners left. A pool's job that is already ending (`COMPLETING`) waits for none: its launchers' steps end with it.
 
 ## Apply the recipes by hand
 

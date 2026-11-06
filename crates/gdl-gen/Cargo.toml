@@ -45,6 +45,7 @@ signal-hook = "0.3"
 
 [dev-dependencies]
 gdl-hub = { path = "../gdl-hub" }
+gdl-runtime = { path = "../gdl-runtime" }
 # Not used by the tests' code. The film test builds a generated segment that
 # chooses mimalloc offline, from this workspace's lock: this puts the crate
 # in that lock and in the local registry, at the version gdl is tested with.

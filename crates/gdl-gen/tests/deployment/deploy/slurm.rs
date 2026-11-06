@@ -31,6 +31,8 @@ mod hostnames;
 mod join;
 #[path = "slurm/latejob.rs"]
 mod latejob;
+#[path = "slurm/launchers.rs"]
+mod launchers;
 #[path = "slurm/leave.rs"]
 mod leave;
 #[path = "slurm/monitoring.rs"]
@@ -241,6 +243,10 @@ struct Job {
     next_step: u64,
 }
 
+/// A launcher that waits for its job to start: its step, its name, its
+/// node, its node's index, and its service.
+type Queued = (String, String, String, u64, Value);
+
 /// A Slurm in memory, with one srt-slurm checkout. Each command line it
 /// runs is recorded.
 struct Fake {
@@ -273,12 +279,23 @@ struct Fake {
     /// What `squeue --format=%e|%L` prints for a pool's job: its end, and
     /// the time it has left.
     end: &'static str,
-    /// What `ip -4 -o addr show` prints on each node.
-    ips: std::collections::BTreeMap<String, String>,
     /// Each recipe submitted, as it was when submitted.
     recipes: Vec<Value>,
-    /// Each command started and not waited for, and the log it appends to.
-    started: Vec<(gdl_gen::SlurmCommand, PathBuf)>,
+    /// The launchers of each pool's job that waits to start, by job: each
+    /// one's step, its name, its node, its node's index, and its service.
+    queued: std::collections::BTreeMap<u64, Vec<Queued>>,
+    /// The launchers that run, as real processes.
+    launchers: Vec<launchers::Launcher>,
+    /// Whether the joiners the launchers start register only once a test
+    /// lets them ([`launchers::go`]).
+    gate: bool,
+    /// Whether a step's signal reaches every process in it, as on a site
+    /// whose `cgroup.conf` sets `SignalChildrenProcesses=yes`, not its task
+    /// alone.
+    signal_children: bool,
+    /// Each joiner still running when its pool's job was cancelled: its
+    /// pid, whether it was registered, and how many `TERM`s it got.
+    killed: Vec<(i32, bool, usize)>,
 }
 
 impl Fake {
@@ -298,9 +315,12 @@ impl Fake {
             holder: None,
             version: "slurm 24.05.4\n",
             end: "2026-11-06T16:00:00|7:59:59",
-            ips: std::collections::BTreeMap::new(),
             recipes: Vec::new(),
-            started: Vec::new(),
+            queued: std::collections::BTreeMap::new(),
+            launchers: Vec::new(),
+            gate: false,
+            signal_children: false,
+            killed: Vec::new(),
         }
     }
 
@@ -359,12 +379,64 @@ impl Fake {
             let _ = std::fs::remove_file(&staged);
             std::os::unix::fs::symlink(&own, &staged).expect("a link");
             std::fs::rename(&staged, fleet_dir.join("directory.endpoint")).expect("the pointer");
-        } else if let Some(dir) = &job.dir {
+        } else if let Some(dir) = job.dir.clone() {
             std::fs::write(
                 dir.join(format!("hub.{id}.address")),
                 format!("node-{id}:1337 node-{id}:8337\n"),
             )
             .expect("its hub's address");
+            for (step, name, node, index, service) in self.queued.remove(&id).unwrap_or_default() {
+                let launcher = launchers::Launcher::start(
+                    id,
+                    step,
+                    name,
+                    &node,
+                    &service,
+                    &dir,
+                    &Self::address(id, index),
+                    self.gate,
+                );
+                self.launchers.push(launcher);
+            }
+        }
+    }
+
+    /// The launchers of job `id` that run, so that Slurm lists their steps.
+    fn running_launchers(&mut self, id: u64) -> Vec<(String, String, String)> {
+        self.launchers
+            .iter_mut()
+            .filter(|launcher| launcher.job == id)
+            .filter_map(|launcher| {
+                launcher.alive().then(|| {
+                    (
+                        launcher.step.clone(),
+                        launcher.name.clone(),
+                        launcher.node.clone(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Wait, a few seconds at most, until the launcher of each segment on
+    /// each spare node of job `id` is up, as a pool's job is once srt-slurm
+    /// has started its services.
+    fn launchers_up(&mut self, id: u64) {
+        let dir = self.job(id).dir.clone().expect("a pool's directory");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        for (_, name, node) in self.running_launchers(id) {
+            let segment = name
+                .strip_prefix("service_launch_")
+                .expect("a launcher")
+                .trim_end_matches(&format!("_{node}"));
+            let up = dir.join(format!("launch.{id}/{node}/{segment}/up"));
+            while !up.exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the launcher of {segment} on {node} is not up"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
         }
     }
 
@@ -424,8 +496,61 @@ impl Fake {
             };
             self.add_step(id, &name, &format!("spare-{id}-{node}"));
         }
+        // Each segment's launcher rides on the spare nodes, one on each, as
+        // srt-slurm places a service on another's pool. It runs once the
+        // job does.
+        let services = recipe_json["services"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for service in &services {
+            let Some(segment) = service["name"]
+                .as_str()
+                .and_then(|name| name.strip_prefix("launch_"))
+            else {
+                continue;
+            };
+            assert_eq!(service["placement"]["pool"], "spare", "{service}");
+            assert!(service.get("nodes").is_none(), "{service}");
+            // srt-slurm starts its step with what shapes the segment's own.
+            if let Some(own) = services.iter().find(|own| own["name"] == segment) {
+                for same in [
+                    "type",
+                    "container",
+                    "env",
+                    "preamble",
+                    "cpus_per_task",
+                    "cpu_bind",
+                    "srun_options",
+                ] {
+                    assert_eq!(service.get(same), own.get(same), "{same} of {service}");
+                }
+                assert_eq!(service["placement"]["per"], own["placement"]["per"]);
+            }
+            for node in 0..spare {
+                let job = self.job(id);
+                let step = format!("{id}.{}", job.next_step);
+                job.next_step += 1;
+                let name = match spare {
+                    1 => format!("service_launch_{segment}"),
+                    _ => format!("service_launch_{segment}_spare-{id}-{node}"),
+                };
+                self.queued.entry(id).or_default().push((
+                    step,
+                    name,
+                    format!("spare-{id}-{node}"),
+                    node,
+                    service.clone(),
+                ));
+            }
+        }
         self.recipes.push(recipe_json);
         id
+    }
+
+    /// The address srt-slurm gives spare node `node` of job `id`.
+    fn address(id: u64, node: u64) -> String {
+        format!("10.1.{node}.{}", id % 250)
     }
 
     /// Add step `name` on `node` to job `id`: its id.
@@ -475,6 +600,7 @@ impl Fake {
             }
             ["--steps", jobs, "--all", "--noheader", "--format=%i|%j"] => {
                 let id = number(jobs.strip_prefix("--jobs=").expect("--jobs"));
+                let launchers = self.running_launchers(id);
                 let job = self.job(id);
                 let front = match job.name.split_once("-join-") {
                     Some((_, segment)) => segment,
@@ -484,17 +610,18 @@ impl Fake {
                 let mut out = format!(
                     "{id}.0|service_hub\n{id}.1|service_{front}\n{id}.2|service_hub.container-prepare\n"
                 );
-                for (step, name, _) in &job.steps {
+                for (step, name, _) in job.steps.iter().chain(&launchers) {
                     out.push_str(&format!("{step}|{name}\n"));
                 }
                 gdl_gen::Reply::ok(out)
             }
             ["--steps", jobs, "--all", "--noheader", "--format=%i|%j|%N"] => {
                 let id = number(jobs.strip_prefix("--jobs=").expect("--jobs"));
+                let launchers = self.running_launchers(id);
                 let job = self.job(id);
                 let mut out =
                     format!("{id}.0|service_hub|node-{id}\n{id}.1|service_engine|node-{id}\n");
-                for (step, name, node) in &job.steps {
+                for (step, name, node) in job.steps.iter().chain(&launchers) {
                     out.push_str(&format!("{step}|{name}|{node}\n"));
                 }
                 gdl_gen::Reply::ok(out)
@@ -529,15 +656,21 @@ impl Fake {
             Some("--signal=TERM") => {
                 for target in &args[1..] {
                     let id = number(target.split('.').next().expect("a job"));
+                    // A launcher's step: its task alone gets the signal, as
+                    // with `proctrack/cgroup`, unless the site signals children.
+                    for launcher in &self.launchers {
+                        if launcher.job == id && (&launcher.step == target || !target.contains('.'))
+                        {
+                            match self.signal_children {
+                                true => launcher.signal_all(rustix::process::Signal::TERM),
+                                false => launcher.signal(rustix::process::Signal::TERM),
+                            }
+                        }
+                    }
                     let job = self.job(id);
                     job.terminated = true;
-                    // A joiner leaves on the signal: a step started by
-                    // `join --in-job` ends, and a joining job, whose
-                    // segment is its terminal service, completes.
-                    job.steps.retain(|(step, name, _)| {
-                        !(name.starts_with("gdl-join-")
-                            && (step == target || !target.contains('.')))
-                    });
+                    // A joining job, whose segment is its terminal
+                    // service, completes on the signal.
                     if job.name.contains("-join-") {
                         job.state = "COMPLETED";
                     }
@@ -546,12 +679,40 @@ impl Fake {
             _ => {
                 for target in args {
                     assert!(!target.starts_with('-'), "scancel {args:?}");
-                    let job = self.job(number(target));
-                    job.state = "CANCELLED";
+                    let id = number(target);
+                    self.cancel_launchers(id);
+                    self.job(id).state = "CANCELLED";
                 }
             }
         }
         gdl_gen::Reply::ok("")
+    }
+
+    /// Send `signal` to the launchers of job `id`, each its process alone:
+    /// `STOP` and `CONT` stand in for a node too slow to read its mailbox.
+    fn signal_launchers(&self, id: u64, signal: rustix::process::Signal) {
+        for launcher in self.launchers.iter().filter(|launcher| launcher.job == id) {
+            launcher.signal(signal);
+        }
+    }
+
+    /// End job `id`'s launchers and their joiners, as a cancel ends every
+    /// step: each joiner that still runs is recorded in
+    /// [`Fake::killed`] first.
+    fn cancel_launchers(&mut self, id: u64) {
+        if !self.launchers.iter().any(|launcher| launcher.job == id) {
+            return;
+        }
+        if let Some(dir) = self.job(id).dir.clone() {
+            let registered = launchers::registered(&dir);
+            for pid in launchers::joiners(&dir) {
+                if launchers::running(pid) {
+                    self.killed
+                        .push((pid, registered.contains(&pid), launchers::terms(&dir, pid)));
+                }
+            }
+        }
+        self.launchers.retain(|launcher| launcher.job != id);
     }
 
     /// A hub's answer to `curl`, at the job that its address names.
@@ -602,11 +763,18 @@ impl Fake {
                 (200, format!("{{\"withdrawn\": {withdrawn}}}"))
             }
             ("8337", "/v1/ext/gdl-pool/instances", false) => {
-                let listed = match job.terminated {
-                    true => "[]",
-                    false => "[{\"segment\": \"front\"}]",
+                // The pool's own instance, until its signal; and each
+                // joiner a launcher started, while it is registered.
+                let mut listed: Vec<&str> = match job.terminated {
+                    true => Vec::new(),
+                    false => vec!["{\"segment\": \"front\"}"],
                 };
-                (200, format!("{{\"instances\": {listed}}}"))
+                let joiners = job
+                    .dir
+                    .as_deref()
+                    .map_or(0, |dir| launchers::registered(dir).len());
+                listed.extend(std::iter::repeat_n("{\"segment\": \"joiner\"}", joiners));
+                (200, format!("{{\"instances\": [{}]}}", listed.join(", ")))
             }
             other => panic!("curl {other:?}"),
         };
@@ -668,19 +836,6 @@ impl gdl_gen::Slurm for Fake {
                 gdl_gen::Reply::ok(format!("{id}|{state}|1:0\n{id}.batch|{state}|1:0\n"))
             }
             "curl" => self.curl(&command.args),
-            "srun" if command.args.iter().any(|arg| arg == "ip") => {
-                let node = command
-                    .args
-                    .iter()
-                    .find_map(|arg| arg.strip_prefix("--nodelist="))
-                    .expect("a node");
-                match self.ips.get(node) {
-                    Some(said) => gdl_gen::Reply::ok(said.clone()),
-                    None => {
-                        gdl_gen::Reply::failed(format!("Device \"ib0\" does not exist on {node}\n"))
-                    }
-                }
-            }
             "srun" => {
                 let at = command
                     .args
@@ -692,47 +847,15 @@ impl gdl_gen::Slurm for Fake {
             other => panic!("{other} {:?}", command.args),
         })
     }
-
-    /// A joiner's `srun`, which the fake runs as a step of its job on its
-    /// node at once.
-    fn start(
-        &mut self,
-        command: &gdl_gen::SlurmCommand,
-        log: &Path,
-    ) -> Result<Box<dyn gdl_gen::Launched>, gdl_gen::Error> {
-        self.calls.borrow_mut().push(command.clone());
-        self.started.push((command.clone(), log.to_path_buf()));
-        assert_eq!(command.program, "srun", "{command:?}");
-        let flag = |name: &str| {
-            command
-                .args
-                .iter()
-                .find_map(|arg| arg.strip_prefix(name))
-                .unwrap_or_else(|| panic!("{name} in {command:?}"))
-                .to_string()
-        };
-        let id = number(&flag("--jobid="));
-        self.add_step(id, &flag("--job-name="), &flag("--nodelist="));
-        Ok(Box::new(Alive))
-    }
 }
 
-/// A launch that has not exited.
-pub(super) struct Alive;
-
-impl gdl_gen::Launched for Alive {
-    fn exited(&mut self) -> bool {
-        false
-    }
-}
-
-/// The holds that launches have on spare nodes, in the registry of the
-/// pool whose directory is `dir`: one line each, `<job> <node> <launch>
-/// <log>`.
-pub(super) fn holds(dir: &Path) -> Vec<String> {
-    std::fs::read_to_string(dir.join("join.reservations"))
+/// The requests in the registry of the pool whose directory is `dir`: one
+/// line each, `request <job> <node> <segment> <step> <n> <launch>`.
+pub(super) fn requests(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("join.requests"))
         .unwrap_or_default()
         .lines()
+        .filter(|line| line.starts_with("request "))
         .map(str::to_string)
         .collect()
 }

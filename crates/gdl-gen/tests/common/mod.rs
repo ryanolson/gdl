@@ -331,3 +331,49 @@ pub fn get(address: SocketAddr, path: &str) -> (u16, String) {
         response.split("\r\n\r\n").nth(1).unwrap_or("").to_string(),
     )
 }
+
+/// Kill `pid` and every process descended from it, found by `/proc`, as
+/// Slurm kills what is left in a step: a launcher's children run in
+/// process groups of their own, which a kill of its group would miss.
+pub fn kill_tree(pid: u32) {
+    for pid in tree(pid) {
+        let _ = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+/// `pid` and every process descended from it, found by `/proc`.
+pub fn tree(pid: u32) -> Vec<u32> {
+    let parents: Vec<(u32, u32)> = std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let child: u32 = entry.file_name().to_str()?.parse().ok()?;
+            let stat = std::fs::read_to_string(format!("/proc/{child}/stat")).ok()?;
+            let parent = stat
+                .rsplit_once(") ")?
+                .1
+                .split_whitespace()
+                .nth(1)?
+                .parse()
+                .ok()?;
+            Some((child, parent))
+        })
+        .collect();
+    let mut found = vec![pid];
+    let mut at = 0;
+    while at < found.len() {
+        let of = found[at];
+        found.extend(
+            parents
+                .iter()
+                .filter(|(_, parent)| *parent == of)
+                .map(|(child, _)| *child),
+        );
+        at += 1;
+    }
+    found
+}

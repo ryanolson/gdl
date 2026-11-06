@@ -15,6 +15,7 @@ use super::k8s::{self, Naming, Prepared};
 use super::{Sources, images};
 use crate::{Error, Files, Spec};
 
+pub(crate) mod launcher;
 mod recipe;
 
 pub(crate) use recipe::HUB_ADDRESS;

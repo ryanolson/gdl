@@ -1482,5 +1482,7 @@ mod namespace;
 #[path = "deploy/operator.rs"]
 mod operator;
 
+// The fake Slurm runs each pool's launchers, which exist only on Linux.
+#[cfg(target_os = "linux")]
 #[path = "deploy/slurm.rs"]
 mod slurm;

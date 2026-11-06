@@ -765,11 +765,23 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** pin a gdl at least as recent as the generator that renders the recipes, or take gdl by `path`.
 - **Lifts:** a gdl version the render can compare, recorded with the images.
 
-### `cargo gdl join --in-job` is not available yet
-- **What:** `cargo gdl join --in-job`, which would add an instance to a running pool as a step of the pool's own job on one of its spare nodes, fails at once, before it runs any Slurm command. A pool's `slurm.spare_nodes` still hold their nodes, unused.
-- **Why:** such a step is started by an `srun` on the login node, detached from `cargo gdl`, and exists only once that `srun` has made it. A `down` that runs meanwhile cannot be sure that every such launch has made its step and had its signal before it cancels the pool's job: review found it could cancel a joiner unsignalled, with its requests in flight, through one race after another.
-- **Workaround:** add instances with `cargo gdl join` without `--in-job`: a job of their own, which waits in the queue.
-- **Lifts:** a launcher inside the pool's job, which starts and stops joiners on its spare nodes itself.
+### A joiner on a spare node dies with its launcher
+- **What:** a joiner that `cargo gdl join --in-job` started is the child of its launcher, `launch_<segment>`, in the launcher's step, and its death signal is `SIGKILL`. If the launcher dies, killed or out of memory, the joiner is killed with it, undrained. srt-slurm does not start the launcher again, so that spare node takes no other joiner of that segment.
+- **Why:** srt-slurm runs every `generic` service in a container with no Slurm client, so a joiner cannot be a step of its own. A joiner outliving its launcher would run where no `leave` or `down` reaches it.
+- **Workaround:** none for the joiner. Add instances with `cargo gdl join` without `--in-job`, as a job of their own.
+- **Lifts:** srt-slurm services that restart, or a launcher that a site lets start steps of the pool's job.
+
+### A joiner can get a second `SIGTERM` where Slurm signals every process of a step
+- **What:** on a site that signals every process of a step (`cgroup.conf`'s `SignalChildrenProcesses=yes`, `proctrack/pgid`, or `proctrack/linuxproc`), a joiner that `leave` stopped, and that still drains when its launcher's step gets a `SIGTERM` of its own (the job's `--signal`, or a cancel), gets that `SIGTERM` too. The second one stops it at once, and cuts its drain short. A joiner that its launcher starts in the very instant that such a `SIGTERM` reaches the step may get none: the launcher checks for one just before it starts a joiner, not as it does. That needs such a site, and happens only at the job's end, from its `--signal` or a cancel, when the rest of the pool drains: that one joiner ends with the job, undrained.
+- **Why:** such a site signals every process of a step, the launcher's child among them. The launcher sends its child one `SIGTERM` at most, and its canary keeps it from adding one to a step's. It cannot take back the `SIGTERM` that Slurm sends. `down` sends a launcher's step no signal: it stops each joiner through its records.
+- **Workaround:** let a joiner that `leave` stopped finish before its job ends. `leave` returns once it has.
+- **Lifts:** none planned. Slurm's default, `proctrack/cgroup` with `SignalChildrenProcesses=no`, signals only a step's tasks.
+
+### A joiner on a spare node needs Linux 5.4 or later
+- **What:** a pool's launcher, `segment --launch`, refuses to start on a kernel older than Linux 5.4, in one line that names the kernel. `cargo gdl join --in-job` then finds no launcher up.
+- **Why:** the launcher tracks, signals, and waits for its joiner through a pidfd: `pidfd_open` came in Linux 5.3, and `waitid` on a pidfd in 5.4. A pid alone can be taken by another process once its own is reaped. There is no fallback.
+- **Workaround:** add instances with `cargo gdl join` without `--in-job`.
+- **Lifts:** none planned.
 
 ### A joiner submitted by hand can outlive its pool
 - **What:** `srtctl apply -f join-<segment>.yaml` submits a joining job with no `--deadline`. A job that runs past its pool's end loses its hub: its instances lose their lease, finish what they hold, and exit.
@@ -789,9 +801,9 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** run the segment's pools on a Kubernetes cluster.
 - **Lifts:** a secret read from the cluster's shared file system, mounted into the segment's container.
 
-### A segment on a Slurm site cannot be named `spare` or `resolve`
-- **What:** `cargo gdl slurm` refuses a segment named `spare` or `resolve` that a pool on a Slurm site runs. `hub` is refused everywhere.
-- **Why:** each service of a recipe has its segment's name, and a pool's recipe has `hub` and `spare` of its own, and a joining job's `resolve`.
+### A segment on a Slurm site cannot be named `spare`, `resolve`, or `launch_<name>`
+- **What:** `cargo gdl slurm` refuses a segment named `spare` or `resolve`, or whose name starts with `launch_`, that a pool on a Slurm site runs. `hub` is refused everywhere.
+- **Why:** each service of a recipe has its segment's name, and a pool's recipe has `hub` and `spare` of its own, a launcher `launch_<segment>` for each segment when it has spare nodes, and a joining job's `resolve`.
 - **Workaround:** rename the segment.
 - **Lifts:** service names that cannot be a segment's.
 

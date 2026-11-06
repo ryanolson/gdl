@@ -62,6 +62,15 @@ impl Unit<'_> {
             let _ = writeln!(text, "        return code;");
             let _ = writeln!(text, "    }}");
         }
+        // Then a Slurm pool's launcher, its canary, or a joiner it started:
+        // after the start check, before the segment does any work.
+        text.push_str(concat!(
+            "    // A Slurm pool's launcher or its canary, or a joiner a launcher\n",
+            "    // started: see `gdl_runtime::launched`.\n",
+            "    if let Some(code) = gdl_runtime::launched() {\n",
+            "        return code;\n",
+            "    }\n",
+        ));
         // The binary, not the runtime, installs the subscriber: a program
         // that deploys the segment through the library keeps its own. On
         // stderr, since a segment that serves JSON lines answers on stdout.

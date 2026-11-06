@@ -62,7 +62,7 @@ use std::path::{Path, PathBuf};
 pub use build::{Build, build};
 pub use deployment::{
     Buildx, Built, ComposeBundle, Deploy, Dgds, Digests, Docker, JoinBy, Joiner, Kube, Kubectl,
-    Launched, Outcome, Reply, Slurm, SlurmCli, SlurmCommand, SlurmRender, Sources, Waits, compose,
+    Outcome, Reply, Slurm, SlurmCli, SlurmCommand, SlurmRender, Sources, Waits, compose,
     compose_bundle, compose_files, deploy, down, images, join, k8s, k8s_files, leave, slurm,
     slurm_files, tunables_warnings,
 };

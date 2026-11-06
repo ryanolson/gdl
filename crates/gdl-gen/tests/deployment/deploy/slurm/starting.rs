@@ -1,13 +1,16 @@
 //! A joiner whose start is not seen, and a waiting joiner that starts as
-//! it is cancelled, against a small fake Slurm whose answers each test
-//! picks.
+//! it is cancelled: the first against the fake Slurm and its launchers,
+//! the second against a small fake Slurm whose answers each test picks.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use gdl_gen::{JoinBy, Joiner, Reply, Slurm, SlurmCommand, Waits};
+use rustix::process::Signal;
 use serde_json::json;
 
+use super::join::{join, launch_of, spare_site, until};
+use super::{Mirror, launchers, requests, slurm_waits};
 struct Fixture {
     _dir: tempfile::TempDir,
     fleet: PathBuf,
@@ -48,18 +51,6 @@ impl Fixture {
         );
         Self { _dir: dir, fleet }
     }
-
-    fn join(&self, fake: &mut dyn Slurm) -> Result<Joiner, gdl_gen::Error> {
-        gdl_gen::join(
-            &self.fleet,
-            "p",
-            "engine",
-            JoinBy::Step,
-            &waits(),
-            fake,
-            &mut |_| {},
-        )
-    }
 }
 
 fn waits() -> Waits {
@@ -71,116 +62,122 @@ fn waits() -> Waits {
     }
 }
 
-#[derive(Default)]
-struct Launches {
-    delayed: bool,
-    fail_listing: bool,
-    listing_failed: bool,
-    started: Vec<SlurmCommand>,
-    published: usize,
+/// A joiner its launcher started keeps its node: the next join is
+/// refused, and starts nothing.
+#[test]
+fn a_listed_joiner_keeps_its_node() {
+    let mirror = Mirror::new();
+    let (site, mut slurm) = spare_site(&mirror, 1);
+    let first = join(&site, &mut slurm, "model-x-01", "engine", JoinBy::Step).expect("joined");
+    let launch = launch_of(&first, "1003.4").to_string();
+    let error = join(&site, &mut slurm, "model-x-01", "engine", JoinBy::Step)
+        .expect_err("refused")
+        .to_string();
+    assert!(error.contains(&format!("holds launch {launch}")), "{error}");
+    assert_eq!(
+        launchers::joiners(&site.fleet_dir.join("model-x-01")).len(),
+        1
+    );
 }
 
-impl Slurm for Launches {
-    fn run(&mut self, command: &SlurmCommand) -> Result<Reply, gdl_gen::Error> {
-        match command.program.as_str() {
-            "squeue" if command.args.iter().any(|arg| arg == "--steps") => {
-                if self.fail_listing && !self.listing_failed && self.started.len() == 1 {
-                    self.listing_failed = true;
+/// A listing of the steps that fails while a join waits for its launcher,
+/// as a busy controller's can, does not end the wait: the launcher, held
+/// until then, starts the launch, and the join names that joiner. A join
+/// that failed here would leave a launch that starts with no handle to
+/// stop it by.
+#[test]
+fn a_failed_listing_does_not_end_the_wait_for_a_live_launch() {
+    struct Failing<'a> {
+        fake: &'a mut super::Fake,
+        listings: usize,
+    }
+
+    impl Slurm for Failing<'_> {
+        fn run(&mut self, command: &SlurmCommand) -> Result<Reply, gdl_gen::Error> {
+            if command.program == "squeue" && command.args.iter().any(|arg| arg == "--steps") {
+                self.listings += 1;
+                // The first chooses the node; the second waits for its
+                // start, and fails; the third lets the launcher go on.
+                if self.listings == 2 {
                     return Ok(Reply::failed(
                         "slurm_load_job_steps: controller temporarily unavailable",
                     ));
                 }
-                let mut text = "42.0|service_hub|node-42\n42.1|service_engine|node-43\n42.2|service_spare|spare-42\n".to_string();
-                for (index, started) in self.started.iter().take(self.published).enumerate() {
-                    let name = started
-                        .args
-                        .iter()
-                        .find_map(|arg| arg.strip_prefix("--job-name="))
-                        .expect("a step name");
-                    text.push_str(&format!("42.{}|{name}|spare-42\n", index + 3));
+                if self.listings == 3 {
+                    self.fake.signal_launchers(1003, Signal::CONT);
                 }
-                Ok(Reply::ok(text))
             }
-            "squeue" => Ok(Reply::ok("42|RUNNING|gdl-api-p|gdl:api:p:pool:hash\n")),
-            "srun" => Ok(Reply::ok("4: ib0 inet 10.1.0.7/16 scope global ib0\n")),
-            _ => panic!("unexpected command: {command:?}"),
+            Slurm::run(self.fake, command)
         }
     }
 
-    fn start(
-        &mut self,
-        command: &SlurmCommand,
-        _log: &Path,
-    ) -> Result<Box<dyn gdl_gen::Launched>, gdl_gen::Error> {
-        self.started.push(command.clone());
-        if !self.delayed || self.started.len() > 1 {
-            self.published = self.started.len();
-        }
-        Ok(Box::new(super::Alive))
-    }
-}
-
-#[test]
-#[ignore = "in-job launches are refused until the in-job launcher lands"]
-fn a_listed_joiner_keeps_its_node() {
-    let fixture = Fixture::new();
-    let mut fake = Launches::default();
-    assert_eq!(
-        fixture.join(&mut fake).expect("joined"),
-        Joiner::Step("42.3".into())
-    );
-    assert!(
-        fixture
-            .join(&mut fake)
-            .expect_err("refused")
-            .to_string()
-            .contains("every spare node holds a joiner")
-    );
-    assert_eq!(fake.started.len(), 1);
-}
-
-#[test]
-#[ignore = "in-job launches are refused until the in-job launcher lands"]
-fn a_failed_listing_does_not_free_the_node_of_a_live_launch() {
-    let fixture = Fixture::new();
-    let mut fake = Launches {
-        delayed: true,
-        fail_listing: true,
-        ..Default::default()
+    let mirror = Mirror::new();
+    let (site, mut fake) = spare_site(&mirror, 1);
+    let dir = site.fleet_dir.join("model-x-01");
+    fake.signal_launchers(1003, Signal::STOP);
+    let mut failing = Failing {
+        fake: &mut fake,
+        listings: 0,
     };
-    let first = fixture.join(&mut fake).expect_err("refused").to_string();
+    let joiner = gdl_gen::join(
+        &site.files.fleet,
+        "model-x-01",
+        "engine",
+        JoinBy::Step,
+        &slurm_waits(),
+        &mut failing,
+        &mut |_| {},
+    )
+    .expect("joined, past the failed listing");
+    assert!(failing.listings >= 3, "{}", failing.listings);
+    let Joiner::Step(handle) = joiner else {
+        panic!("a step: {joiner:?}");
+    };
+    assert_eq!(requests(&dir).len(), 1);
     assert!(
-        first.contains("controller temporarily unavailable"),
-        "{first}"
+        requests(&dir)[0].ends_with(handle.split_once('+').expect("a launch").1),
+        "{handle}: {:?}",
+        requests(&dir)
     );
-    let second = fixture.join(&mut fake);
-    assert_eq!(
-        fake.started.len(),
-        1,
-        "a detached first srun remains alive after the failed listing; retry must not start a second on its node: second={second:?}, published={}",
-        fake.published
-    );
+    assert_eq!(launchers::joiners(&dir).len(), 1);
 }
 
+/// A launch its launcher does not start within the objects' wait is
+/// withdrawn, and keeps its node until the launcher says it dropped it: a
+/// retry meanwhile starts no second joiner.
 #[test]
-#[ignore = "in-job launches are refused until the in-job launcher lands"]
 fn a_launch_not_seen_in_time_keeps_its_node() {
-    let fixture = Fixture::new();
-    let mut fake = Launches {
-        delayed: true,
-        ..Default::default()
+    let mirror = Mirror::new();
+    let (site, mut slurm) = spare_site(&mirror, 1);
+    let dir = site.fleet_dir.join("model-x-01");
+    let short = Waits {
+        objects: Duration::from_millis(300),
+        ..slurm_waits()
     };
-    let first = fixture.join(&mut fake).expect_err("refused").to_string();
-    assert!(first.contains("lists no step"), "{first}");
-    let second = fixture.join(&mut fake);
-    assert_eq!(
-        fake.started.len(),
-        1,
-        "a detached first srun remains alive after the timeout: second={second:?}, published={}",
-        fake.published
-    );
+    slurm.signal_launchers(1003, Signal::STOP);
+    let first = gdl_gen::join(
+        &site.files.fleet,
+        "model-x-01",
+        "engine",
+        JoinBy::Step,
+        &short,
+        &mut slurm,
+        &mut |_| {},
+    )
+    .expect_err("not started in time")
+    .to_string();
+    assert!(first.contains("so it is withdrawn"), "{first}");
+    let second = join(&site, &mut slurm, "model-x-01", "engine", JoinBy::Step)
+        .expect_err("held")
+        .to_string();
+    assert!(second.contains("holds launch"), "{second}");
+    slurm.signal_launchers(1003, Signal::CONT);
+    let done = launchers::records(&dir, 1003, "spare-1003-0", "engine").join("1.done");
+    until("dropped", || {
+        std::fs::read_to_string(&done).is_ok_and(|text| text == "dropped\n")
+    });
+    assert!(launchers::joiners(&dir).is_empty());
 }
-
 struct PendingRace {
     state: &'static str,
     starts_then_fails: bool,
@@ -261,68 +258,63 @@ fn a_waiting_joiner_that_starts_and_fails_is_not_a_clean_leave() {
     );
 }
 
+/// A leave removes its own request alone: another join that runs while it
+/// waits for its joiner to exit keeps its request, on the other node.
 #[test]
-#[ignore = "in-job launches are refused until the in-job launcher lands"]
 fn leave_does_not_erase_a_replacement_launch_reservation() {
     struct Interleaved<'a> {
-        fixture: &'a Fixture,
-        replacement: Launches,
-        signalled: bool,
-        interleaved: bool,
+        site: &'a super::Site,
+        fake: &'a mut super::Fake,
+        replacement: Option<Joiner>,
     }
 
     impl Slurm for Interleaved<'_> {
         fn run(&mut self, command: &SlurmCommand) -> Result<Reply, gdl_gen::Error> {
-            if command.program == "scancel" {
-                assert_eq!(command.args, ["--signal=TERM", "42.9"]);
-                self.signalled = true;
-                return Ok(Reply::ok(""));
+            let reply = Slurm::run(self.fake, command)?;
+            // Once the leave has asked for the stop, it lists the steps
+            // as it waits.
+            if self.replacement.is_none()
+                && command.program == "squeue"
+                && command.args.iter().any(|arg| arg == "--steps")
+                && requests(&self.site.fleet_dir.join("model-x-01")).len() == 1
+                && self
+                    .site
+                    .fleet_dir
+                    .join("model-x-01/launch.1003/spare-1003-0/engine/1.stop")
+                    .exists()
+            {
+                self.replacement = Some(
+                    join(self.site, self.fake, "model-x-01", "engine", JoinBy::Step)
+                        .expect("the other node takes a joiner"),
+                );
             }
-            if command.program == "squeue" && command.args.iter().any(|arg| arg == "--steps") {
-                if !self.signalled {
-                    return Ok(Reply::ok(
-                        "42.0|service_hub|node-42\n42.1|service_engine|node-43\n42.2|service_spare|spare-42\n42.9|gdl-join-engine+old|spare-42\n",
-                    ));
-                }
-                if !self.interleaved {
-                    self.interleaved = true;
-                    let error = self
-                        .fixture
-                        .join(&mut self.replacement)
-                        .expect_err("a live launch not yet listed");
-                    assert!(error.to_string().contains("lists no step"), "{error}");
-                    assert_eq!(launch_files(self.fixture), 1);
-                }
-            }
-            self.replacement.run(command)
+            Ok(reply)
         }
     }
 
-    let fixture = Fixture::new();
-    let mut fake = Interleaved {
-        fixture: &fixture,
-        replacement: Launches {
-            delayed: true,
-            ..Default::default()
-        },
-        signalled: false,
-        interleaved: false,
+    let mirror = Mirror::new();
+    let (site, mut fake) = spare_site(&mirror, 2);
+    let dir = site.fleet_dir.join("model-x-01");
+    let old = join(&site, &mut fake, "model-x-01", "engine", JoinBy::Step).expect("joined");
+    launch_of(&old, "1003.5");
+    let mut slurm = Interleaved {
+        site: &site,
+        fake: &mut fake,
+        replacement: None,
     };
     gdl_gen::leave(
-        &fixture.fleet,
-        &Joiner::Step("42.9".into()),
-        &waits(),
-        &mut fake,
+        &site.files.fleet,
+        &old,
+        &slurm_waits(),
+        &mut slurm,
         &mut |_| {},
     )
-    .expect("the previous step left");
-    let marker_survived = launch_files(&fixture) == 1;
-    let retry = fixture.join(&mut fake.replacement);
+    .expect("the old joiner left");
+    let replacement = slurm.replacement.clone().expect("a replacement joined");
+    let kept = launch_of(&replacement, "1003.6");
     assert_eq!(
-        fake.replacement.started.len(),
-        1,
-        "leave must preserve a newer launch's reservation: marker_survived={marker_survived}, retry={retry:?}, published={}",
-        fake.replacement.published
+        requests(&dir),
+        [format!("request 1003 spare-1003-1 engine 1003.6 1 {kept}")]
     );
 }
 
@@ -386,13 +378,4 @@ fn leave_removes_a_running_job_whose_segment_starts_later() {
         fake.engine_started,
         fake.signal_reached_engine
     );
-}
-
-/// How many holds in the fixture's pool's registry hold spare node
-/// `spare-42` of job 42 for a launch not yet seen.
-fn launch_files(fixture: &Fixture) -> usize {
-    super::holds(&fixture._dir.path().join("runs/api/p"))
-        .iter()
-        .filter(|hold| hold.starts_with("42 spare-42 "))
-        .count()
 }

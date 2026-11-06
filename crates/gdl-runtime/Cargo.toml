@@ -47,6 +47,8 @@ toml = { workspace = true }
 velo = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
 tokio-util = { workspace = true }
+rustix = { workspace = true, features = ["process", "std", "system"] }
+signal-hook = "0.3"
 zstd-safe = { workspace = true, optional = true }
 
 [dev-dependencies]

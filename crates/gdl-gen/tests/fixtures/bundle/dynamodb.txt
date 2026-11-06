@@ -514,6 +514,11 @@ segments = ["engine"]
 //! Graph-affecting values must match the built graph.
 
 fn main() -> std::process::ExitCode {
+    // A Slurm pool's launcher or its canary, or a joiner a launcher
+    // started: see `gdl_runtime::launched`.
+    if let Some(code) = gdl_runtime::launched() {
+        return code;
+    }
     let filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(tracing_subscriber::filter::LevelFilter::WARN.into())
         .from_env_lossy();
@@ -681,6 +686,11 @@ segments = ["engine"]
 //! SIGINT or SIGTERM.
 
 fn main() -> std::process::ExitCode {
+    // A Slurm pool's launcher or its canary, or a joiner a launcher
+    // started: see `gdl_runtime::launched`.
+    if let Some(code) = gdl_runtime::launched() {
+        return code;
+    }
     let filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(tracing_subscriber::filter::LevelFilter::WARN.into())
         .from_env_lossy();

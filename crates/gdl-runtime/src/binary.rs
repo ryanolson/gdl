@@ -226,7 +226,7 @@ pub fn segment_main<B: SegmentBinary>() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    let result = runtime.block_on(run_segment::<B>(std::env::args_os().skip(1)));
+    let result = runtime.block_on(run_segment::<B>(crate::launcher::segment_args()));
     runtime.shutdown_background();
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,

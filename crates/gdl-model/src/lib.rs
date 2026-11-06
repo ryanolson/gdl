@@ -18,6 +18,7 @@ mod encoding;
 mod fleet;
 mod fresh;
 mod hash;
+pub mod launch;
 mod lease;
 mod leave;
 mod manifest;

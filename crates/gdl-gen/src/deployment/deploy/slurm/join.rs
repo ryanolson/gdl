@@ -1,6 +1,6 @@
 //! `cargo gdl join`: more instances of a segment in a running pool on a
-//! Slurm site, as a job of their own, or as a step on a spare node of the
-//! pool's job. See `docs/src/guides/slurm.md`.
+//! Slurm site, as a job of their own, or as the child of a launcher on a
+//! spare node of the pool's job. See `docs/src/guides/slurm.md`.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -8,11 +8,13 @@ use std::time::Instant;
 use gdl_model::Fleet;
 use serde_json::Value;
 
-use super::cli::{Launch, Lines, submitted};
-use super::jobs::{self, JOIN_STEP, Job, Kind, Step};
-use super::reservations::{Registry, Reservation};
-use super::{SlurmPlace, hubs, two_jobs};
+use super::cli::{Lines, submitted};
+use super::jobs::{self, Job, Kind, Step};
+use super::requests::{self, Registry, Request};
+use super::{SlurmPlace, two_jobs};
 use crate::Error;
+use crate::deployment::slurm::launcher;
+use gdl_model::launch::{self, Done, Up};
 
 /// How a segment joins a running pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,8 +25,9 @@ pub enum JoinBy {
         /// How many instances, one per node: at least 1.
         nodes: u32,
     },
-    /// One instance, as a step of the pool's own job on one of its spare
-    /// nodes that holds no other joiner.
+    /// One instance in the pool's own job, on one of its spare nodes that
+    /// holds no other joiner: a child of that node's launcher of the
+    /// segment, in the launcher's step.
     Step,
 }
 
@@ -33,7 +36,9 @@ pub enum JoinBy {
 pub enum Joiner {
     /// A joining job, by its id.
     Job(String),
-    /// A step on a spare node of a pool's job, as `<job>.<step>`.
+    /// A joiner on a spare node of a pool's job, as
+    /// `<job>.<step>+<launch>`: its launcher's step, and the launch that
+    /// started it, which no other joiner of that launcher has.
     Step(String),
 }
 
@@ -96,14 +101,8 @@ impl SlurmPlace<'_> {
                         "pool `{pool}` holds no spare node for a joiner in its job: give it `slurm = {{ spare_nodes = <n> }}` in the fleet, deploy it again with `--replace`, or join by a job of its own"
                     )));
                 }
-                let interface = self.home.interface.clone().ok_or_else(|| {
-                    Error::new(format!(
-                        "`cargo gdl join --in-job` reads a spare node's address on the interface `[cluster.{}] network_interface` names, and the site names none",
-                        self.home.name
-                    ))
-                })?;
                 let job = self.running(pool)?;
-                self.join_step(&dir, pool, segment, &recipe, &job, &interface, say)
+                self.join_step(&dir, pool, segment, &job, say)
             }
         }
     }
@@ -284,311 +283,222 @@ impl SlurmPlace<'_> {
         )))
     }
 
-    /// Start one instance of `segment`, as `recipe` runs it, in pool
-    /// `pool`'s job `job`, on a spare node that holds no other joiner,
-    /// listening on that node's one IPv4 address on `interface`.
+    /// Ask a launcher of `segment` on a spare node of pool `pool`'s job
+    /// `job` for one instance of `segment`: the launcher starts it as its
+    /// own child, in its own step, which no process outside the job holds.
     ///
-    /// Under the pool's registry lock, it chooses the node, records the
-    /// launch's hold on it, and starts the launch's `srun`; then, with the
-    /// lock let go, it waits for the launch's step. The hold goes once the
-    /// step is listed, and with the launch when its `srun` exits first, as
-    /// one that gives up at `--immediate` does. A join that stops before
-    /// either, on an error or killed, leaves the hold, which `down` waits
-    /// out ([`super::SlurmPlace::reserved`]).
-    #[allow(clippy::too_many_arguments, reason = "the parts of one step")]
+    /// Under the pool's registry lock, it lists the fleet's jobs: it
+    /// refuses a job that Slurm no longer runs, or that `down` stops, and
+    /// forgets what jobs that Slurm no longer lists asked for, and the
+    /// requests of its own job that have ended. It chooses a node whose
+    /// launcher is up and that no live request holds, records the request
+    /// with the launcher's step, and then posts it to the launcher's
+    /// mailbox: `down` knows of each request before its launcher can read
+    /// it. Then, with the lock let go, it waits for the launcher to say
+    /// that it started it. One not started within the objects' wait is
+    /// withdrawn: the launcher never starts it once it has read the
+    /// withdrawal, and holds the node until it says so.
     fn join_step(
         &mut self,
         dir: &Path,
         pool: &str,
         segment: &str,
-        recipe: &Value,
         job: &Job,
-        interface: &str,
         say: &mut dyn FnMut(&str),
     ) -> Result<Joiner, Error> {
-        let hub = hubs::address(dir, &job.id)?.ok_or_else(|| {
-            Error::new(format!(
-                "pool `{pool}`'s job {} runs, and its hub has not written where it listens ({}) yet",
-                job.id,
-                hubs::file(dir, &job.id).display()
-            ))
-        })?;
         let what = format!("listing the steps of pool `{pool}`'s job {}", job.id);
         let mut registry = Registry::open(dir, pool, &self.waits, None)?;
+        // Read under the lock: a job read before it may have been replaced
+        // since, and another join may have asked the new one for a joiner.
+        let jobs = self.list()?;
+        let live: Vec<&str> = jobs.iter().map(|listed| listed.id.as_str()).collect();
+        if !jobs
+            .iter()
+            .any(|listed| listed.id == job.id && listed.state == "RUNNING")
+        {
+            return Err(Error::new(format!(
+                "pool `{pool}`'s job {} no longer runs: run the join again",
+                job.id
+            )));
+        }
+        if registry.stops(&job.id) {
+            return Err(Error::new(format!(
+                "pool `{pool}`'s job {} is being stopped by `cargo gdl down` or a deploy, and takes no joiner",
+                job.id
+            )));
+        }
         let steps =
             Step::list(&self.run(&Lines::placed_steps(&job.id, self.waits.objects), &what)?);
-        // A hold whose step is listed has done its work: the step holds
-        // the node now.
-        let before = registry.held.len();
-        registry
-            .held
-            .retain(|held| !steps.iter().any(|step| step.launch() == Some(&held.launch)));
-        if registry.held.len() != before {
+        let before = (registry.requests.len(), registry.stopping.len());
+        registry.forget_ended_jobs(&live);
+        let mut kept = Vec::new();
+        for request in std::mem::take(&mut registry.requests) {
+            if request.job != job.id || !requests::ended(dir, &request, &steps) {
+                kept.push(request);
+            }
+        }
+        registry.requests = kept;
+        if (registry.requests.len(), registry.stopping.len()) != before {
             registry.save()?;
         }
-        let holds: Vec<&Reservation> = registry
-            .held
-            .iter()
-            .filter(|held| held.job == job.id)
-            .collect();
-        let node = free_node(&steps, &holds, registry.path())
-            .map_err(|why| Error::new(format!("pool `{pool}`'s job {}: {why}", job.id)))?;
-        let address = self.address(&job.id, &node, interface)?;
-        let service = recipe["services"]
-            .as_array()
-            .and_then(|services| services.iter().find(|service| service["name"] == segment))
-            .ok_or_else(|| Error::new(format!("the joining recipe runs no service `{segment}`")))?;
-        let script = script(service, &address, &hub)?;
-        let image = service["container"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        let mounts: Vec<String> = recipe["extra_mount"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|mount| mount.as_str().map(str::to_string))
-            .collect();
-        // This launch owns its step by its name, and its hold: no other
-        // join or leave takes either for its own.
+        // The spare nodes, by the launchers Slurm lists on them; the
+        // launcher of the segment on each says its own step once it is up.
+        // A step's name is not read for its segment: segment `a` on node
+        // `b` and segment `a_b` take the same one.
+        let mut nodes: Vec<&str> = Vec::new();
+        for step in steps.iter().filter(|step| step.launcher()) {
+            if !nodes.contains(&step.nodes.as_str()) {
+                nodes.push(&step.nodes);
+            }
+        }
+        if nodes.is_empty() {
+            return Err(Error::new(format!(
+                "pool `{pool}`'s job {} runs no launcher on a spare node: its srt-slurm has not started them yet, or the job was submitted before gdl ran them. Deploy it again with `--replace`, or join by a job of its own",
+                job.id
+            )));
+        }
+        let mut busy = Vec::new();
+        let mut chosen = None;
+        for node in nodes {
+            if let Some(held) = registry
+                .requests
+                .iter()
+                .find(|request| request.job == job.id && request.node == node)
+            {
+                busy.push(format!(
+                    "node {node} holds launch {} of `{}`",
+                    held.launch, held.segment
+                ));
+                continue;
+            }
+            let records = launcher::records(dir, &job.id, node, segment);
+            let up = launcher::read(&records, launch::UP).and_then(|text| Up::read(&text));
+            match up {
+                None => busy.push(format!(
+                    "the launcher of `{segment}` on node {node} is not up yet"
+                )),
+                Some(_) if launcher::read(&records, launch::CLOSED).is_some() => busy.push(
+                    format!("the launcher of `{segment}` on node {node} has closed"),
+                ),
+                Some(up) if steps.iter().any(|listed| listed.id == up.step) => {
+                    chosen = Some((up.step, node.to_string(), up.address));
+                    break;
+                }
+                Some(up) => busy.push(format!(
+                    "the launcher of `{segment}` on node {node}, step {}, has ended",
+                    up.step
+                )),
+            }
+        }
+        let Some((step, node, address)) = chosen else {
+            return Err(Error::new(format!(
+                "pool `{pool}`'s job {}: no spare node can take a joiner of `{segment}`, and each takes one whole, since it binds the default ports: {}. Remove one with `cargo gdl leave --step <job>.<step>+<launch>`, or join by a job of its own",
+                job.id,
+                busy.join(", ")
+            )));
+        };
         let launch = launch_id();
-        let name = format!("{JOIN_STEP}{segment}+{launch}");
-        let log = dir.join(format!("join.{}.{node}.log", job.id));
-        registry.held.push(Reservation {
+        let n = registry.take_next(&job.id, &node, segment);
+        let request = Request {
             job: job.id.clone(),
             node: node.clone(),
+            segment: segment.to_string(),
+            step: step.clone(),
+            n,
             launch: launch.clone(),
-            log: log.clone(),
-        });
+        };
+        registry.requests.push(request.clone());
         registry.save()?;
-        let line = Lines::launch(
-            &Launch {
-                job: &job.id,
-                node: &node,
-                name: &name,
-                image: &image,
-                mounts: &mounts,
-                script: &script,
-                immediate: self.waits.objects,
-            },
-            self.waits.objects,
-        );
-        let mut started = match self.slurm.start(&line, &log) {
-            Ok(started) => started,
-            Err(error) => {
-                // Nothing started.
-                registry.held.retain(|held| held.launch != launch);
-                registry.save()?;
-                return Err(error);
-            }
-        };
+        let records = request.records(dir);
+        // A `run` that another launch wrote first starts that launch's
+        // joiner, never this one's.
+        let posted = launcher::write_once(&records, &launch::run(n), &format!("{launch}\n"))
+            .and_then(|ours| {
+                ours.then_some(()).ok_or_else(|| {
+                    std::io::Error::other("it holds another launch's request already")
+                })
+            });
+        if let Err(error) = posted {
+            // Its `run` may have landed: withdraw it, so that its launcher
+            // drops it, or stops what it started; the node stays held until
+            // the launcher says it ended.
+            let withdrawn = request.stop(dir);
+            return Err(Error::new(format!(
+                "{}: {error}. Launch {launch} is withdrawn{}; node {node} stays held, in {}, until the launcher says it ended",
+                records.display(),
+                match withdrawn {
+                    Ok(()) => String::new(),
+                    Err(also) => format!(" ({also})"),
+                },
+                Registry::path(dir).display()
+            )));
+        }
         drop(registry);
-        let unseen = |why: String| {
-            Error::new(format!(
-                "{why}. Node {node} stays held, in {}, until step `{name}` is listed, or `cargo gdl down` finds the launch abandoned",
-                dir.join("join.reservations").display()
-            ))
-        };
-        let release = |place: &Self| -> Result<(), Error> {
-            let mut registry = Registry::open(dir, pool, &place.waits, None)?;
-            registry.held.retain(|held| held.launch != launch);
-            registry.save()
-        };
-        // The step is listed once Slurm has made it, before its container
-        // starts; its `srun` makes it within `--immediate`, or exits.
-        let deadline = Instant::now() + self.waits.objects + self.waits.interval * 5;
+        let handle = format!("{step}+{launch}");
+        let log = launcher::log(dir, &job.id, &node, &launch);
+        let deadline = Instant::now() + self.waits.objects;
         loop {
-            // Read before the listing: a launch that made its step and
-            // ended at once is found in the listing that follows.
-            let exited = started.exited();
-            let listed = Step::list(
-                &self
-                    .run(&Lines::placed_steps(&job.id, self.waits.objects), &what)
-                    .map_err(|error| unseen(error.to_string()))?,
-            );
-            if let Some(step) = listed.into_iter().find(|step| step.name == name) {
-                release(self)?;
+            if request.started(dir) {
                 say(&format!(
-                    "join: step {} adds an instance of `{segment}` to pool `{pool}` on node {node}, at {address}; its output is in {}",
-                    step.id,
+                    "join: step {handle} adds an instance of `{segment}` to pool `{pool}` on node {node}, at {address}; its output is in {}",
                     log.display()
                 ));
-                return Ok(Joiner::Step(step.id));
+                return Ok(Joiner::Step(handle));
             }
-            if exited {
-                release(self)?;
-                let said = std::fs::read_to_string(&log).unwrap_or_default();
-                let tail: Vec<&str> = said.lines().rev().take(3).collect();
-                let tail: Vec<&str> = tail.into_iter().rev().collect();
+            if let Some(done) = request.done(dir) {
+                let mut registry = Registry::open(dir, pool, &self.waits, None)?;
+                registry.requests.retain(|kept| kept.launch != launch);
+                registry.save()?;
                 return Err(Error::new(format!(
-                    "`srun` on node {node} of pool `{pool}`'s job {} exited without making step `{name}`, and node {node} is free again: {}",
+                    "the launcher of `{segment}` on node {node} of pool `{pool}`'s job {} did not start launch {launch}: {}; node {node} is free again",
                     job.id,
-                    match tail.is_empty() {
-                        true => format!("see {}", log.display()),
-                        false => format!("it said `{}` ({})", tail.join(" / "), log.display()),
+                    match done {
+                        Done::Refused => "it has closed, as its job stops".to_string(),
+                        other => other.to_string(),
                     }
                 )));
             }
+            // A listing that fails, as a busy controller's can, says
+            // nothing of the step: the wait goes on, to its bound.
+            let listed = self.run(&Lines::placed_steps(&job.id, self.waits.objects), &what);
+            let mut failed = None;
+            match listed {
+                Ok(text) if !Step::list(&text).iter().any(|listed| listed.id == step) => {
+                    return Err(Error::new(format!(
+                        "the launcher of `{segment}` on node {node} of pool `{pool}`'s job {}, step {step}, ended before it started launch {launch}",
+                        job.id
+                    )));
+                }
+                Ok(_) => {}
+                Err(error) => failed = Some(error),
+            }
             if Instant::now() >= deadline {
-                return Err(unseen(format!(
-                    "pool `{pool}`'s job {} lists no step `{name}` on node {node} {} s after `srun` started it",
+                // Its `run` is posted: withdraw it whatever else fails, so
+                // that it never starts after `join` has failed. The stop
+                // is written under the lock when it can be taken, and
+                // without it otherwise: it is this request's own record.
+                let registry = Registry::open(dir, pool, &self.waits, None);
+                let stopped = request.stop(dir);
+                let also: Vec<String> = [failed, registry.err(), stopped.err()]
+                    .into_iter()
+                    .flatten()
+                    .map(|e| e.to_string())
+                    .collect();
+                return Err(Error::new(format!(
+                    "the launcher of `{segment}` on node {node} of pool `{pool}`'s job {} did not start launch {launch} within {} s, so it is withdrawn. Node {node} stays held, in {}, until the launcher says it dropped it{}",
                     job.id,
-                    self.waits.objects.as_secs()
+                    self.waits.objects.as_secs(),
+                    Registry::path(dir).display(),
+                    if also.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", also.join("; "))
+                    }
                 )));
             }
             std::thread::sleep(self.waits.interval);
         }
     }
-
-    /// Node `node`'s one IPv4 address on `interface`, read there by a step
-    /// of job `job`. Refused for none or several: each peer must reach the
-    /// joiner at the one it advertises.
-    fn address(&mut self, job: &str, node: &str, interface: &str) -> Result<String, Error> {
-        let line = Lines::addresses(job, node, interface, self.waits.objects);
-        let reply = self.slurm.run(&line)?;
-        if !reply.success {
-            return Err(Error::new(format!(
-                "reading node {node}'s address on interface {interface}: `{} {}` failed: {}",
-                line.program,
-                line.args.join(" "),
-                reply.stderr.trim()
-            )));
-        }
-        match jobs::addresses(&reply.stdout).as_slice() {
-            [one] => Ok(one.clone()),
-            [] => Err(Error::new(format!(
-                "node {node} has no IPv4 address on interface {interface}, so a joiner there has none to advertise: name the interface its peers reach it on in `[cluster.{}] network_interface`",
-                self.home.name
-            ))),
-            several => Err(Error::new(format!(
-                "node {node} has {} IPv4 addresses on interface {interface}, {}, and a joiner there advertises one: gdl cannot tell which its peers reach",
-                several.len(),
-                several.join(", ")
-            ))),
-        }
-    }
-}
-
-/// The first spare node of a pool's job, in `steps`, that holds no joiner,
-/// and no launch of one not yet seen (`holds`, in the registry at
-/// `registry`).
-fn free_node(steps: &[Step], holds: &[&Reservation], registry: &Path) -> Result<String, String> {
-    let spare: Vec<&Step> = steps.iter().filter(|step| step.spare()).collect();
-    if spare.is_empty() {
-        return Err(
-            "no step holds its spare nodes: srt-slurm's `spare` service is not running".into(),
-        );
-    }
-    let held: Vec<&Step> = steps
-        .iter()
-        .filter(|step| step.joined().is_some())
-        .collect();
-    spare
-        .iter()
-        .map(|step| step.nodes.clone())
-        .find(|node| {
-            !held.iter().any(|joiner| &joiner.nodes == node)
-                && !holds.iter().any(|held| &held.node == node)
-        })
-        .ok_or_else(|| {
-            let mut holders: Vec<String> = held
-                .iter()
-                .map(|step| format!("step {} on {}", step.id, step.nodes))
-                .collect();
-            holders.extend(holds.iter().map(|held| {
-                format!(
-                    "a launch on {} not yet seen ({}, in {})",
-                    held.node,
-                    held.launch,
-                    registry.display()
-                )
-            }));
-            format!(
-                "every spare node holds a joiner, and each takes a node whole, since it binds the default ports: {}. Remove one with `cargo gdl leave --step <job>.<step>`, or join by a job of its own",
-                holders.join(", ")
-            )
-        })
-}
-
-/// What a joiner's step runs under `bash -c`, as srt-slurm runs a service:
-/// its variables, its preamble, then its binary with its settings. Where
-/// srt-slurm would fill in `{node_ip}` and `{head_ip}`, the node's address
-/// and the hub's host go; and the hub's host and ports are set, as a
-/// joining job's `resolve` would write them.
-fn script(service: &Value, address: &str, hub: &hubs::Address) -> Result<String, Error> {
-    let (host, public) = split(&hub.public)?;
-    let (_, control) = split(&hub.control)?;
-    let mut env: Vec<(String, String)> = service["env"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter_map(|(name, value)| {
-            let value = value
-                .as_str()?
-                .replace("{node_ip}", address)
-                .replace("{head_ip}", host);
-            Some((name.clone(), value))
-        })
-        .collect();
-    env.retain(|(name, _)| {
-        !matches!(
-            name.as_str(),
-            "GDL_LISTEN" | "GDL_HUB__HOST" | "GDL_HUB__PUBLIC_PORT" | "GDL_HUB__CONTROL_PORT"
-        )
-    });
-    env.extend([
-        ("GDL_LISTEN".to_string(), format!("{address}:0")),
-        ("GDL_HUB__HOST".to_string(), host.to_string()),
-        ("GDL_HUB__PUBLIC_PORT".to_string(), public.to_string()),
-        ("GDL_HUB__CONTROL_PORT".to_string(), control.to_string()),
-    ]);
-    // The segment's binary and its settings: not the file a joining job's
-    // `resolve` writes, which this step has none of.
-    let command: Vec<&str> = service["command"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .take(2)
-        .filter_map(Value::as_str)
-        .collect();
-    if command.len() != 2 {
-        return Err(Error::new(
-            "the joining recipe's segment runs no binary with its settings",
-        ));
-    }
-    let mut parts: Vec<String> = env
-        .iter()
-        .map(|(name, value)| format!("export {name}={}", quote(value)))
-        .collect();
-    if let Some(preamble) = service["preamble"].as_str() {
-        parts.push(preamble.to_string());
-    }
-    parts.push(format!(
-        "exec {}",
-        command
-            .iter()
-            .map(|word| quote(word))
-            .collect::<Vec<_>>()
-            .join(" ")
-    ));
-    Ok(parts.join(" && "))
-}
-
-/// `host:port` as its host, without brackets, and its port.
-fn split(listener: &str) -> Result<(&str, &str), Error> {
-    let (host, port) = listener
-        .rsplit_once(':')
-        .ok_or_else(|| Error::new(format!("the hub's address `{listener}` has no port")))?;
-    let host = host
-        .strip_prefix('[')
-        .and_then(|host| host.strip_suffix(']'))
-        .unwrap_or(host);
-    Ok((host, port))
-}
-
-/// `text` as one word of a POSIX shell, whatever it holds.
-fn quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
 }
 
 /// The stop grace of `segment`, from its settings in `dir`, its pool's
@@ -611,4 +521,189 @@ fn launch_id() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos());
     format!("{:x}x{nanos:x}", std::process::id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::cli::{Slurm, SlurmCommand};
+    use super::*;
+    use crate::{Reply, Waits};
+    use std::time::Duration;
+
+    /// A job whose class runs segments `a` and `a_b`, on spare nodes `b`
+    /// and `c`: the launcher of `a` on `b` is named `service_launch_a_b`, as
+    /// the launcher of `a_b` on a job's one spare node would be. The
+    /// launcher of `a_b` on `b` starts each launch it reads.
+    struct Ambiguous {
+        dir: PathBuf,
+    }
+
+    impl Slurm for Ambiguous {
+        fn run(&mut self, command: &SlurmCommand) -> Result<Reply, Error> {
+            assert_eq!(command.program, "squeue");
+            if command.args.iter().any(|arg| arg == "--steps") {
+                let records = launcher::records(&self.dir, "42", "b", "a_b");
+                if records.join("1.run").exists() {
+                    std::fs::write(records.join("1.started"), "99\n").expect("its start");
+                }
+                return Ok(Reply::ok(
+                    "42.10|service_launch_a_b|b\n42.11|service_launch_a_c|c\n42.20|service_launch_a_b_b|b\n42.21|service_launch_a_b_c|c\n",
+                ));
+            }
+            Ok(Reply::ok("42|RUNNING|gdl-api-p|gdl:api:p:pool:hash\n"))
+        }
+    }
+
+    /// A request is tied to the step its launcher says is its own, not to
+    /// the step whose name fits the segment: here `a_b`'s launcher on node
+    /// `b` is step 42.20, while 42.10, `a`'s, has the name `a_b`'s would
+    /// have on a job with one spare node. When `a`'s step ends, `a_b`'s
+    /// joiner still runs.
+    #[test]
+    fn a_request_keeps_the_step_its_launcher_names() {
+        let scratch = tempfile::Builder::new()
+            .prefix("gdl-join-names-")
+            .tempdir()
+            .expect("a scratch directory");
+        let dir = scratch.path();
+        let records = launcher::records(dir, "42", "b", "a_b");
+        std::fs::create_dir_all(&records).expect("the records");
+        std::fs::write(records.join("up"), "10.0.0.2 42.20\n").expect("its up");
+        let fleet = Fleet::from_toml(&format!(
+            "[fleet]\nname = \"api\"\n[cluster.lab]\nkind = \"slurm\"\nregion = \"lab\"\nsrtctl = \"/unused\"\nrun_dir = {:?}\nregistry = \"registry.example/gdl\"\nplatform = \"linux/amd64\"\n[directory]\nbackend = \"dynamodb\"\nrecords_table = \"gdl-pools\"\nlists_table = \"gdl-pool-lists\"\nlocal = true\ncluster = \"lab\"\n[class.global]\nready = {{ a = 1, a_b = 1 }}\n[pool.p]\nclass = \"global\"\ncluster = \"lab\"\nslurm = {{ spare_nodes = 2 }}\n",
+            dir.display().to_string()
+        ))
+        .expect("the fleet");
+        let waits = Waits {
+            interval: Duration::from_millis(1),
+            objects: Duration::from_secs(1),
+            drain: Duration::from_secs(1),
+            health: Duration::from_secs(1),
+        };
+        let mut slurm = Ambiguous {
+            dir: dir.to_path_buf(),
+        };
+        let mut place = SlurmPlace::new(&mut slurm, &fleet, waits, false).expect("the site");
+        let job = Job::list("42|RUNNING|gdl-api-p|gdl:api:p:pool:hash\n", "api").remove(0);
+        let joiner = place
+            .join_step(dir, "p", "a_b", &job, &mut |_| {})
+            .expect("joined");
+        assert!(
+            matches!(&joiner, Joiner::Step(handle) if handle.starts_with("42.20+")),
+            "{joiner:?}"
+        );
+        let registry = Registry::open(dir, "p", &waits, None).expect("the registry");
+        let [request] = &registry.requests[..] else {
+            panic!("one request: {:?}", registry.requests);
+        };
+        assert_eq!(request.step, "42.20");
+        let left = Step::list("42.20|service_launch_a_b_b|b\n42.21|service_launch_a_b_c|c\n");
+        assert!(!requests::ended(dir, request, &left));
+    }
+
+    /// A Slurm whose step listing fails, once `1.run` is posted, for
+    /// `failures` polls, and whose launcher then starts the launch if
+    /// `starts`.
+    struct Flaky {
+        dir: PathBuf,
+        failures: u32,
+        starts: bool,
+    }
+
+    impl Slurm for Flaky {
+        fn run(&mut self, command: &SlurmCommand) -> Result<Reply, Error> {
+            assert_eq!(command.program, "squeue");
+            if command.args.iter().any(|arg| arg == "--steps") {
+                let records = launcher::records(&self.dir, "42", "b", "a");
+                if records.join("1.run").exists() {
+                    if self.failures > 0 {
+                        self.failures -= 1;
+                        return Ok(Reply::failed("slurm_load_jobs error: Socket timed out"));
+                    }
+                    if self.starts {
+                        std::fs::write(records.join("1.started"), "99\n").expect("its start");
+                    }
+                }
+                return Ok(Reply::ok("42.10|service_launch_a_b|b\n"));
+            }
+            Ok(Reply::ok("42|RUNNING|gdl-api-p|gdl:api:p:pool:hash\n"))
+        }
+    }
+
+    /// `join_step` for segment `a` on a job with one spare node, `b`,
+    /// through `slurm`, with `dir` its pool's directory.
+    fn join_flaky(dir: &Path, slurm: &mut Flaky) -> Result<Joiner, Error> {
+        let records = launcher::records(dir, "42", "b", "a");
+        std::fs::create_dir_all(&records).expect("the records");
+        std::fs::write(records.join("up"), "10.0.0.2 42.10\n").expect("its up");
+        let fleet = Fleet::from_toml(&format!(
+            "[fleet]\nname = \"api\"\n[cluster.lab]\nkind = \"slurm\"\nregion = \"lab\"\nsrtctl = \"/unused\"\nrun_dir = {:?}\nregistry = \"registry.example/gdl\"\nplatform = \"linux/amd64\"\n[directory]\nbackend = \"dynamodb\"\nrecords_table = \"gdl-pools\"\nlists_table = \"gdl-pool-lists\"\nlocal = true\ncluster = \"lab\"\n[class.global]\nready = {{ a = 1 }}\n[pool.p]\nclass = \"global\"\ncluster = \"lab\"\nslurm = {{ spare_nodes = 1 }}\n",
+            dir.display().to_string()
+        ))
+        .expect("the fleet");
+        let waits = Waits {
+            interval: Duration::from_millis(1),
+            objects: Duration::from_millis(300),
+            drain: Duration::from_secs(1),
+            health: Duration::from_secs(1),
+        };
+        let mut place = SlurmPlace::new(slurm, &fleet, waits, false).expect("the site");
+        let job = Job::list("42|RUNNING|gdl-api-p|gdl:api:p:pool:hash\n", "api").remove(0);
+        place.join_step(dir, "p", "a", &job, &mut |_| {})
+    }
+
+    /// A step listing that fails once, as a busy controller's does, does
+    /// not end the wait for a launch that its launcher then starts.
+    #[test]
+    fn a_failed_step_listing_does_not_end_the_wait() {
+        let scratch = tempfile::Builder::new()
+            .prefix("gdl-join-flaky-")
+            .tempdir()
+            .expect("a scratch directory");
+        let mut slurm = Flaky {
+            dir: scratch.path().to_path_buf(),
+            failures: 1,
+            starts: true,
+        };
+        let joiner = join_flaky(scratch.path(), &mut slurm).expect("joined");
+        assert!(
+            matches!(&joiner, Joiner::Step(handle) if handle.starts_with("42.10+")),
+            "{joiner:?}"
+        );
+    }
+
+    /// A launch posted while the step listing keeps failing is withdrawn
+    /// when the wait ends, and its request kept: it must not start after
+    /// `join` has failed, with no handle to stop it by.
+    #[test]
+    fn a_launch_whose_wait_fails_is_withdrawn() {
+        let scratch = tempfile::Builder::new()
+            .prefix("gdl-join-flaky-")
+            .tempdir()
+            .expect("a scratch directory");
+        let dir = scratch.path();
+        let mut slurm = Flaky {
+            dir: dir.to_path_buf(),
+            failures: u32::MAX,
+            starts: false,
+        };
+        let error = join_flaky(dir, &mut slurm)
+            .expect_err("never started")
+            .to_string();
+        assert!(error.contains("withdrawn"), "{error}");
+        let records = launcher::records(dir, "42", "b", "a");
+        let posted = std::fs::read_to_string(records.join("1.run")).expect("its run");
+        assert_eq!(
+            std::fs::read_to_string(records.join("1.stop")).ok(),
+            Some(posted)
+        );
+        let waits = Waits {
+            interval: Duration::from_millis(1),
+            objects: Duration::from_secs(1),
+            drain: Duration::from_secs(1),
+            health: Duration::from_secs(1),
+        };
+        let registry = Registry::open(dir, "p", &waits, None).expect("the registry");
+        assert_eq!(registry.requests.len(), 1, "{:?}", registry.requests);
+    }
 }

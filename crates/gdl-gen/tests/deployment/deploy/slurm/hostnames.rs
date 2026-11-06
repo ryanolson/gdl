@@ -31,8 +31,10 @@ struct QualifiedNodes<'a> {
 
 impl gdl_gen::Slurm for QualifiedNodes<'_> {
     fn run(&mut self, command: &gdl_gen::SlurmCommand) -> Result<gdl_gen::Reply, gdl_gen::Error> {
-        if command.program == "squeue" && command.args.first().is_some_and(|arg| arg == "--steps") {
-            assert!(command.args.iter().any(|arg| arg == "--jobs=1002"));
+        if command.program == "squeue"
+            && command.args.first().is_some_and(|arg| arg == "--steps")
+            && command.args.iter().any(|arg| arg == "--jobs=1002")
+        {
             self.fake.calls.borrow_mut().push(command.clone());
             // srt-slurm appends the node name verbatim for replicated
             // services. Preparation steps alone have the final suffix.

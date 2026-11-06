@@ -34,10 +34,10 @@ mod hubs;
 mod jobs;
 mod join;
 mod leave;
-mod reservations;
+mod requests;
 
-pub use cli::{Launched, Slurm, SlurmCli, SlurmCommand};
 use cli::{Lines, submitted};
+pub use cli::{Slurm, SlurmCli, SlurmCommand};
 use hubs::{Address, Hubs, Withdrawn};
 use jobs::{Job, Kind, Ran};
 pub use join::{JoinBy, Joiner};
@@ -75,8 +75,8 @@ pub(super) struct SlurmPlace<'s> {
     /// Whether `scancel` was found to filter a cancel by state in Slurm's
     /// controller ([`SlurmPlace::filters_in_controller`]).
     filters: bool,
-    /// What a stop said where it is given no `say`, such as that a
-    /// joiner's launch was abandoned, for [`Site::finish`] to say.
+    /// What a stop said where it is given no `say`, such as the steps a
+    /// stop of a pool with no parent signalled, for [`Site::finish`] to say.
     notes: Vec<String>,
 }
 
@@ -96,9 +96,6 @@ struct Home {
     /// `<run_dir>/<fleet>`.
     dir: PathBuf,
     reach: SlurmReach,
-    /// The compute nodes' interface for traffic between nodes, when the
-    /// site names it.
-    interface: Option<String>,
     /// How long before a job's time limit Slurm sends it `SIGTERM`.
     lead: u64,
 }
@@ -173,7 +170,6 @@ impl<'s> SlurmPlace<'s> {
                 srtctl: PathBuf::from(&site.srtctl),
                 dir: Path::new(&site.run_dir).join(name),
                 reach: site.reach,
-                interface: site.network_interface.clone(),
                 lead: site.signal_lead_s,
             },
             waits,
@@ -787,11 +783,13 @@ impl<'s> SlurmPlace<'s> {
     /// Let the instances of `pool`, a pool with no parent whose job `job`
     /// runs, leave: its hub refuses a drain, so each of its segments' steps
     /// and each job that joined it gets `SIGTERM`, on which each instance
-    /// retires and leaves; then wait until its hub lists no instance,
+    /// retires and leaves; then wait until its hub lists no instance, and
+    /// each joiner its launchers were asked for has ended ([`Self::joiners`]),
     /// bounded by its stop grace and the drain wait. The steps and the
     /// joining jobs are read again on each turn of the wait, and each that
-    /// appears gets its signal then: a joiner's step can start after the
-    /// first read, from a launch that outlived its `cargo gdl join`.
+    /// appears gets its signal then: srt-slurm may still be starting a
+    /// step. A launcher that gets its signal closes, and sends its joiner
+    /// one `SIGTERM`.
     fn leave(
         &mut self,
         pool: &str,
@@ -801,7 +799,6 @@ impl<'s> SlurmPlace<'s> {
     ) -> Result<(), Error> {
         let what = format!("stopping pool `{pool}`");
         let mut tried = Vec::new();
-        let mut first = BTreeMap::new();
         self.signal_new(pool, job, &what, &mut tried, say)?;
         let bound = Duration::from_secs(grace) + self.waits.drain;
         let deadline = Instant::now() + bound;
@@ -809,10 +806,15 @@ impl<'s> SlurmPlace<'s> {
             let left = deadline.saturating_duration_since(Instant::now());
             let answer = self.hub(&self.home.name.clone()).instances(pool, left)?;
             // An empty list says no instance is registered, not that no
-            // joiner is still starting. Read after the list, so that an
-            // instance registered since has a step here: every step must
-            // have had its signal, and no launch may still hold a node.
-            let outstanding = self.reserved(pool, job, &tried, &mut first, deadline, say)?;
+            // joiner is still starting. Read after the list: every step
+            // must have had its signal, and every joiner must have ended.
+            let mut outstanding: Vec<String> = self
+                .targets(pool, job, &what)?
+                .into_iter()
+                .filter(|step| !tried.contains(step))
+                .map(|step| format!("step {step}, not yet signalled"))
+                .collect();
+            outstanding.extend(self.joiners(pool, job, deadline)?);
             let listed = match &answer {
                 Answer::Body(body) => serde_json::from_str::<Value>(body)
                     .ok()
@@ -833,10 +835,7 @@ impl<'s> SlurmPlace<'s> {
                 };
                 let last = match outstanding.is_empty() {
                     true => last,
-                    false => format!(
-                        "{last}, and joiners still start: {}",
-                        outstanding.join(", ")
-                    ),
+                    false => format!("{last}, and still to end: {}", outstanding.join(", ")),
                 };
                 return Err(Error::new(format!(
                     "pool `{pool}` has no parent, and its instances did not leave within {} s, so job {} is not cancelled: {last}",
@@ -1283,7 +1282,24 @@ impl Site for SlurmPlace<'_> {
                         }
                         false => Some(job.id.as_str()),
                     };
-                    if let Some(grace) = self.found.parentless.remove(*pool) {
+                    let parentless = self.found.parentless.remove(*pool);
+                    if pool_job.is_some() {
+                        // A job that ends takes its launchers' steps with
+                        // it, and may have no recipe left to read: as
+                        // `stopping` found, it stops by its cancel, once
+                        // it is closed to joiners.
+                        let grace = match (parentless, job.ending()) {
+                            (Some(grace), _) => grace,
+                            (None, true) => 0,
+                            (None, false) => Ran::read(&self.home.dir.join(pool), pool)?.grace,
+                        };
+                        let bound = Duration::from_secs(grace) + self.waits.drain;
+                        self.close_launches(pool, &job, Instant::now() + bound)?;
+                        if parentless.is_none() && !job.ending() {
+                            self.joiners_end(pool, &job, bound)?;
+                        }
+                    }
+                    if let Some(grace) = parentless {
                         let mut notes = Vec::new();
                         self.leave(pool, &job, grace, &mut |note| notes.push(note.to_string()))?;
                         self.notes.extend(notes);
