@@ -9,6 +9,8 @@ mod clusters;
 mod deploy;
 #[path = "deployment/dynamodb.rs"]
 mod dynamodb;
+#[path = "deployment/etcd.rs"]
+mod etcd;
 #[path = "deployment/images.rs"]
 mod images;
 #[path = "deployment/k8s.rs"]

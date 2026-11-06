@@ -204,6 +204,103 @@ home = "global-us"
 
 {"fleet":{"name":"api"},"cluster":{"use1":{"context":"kind-use1","namespace":"gdl-api","region":"us-east-1","registry":"registry.example/gdl","platform":"linux/amd64","secrets":{"fingerprint":"api-fingerprint"},"operator":true}},"class":{"global":{"ready":{"front":1}},"model_x":{"ready":{"engine":1}}},"pool":{"dgd-use1":{"class":"model_x","cluster":"use1","home":"global-us","dgd":{"file":"dynamo/dgd.yaml","components":{"engine":"Frontend"}}},"global-us":{"class":"global","cluster":"use1"},"model-x-us":{"class":"model_x","cluster":"use1","home":"global-us"}}}
 
+## crates/gdl-gen/tests/fixtures/k8s/etcd/fleet.toml
+[fleet]
+name = "api"
+
+[cluster.euw1]
+context = "kind-euw1"
+namespace = "gdl-api"
+region = "eu-west-1"
+registry = "registry.example/gdl-eu"
+platform = "linux/arm64"
+
+[cluster.euw1.secrets]
+fingerprint = "api-fingerprint-eu"
+
+[cluster.euw1.node_selector]
+"gdl.dev/node-group" = "gdl-api"
+
+[[cluster.euw1.tolerations]]
+key = "dedicated"
+operator = "Exists"
+effect = "NoSchedule"
+
+[cluster.euw1.resources.default.requests]
+cpu = "100m"
+memory = "128Mi"
+
+[cluster.euw1.resources.default.limits]
+cpu = "500m"
+memory = "512Mi"
+
+[cluster.use1]
+context = "kind-use1"
+namespace = "gdl-api"
+region = "us-east-1"
+registry = "registry.example/gdl"
+platform = "linux/amd64"
+
+[cluster.use1.secrets]
+fingerprint = "api-fingerprint"
+
+[cluster.use1.node_selector]
+"gdl.dev/node-group" = "gdl-api"
+
+[[cluster.use1.tolerations]]
+key = "dedicated"
+operator = "Equal"
+value = "gdl-api"
+effect = "NoSchedule"
+
+[cluster.use1.resources.default.requests]
+cpu = "100m"
+memory = "128Mi"
+
+[cluster.use1.resources.default.limits]
+cpu = "500m"
+memory = "512Mi"
+
+[cluster.use1.resources.segment.engine.requests]
+cpu = "250m"
+
+[cluster.use1.resources.segment.engine.limits]
+cpu = "1"
+memory = "1Gi"
+
+[class.global.ready]
+front = 2
+
+[class.model_x.ready]
+engine = 1
+
+[pool.global-eu]
+class = "global"
+cluster = "euw1"
+
+[pool.global-us]
+class = "global"
+cluster = "use1"
+
+[pool.model-x-shared]
+class = "model_x"
+cluster = "euw1"
+parents = "global"
+
+[pool.model-x-shared.resources.segment.engine.limits]
+memory = "2Gi"
+
+[pool.model-x-us]
+class = "model_x"
+cluster = "use1"
+home = "global-us"
+
+[directory]
+backend = "etcd"
+cluster = "use1"
+
+{"fleet":{"name":"api"},"cluster":{"euw1":{"context":"kind-euw1","namespace":"gdl-api","region":"eu-west-1","registry":"registry.example/gdl-eu","platform":"linux/arm64","secrets":{"fingerprint":"api-fingerprint-eu"},"node_selector":{"gdl.dev/node-group":"gdl-api"},"tolerations":[{"key":"dedicated","operator":"Exists","effect":"NoSchedule"}],"resources":{"default":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"500m","memory":"512Mi"}}}},"use1":{"context":"kind-use1","namespace":"gdl-api","region":"us-east-1","registry":"registry.example/gdl","platform":"linux/amd64","secrets":{"fingerprint":"api-fingerprint"},"node_selector":{"gdl.dev/node-group":"gdl-api"},"tolerations":[{"key":"dedicated","operator":"Equal","value":"gdl-api","effect":"NoSchedule"}],"resources":{"default":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"500m","memory":"512Mi"}},"segment":{"engine":{"requests":{"cpu":"250m"},"limits":{"cpu":"1","memory":"1Gi"}}}}}},"class":{"global":{"ready":{"front":2}},"model_x":{"ready":{"engine":1}}},"pool":{"global-eu":{"class":"global","cluster":"euw1"},"global-us":{"class":"global","cluster":"use1"},"model-x-shared":{"class":"model_x","cluster":"euw1","parents":"global","resources":{"segment":{"engine":{"limits":{"memory":"2Gi"}}}}},"model-x-us":{"class":"model_x","cluster":"use1","home":"global-us"}},"directory":{"backend":"etcd","cluster":"use1"}}
+
 ## docs/src/guides/fleet.md block 1
 [class.global.ready]
 front = 1
@@ -253,6 +350,12 @@ lists_table = "gdl-pool-lists"
 local = true
 
 {"directory":{"backend":"dynamodb","records_table":"gdl-pools","lists_table":"gdl-pool-lists","local":true}}
+
+## docs/src/guides/fleet.md block 4
+[directory]
+backend = "etcd"
+
+{"directory":{"backend":"etcd"}}
 
 ## docs/src/guides/kubernetes.md block 0
 [fleet]

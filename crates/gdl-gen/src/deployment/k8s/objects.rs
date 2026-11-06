@@ -479,6 +479,7 @@ pub(super) fn readme(fleet: &Fleet) -> String {
     }
     text.push('\n');
     text.push_str(&super::dynamodb::readme(fleet));
+    text.push_str(&super::etcd::readme(fleet));
     text
 }
 

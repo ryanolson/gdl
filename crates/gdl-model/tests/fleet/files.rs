@@ -46,6 +46,7 @@ fn corpus() -> Vec<(String, String)> {
         "crates/gdl-gen/tests/fixtures/k8s/fleet.toml",
         "crates/gdl-gen/tests/fixtures/k8s/dynamodb/fleet.toml",
         "crates/gdl-gen/tests/fixtures/k8s/dgd/fleet.toml",
+        "crates/gdl-gen/tests/fixtures/k8s/etcd/fleet.toml",
     ] {
         let text = std::fs::read_to_string(root.join(fixture)).expect(fixture);
         files.push((fixture.to_string(), text));

@@ -5,8 +5,8 @@
 use std::collections::BTreeMap;
 
 use gdl_model::{
-    DirectoryBackend, Fleet, HopInfo, Layout, Manifest, NodeInfo, Parent, Placement, Placements,
-    PoolSettings, Role, TypeInfo, layout,
+    DirectoryBackend, Fleet, FleetBackend, HopInfo, Layout, Manifest, NodeInfo, Parent, Placement,
+    Placements, PoolSettings, Role, TypeInfo, layout,
 };
 
 #[path = "fleet/clusters.rs"]
@@ -817,12 +817,12 @@ fn the_directory_table_selects_dynamodb_for_every_pool() {
     with.check(Some(&laid())).expect("a sound fleet");
     let directory = with.directory().expect("a directory");
     assert_eq!(
-        (
-            directory.records_table.as_str(),
-            directory.lists_table.as_str(),
-            directory.local
-        ),
-        ("gdl-pools", "gdl-pool-lists", true)
+        directory.backend,
+        FleetBackend::Dynamodb {
+            records_table: "gdl-pools".into(),
+            lists_table: "gdl-pool-lists".into(),
+            local: true,
+        }
     );
     for pool in with.pools() {
         assert_eq!(
@@ -839,6 +839,13 @@ fn the_directory_table_selects_dynamodb_for_every_pool() {
     }
     let written = toml::to_string(&with).expect("toml");
     assert_eq!(Fleet::from_toml(&written).expect("read back"), with);
+    // The table is written as it is read, key for key.
+    assert!(
+        written.ends_with(
+            "[directory]\nbackend = \"dynamodb\"\nrecords_table = \"gdl-pools\"\nlists_table = \"gdl-pool-lists\"\nlocal = true\n"
+        ),
+        "{written}"
+    );
 
     let without = fleet(FLEET);
     assert!(without.directory().is_none());
@@ -849,7 +856,7 @@ fn the_directory_table_selects_dynamodb_for_every_pool() {
     );
     // `local` is false unless it is set.
     let unsaid = fleet(&text.replace("local = true\n", ""));
-    assert!(!unsaid.directory().expect("a directory").local);
+    assert!(!unsaid.directory().expect("a directory").runs_store());
 }
 
 /// The `[directory]` table's keys are checked where they are written: a
@@ -882,6 +889,72 @@ fn a_directory_table_is_checked_at_its_keys() {
         assert!(
             Fleet::from_toml(&format!("{FLEET}{unreadable}")).is_err(),
             "{unreadable}"
+        );
+    }
+}
+
+/// `backend = "etcd"` selects an etcd that the deployment runs, for every
+/// pool, under the default prefix: the address is the render's, so a
+/// pool's settings name none. It is written back as it is read, and a
+/// shared pool is taken under it, since every hub reads every record.
+#[test]
+fn the_directory_table_selects_etcd_for_every_pool() {
+    let text = format!("{FLEET}[directory]\nbackend = \"etcd\"\n");
+    let with = fleet(&text);
+    with.check(Some(&laid())).expect("a sound fleet");
+    let directory = with.directory().expect("a directory");
+    assert_eq!(directory.backend, FleetBackend::Etcd);
+    assert!(directory.runs_store());
+    for pool in with.pools() {
+        assert_eq!(
+            pool.directory,
+            DirectoryBackend::Etcd {
+                endpoints: Vec::new(),
+                prefix: DirectoryBackend::ETCD_PREFIX.into(),
+            },
+            "{}",
+            pool.name
+        );
+    }
+    let written = toml::to_string(&with).expect("toml");
+    assert!(
+        written.ends_with("[directory]\nbackend = \"etcd\"\n"),
+        "{written}"
+    );
+    assert_eq!(Fleet::from_toml(&written).expect("read back"), with);
+
+    let shared = format!("{SHARED}[directory]\nbackend = \"etcd\"\n");
+    fleet(&shared)
+        .check(Some(&laid()))
+        .expect("a shared pool under etcd");
+}
+
+/// The etcd backend takes none of DynamoDB's keys: no tables, and no
+/// `local`, since the deployment always runs the fleet's etcd. Nor does it
+/// take a prefix or endpoints of its own.
+#[test]
+fn an_etcd_directory_refuses_the_keys_it_does_not_read() {
+    for (key, line) in [
+        ("records_table", "records_table = \"gdl-pools\"\n"),
+        ("lists_table", "lists_table = \"gdl-pool-lists\"\n"),
+        ("local", "local = true\n"),
+        ("local", "local = false\n"),
+    ] {
+        let error = Fleet::from_toml(&format!("{FLEET}[directory]\nbackend = \"etcd\"\n{line}"))
+            .expect_err(line)
+            .to_string();
+        assert!(
+            error.contains(&format!("`{key}` is read only by backend = \"dynamodb\"")),
+            "{line}: {error}"
+        );
+    }
+    for line in [
+        "prefix = \"/gdl/pools\"\n",
+        "endpoints = [\"http://etcd:2379\"]\n",
+    ] {
+        assert!(
+            Fleet::from_toml(&format!("{FLEET}[directory]\nbackend = \"etcd\"\n{line}")).is_err(),
+            "{line}"
         );
     }
 }

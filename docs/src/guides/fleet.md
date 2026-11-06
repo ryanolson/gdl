@@ -47,7 +47,7 @@ home = "global-us"
 ready = { engine = 2 }            # overrides the class default
 ```
 
-`home` names one parent pool. A pool can instead write `parents = "global"`: then every pool of class `global` follows it and offers it work. Without a `[directory]` table, a fleet's pools publish through `relay`, where a pool reports its record to one parent's hub, so `check` refuses `parents`. With a DynamoDB `[directory]` ([below](#use-the-dynamodb-directory)), it takes them ([Limitations](../operations/limitations.md#a-fleet-deploys-a-shared-pool-only-with-a-dynamodb-directory)).
+`home` names one parent pool. A pool can instead write `parents = "global"`: then every pool of class `global` follows it and offers it work. Without a `[directory]` table, a fleet's pools publish through `relay`, where a pool reports its record to one parent's hub, so `check` refuses `parents`. With a `[directory]` of DynamoDB ([below](#use-the-dynamodb-directory)) or etcd ([below](#use-the-etcd-directory)), it takes them ([Limitations](../operations/limitations.md#a-fleet-deploys-a-shared-pool-only-with-a-directory-table)).
 
 `requires = { model_x = 1 }` in `[class.global]` sets how many `ready` children the global pool's health needs (1 of each class by default). A pool needs `layout = "<name>"` when the spec has several layouts. Every key is in [Spec and fleet reference](../appendix/spec-reference.md).
 
@@ -134,6 +134,24 @@ A fleet that names clusters also names, in `cluster`, the one cluster that runs 
 Each hub gets `GDL_POOL__DIRECTORY=dynamodb`, the two table names, `GDL_POOL__AWS_REGION` set to its pool's region, and `GDL_POOL__ENDPOINT=http://dynamodb-local:8000`. It gets no `GDL_POOL__PARENT_HUB` and no state volume. The hubs sign with fixed test credentials in their code, which DynamoDB Local never checks, so no credential is in the bundle. The hub's image is built with the hub's `dynamodb` feature.
 
 `compose` refuses `[directory]` without `local = true`, since a Compose bundle carries no AWS role for real tables ([Limitations](../operations/limitations.md#compose-runs-a-fleets-dynamodb-directory-only-in-dynamodb-local)). DynamoDB Local keeps the directory in memory: `docker compose down`, or a restart of `dynamodb-local`, empties it. After a restart, run `docker compose up -d` again, which runs the tables step again, and the hubs publish at their next heartbeat.
+
+## Use the etcd directory
+
+For a site without AWS, the directory can be one etcd that the deployment runs ([The etcd backend](../concepts/pools.md#the-etcd-backend)):
+
+```toml
+[directory]
+backend = "etcd"
+# cluster = "use1"                # with clusters: the one cluster that runs etcd
+```
+
+The table takes no other key: the deployment always runs the fleet's etcd, under the default prefix, so it names no tables, no `local`, and no endpoints. As for a Local, a fleet that names clusters names the one cluster that runs etcd, and Compose ignores `cluster`.
+
+`compose` then adds one service, `etcd`: etcd v3.5.21, pinned by digest, with `--auto-compaction-mode=periodic --auto-compaction-retention=1h` and `--quota-backend-bytes=8589934592` ([Running etcd for the directory](../concepts/pools.md#running-etcd-for-the-directory)). Its data is in the `etcd-data` volume, so the directory outlives a restart of `etcd`; `docker compose down --volumes` removes it. Every hub waits for `etcd` to start. No step runs first: each hub writes its record on its first heartbeat.
+
+Each hub gets `GDL_POOL__DIRECTORY=etcd` and `GDL_POOL__ENDPOINTS=["http://etcd:2379"]`, and no `GDL_POOL__PARENT_HUB` and no state volume. The hub's image is built with the hub's `etcd` feature, whose build installs `protobuf-compiler` and `libprotobuf-dev` in the build image with `apt-get`, so a `[deployment] build_image` must be Debian's or Ubuntu's.
+
+`cargo gdl k8s` runs etcd in the directory's cluster ([The etcd directory](kubernetes.md#the-etcd-directory)), and `cargo gdl slurm` in a job of its own on the directory's site ([The directory's job](slurm.md#the-directorys-job)).
 
 ## Run local sources
 

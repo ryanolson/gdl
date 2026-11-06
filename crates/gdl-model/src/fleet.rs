@@ -80,8 +80,9 @@ use slurm::check_time_limit;
 /// lists_table = "gdl-pool-lists"
 /// local = true                       # optional: the bundle runs one DynamoDB Local for them
 /// cluster = "use1"                   # with local, when the fleet names clusters: the one that runs it
+/// # or, in place of the tables: backend = "etcd", an etcd the deployment runs, with `cluster` as for a Local
 ///
-/// [metrics]                          # optional
+/// [metrics]                         # optional
 /// pod_monitor = true                 # each cluster's objects include a PodMonitor for the Prometheus operator
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,35 +125,137 @@ impl FleetMetrics {
 
 /// The fleet's `[directory]` table: where every pool's hub publishes its
 /// record. Without it, each child pool's hub reports to its parent's
-/// (`relay`).
+/// (`relay`). Read from, and written as, one table whose `backend` names
+/// the store and selects the keys it takes ([`FleetBackend`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "DirectoryTable", into = "DirectoryTable")]
 pub struct FleetDirectory {
-    /// The backend: `dynamodb`, the one a fleet can name.
+    /// The store, with its own keys.
     pub backend: FleetBackend,
-    /// The records table's name.
-    pub records_table: String,
-    /// The lists table's name.
-    pub lists_table: String,
-    /// Whether the deployment runs one DynamoDB Local for the tables, which
-    /// every hub uses with fixed test credentials, instead of AWS.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub local: bool,
-    /// The cluster that runs the DynamoDB Local, at an address every
-    /// cluster reaches: one Local for the fleet, since a Local in each
-    /// cluster would give each region a directory of its own. Required
-    /// with `local` when the fleet names clusters, and refused without
-    /// `local`. Compose, which runs on one host, does not read it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The cluster that runs the store the deployment runs itself
+    /// ([`FleetDirectory::runs_store`]), at an address every cluster
+    /// reaches: one store for the fleet, since a store in each cluster
+    /// would give each region a directory of its own. Required with such a
+    /// store when the fleet names clusters, and refused without one.
+    /// Compose, which runs on one host, does not read it.
     pub cluster: Option<String>,
 }
 
-/// The backends a fleet's `[directory]` can name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// The stores a fleet's `[directory]` can name, with their keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FleetBackend {
-    /// Two DynamoDB tables ([`DirectoryBackend::DynamoDb`]).
+    /// Two DynamoDB tables ([`DirectoryBackend::DynamoDb`]):
+    /// `backend = "dynamodb"`.
+    Dynamodb {
+        /// The records table's name.
+        records_table: String,
+        /// The lists table's name.
+        lists_table: String,
+        /// Whether the deployment runs one DynamoDB Local for the tables,
+        /// which every hub uses with fixed test credentials, instead of
+        /// AWS.
+        local: bool,
+    },
+    /// An etcd that the deployment runs for the fleet
+    /// ([`DirectoryBackend::Etcd`]), under the default prefix:
+    /// `backend = "etcd"`. Each render gives the pools its address.
+    Etcd,
+}
+
+impl FleetDirectory {
+    /// Whether the deployment runs the directory's store itself: a
+    /// DynamoDB Local with `local = true`, and etcd always.
+    pub fn runs_store(&self) -> bool {
+        match self.backend {
+            FleetBackend::Dynamodb { local, .. } => local,
+            FleetBackend::Etcd => true,
+        }
+    }
+}
+
+/// The `[directory]` table as it is written: every key of every backend,
+/// which [`FleetDirectory`] is read from and written as, so that a key a
+/// backend does not read is refused by name.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectoryTable {
+    backend: BackendName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    records_table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lists_table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    local: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cluster: Option<String>,
+}
+
+/// The names `backend` takes.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BackendName {
     Dynamodb,
+    Etcd,
+}
+
+impl TryFrom<DirectoryTable> for FleetDirectory {
+    type Error = String;
+
+    fn try_from(table: DirectoryTable) -> Result<Self, String> {
+        let backend = match table.backend {
+            BackendName::Dynamodb => FleetBackend::Dynamodb {
+                records_table: table.records_table.ok_or("missing field `records_table`")?,
+                lists_table: table.lists_table.ok_or("missing field `lists_table`")?,
+                local: table.local.unwrap_or(false),
+            },
+            BackendName::Etcd => {
+                // One spelling: the fleet always runs its etcd, so `local`
+                // would say nothing, and `false` would say what no render
+                // does.
+                for (key, set) in [
+                    ("records_table", table.records_table.is_some()),
+                    ("lists_table", table.lists_table.is_some()),
+                    ("local", table.local.is_some()),
+                ] {
+                    if set {
+                        return Err(format!(
+                            "`{key}` is read only by backend = \"dynamodb\"; under backend = \"etcd\" the deployment always runs the fleet's etcd, which needs no table"
+                        ));
+                    }
+                }
+                FleetBackend::Etcd
+            }
+        };
+        Ok(Self {
+            backend,
+            cluster: table.cluster,
+        })
+    }
+}
+
+impl From<FleetDirectory> for DirectoryTable {
+    fn from(directory: FleetDirectory) -> Self {
+        let (backend, records_table, lists_table, local) = match directory.backend {
+            FleetBackend::Dynamodb {
+                records_table,
+                lists_table,
+                local,
+            } => (
+                BackendName::Dynamodb,
+                Some(records_table),
+                Some(lists_table),
+                local.then_some(true),
+            ),
+            FleetBackend::Etcd => (BackendName::Etcd, None, None, None),
+        };
+        Self {
+            backend,
+            records_table,
+            lists_table,
+            local,
+            cluster: directory.cluster,
+        }
+    }
 }
 
 /// What every pool of a class needs unless it says otherwise.
@@ -318,27 +421,38 @@ impl Fleet {
         });
         let mut errors = Vec::new();
         if let Some(directory) = &self.directory {
-            for (key, name) in [
-                ("records_table", &directory.records_table),
-                ("lists_table", &directory.lists_table),
-            ] {
-                if let Err(reason) = check_table_name(name) {
-                    errors.push(FleetError::InvalidDirectory {
-                        key: key.into(),
-                        reason,
-                    });
+            if let FleetBackend::Dynamodb {
+                records_table,
+                lists_table,
+                ..
+            } = &directory.backend
+            {
+                for (key, name) in [
+                    ("records_table", records_table),
+                    ("lists_table", lists_table),
+                ] {
+                    if let Err(reason) = check_table_name(name) {
+                        errors.push(FleetError::InvalidDirectory {
+                            key: key.into(),
+                            reason,
+                        });
+                    }
                 }
             }
-            let reason = match (&directory.cluster, directory.local) {
+            let store = match directory.backend {
+                FleetBackend::Dynamodb { .. } => "a directory in DynamoDB Local",
+                FleetBackend::Etcd => "an etcd directory",
+            };
+            let reason = match (&directory.cluster, directory.runs_store()) {
                 (Some(cluster), false) => Some(format!(
                     "{cluster:?} names the cluster that runs DynamoDB Local, so it needs local = true"
                 )),
                 (Some(cluster), true) if !self.clusters.contains_key(cluster) => {
                     Some(format!("the fleet has no cluster `{cluster}`"))
                 }
-                (None, true) if !self.clusters.is_empty() => Some(
-                    "missing; the fleet names clusters, so a directory in DynamoDB Local names the one cluster that runs it, for every cluster to reach".into(),
-                ),
+                (None, true) if !self.clusters.is_empty() => Some(format!(
+                    "missing; the fleet names clusters, so {store} names the one cluster that runs it, for every cluster to reach"
+                )),
                 _ => None,
             };
             if let Some(reason) = reason {
@@ -948,8 +1062,10 @@ impl Fleet {
     /// when it names one, else its own. Its `requires` is its class's, and
     /// unsaid when that is, which requires one ready child of each class its
     /// class sends to ([`PoolSettings::requirements`]). Its directory is
-    /// the `[directory]` table's, in the pool's region, with no endpoint,
-    /// or the default, `relay`, without one. The hub address, summary
+    /// the `[directory]` table's: DynamoDB in the pool's region with no
+    /// endpoint, or etcd at no endpoints and the default prefix, either of
+    /// which a render gives the address of the store the deployment runs;
+    /// or the default, `relay`, without the table. The hub address, summary
     /// period, and hub timing are not in the fleet file and take their
     /// defaults. Meant for a fleet that
     /// [`Fleet::check`] accepted, whose `ready` keys are all segments of
@@ -976,13 +1092,22 @@ impl Fleet {
             parent: Parent::from_keys(pool.home.clone(), pool.parents.clone())
                 .ok()
                 .flatten(),
-            directory: match &self.directory {
+            directory: match self.directory.as_ref().map(|d| &d.backend) {
                 None => DirectoryBackend::default(),
-                Some(directory) => DirectoryBackend::DynamoDb {
-                    records_table: directory.records_table.clone(),
-                    lists_table: directory.lists_table.clone(),
+                Some(FleetBackend::Dynamodb {
+                    records_table,
+                    lists_table,
+                    ..
+                }) => DirectoryBackend::DynamoDb {
+                    records_table: records_table.clone(),
+                    lists_table: lists_table.clone(),
                     aws_region: region,
                     endpoint: None,
+                },
+                // Its address is the network's: each render gives it.
+                Some(FleetBackend::Etcd) => DirectoryBackend::Etcd {
+                    endpoints: Vec::new(),
+                    prefix: DirectoryBackend::ETCD_PREFIX.into(),
                 },
             },
             ready,

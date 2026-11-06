@@ -1,0 +1,103 @@
+{
+  "extra_mount": [
+    "/shared/gdl-runs/api/model-x-02:/gdl",
+    "/shared/gdl-runs/api:/fleet:ro"
+  ],
+  "frontend": {
+    "type": "none"
+  },
+  "host_setup": {
+    "commands": [
+      "f='/shared/gdl-runs/api/model-x-02'/job.$SLURM_JOB_ID.end; end=\"${SLURM_JOB_END_TIME:-}\"; if [ -z \"$end\" ]; then e=$(squeue -h -j \"$SLURM_JOB_ID\" -o %e 2>/dev/null); case \"$e\" in [0-9]*) end=$(date -d \"$e\" +%s 2>/dev/null) ;; esac; fi; t=\"$f.$(hostname).$$\"; echo \"$end\" > \"$t\" && mv \"$t\" \"$f\""
+    ],
+    "nodes": "all",
+    "teardown": [
+      "rm -f '/shared/gdl-runs/api/model-x-02'/job.$SLURM_JOB_ID.end"
+    ]
+  },
+  "model": {
+    "container": "registry.example#gdl/api-hub@sha256:0000000000000000000000000000000000000000000000000000000000000001",
+    "path": "/shared/gdl-runs/api",
+    "precision": "bf16"
+  },
+  "name": "gdl-api-model-x-02-join-engine",
+  "observability": {
+    "tachometer": {
+      "enabled": false
+    }
+  },
+  "resources": {},
+  "sbatch_directives": {
+    "comment": "gdl:api:model-x-02:join:5f9e35cc196d9712",
+    "exclusive": "",
+    "no-requeue": "",
+    "signal": "TERM@900"
+  },
+  "schema": 2,
+  "services": [
+    {
+      "command": [
+        "bash",
+        "-c",
+        "/usr/local/bin/segment --resolve model_x/model-x-02 --write /logs/gdl-hub.toml && exec sleep infinity"
+      ],
+      "container": "registry.example#gdl/api-hub@sha256:0000000000000000000000000000000000000000000000000000000000000001",
+      "env": {
+        "GDL_LISTEN": "{node_ip}:0",
+        "GDL_POOL__CLASS": "model_x",
+        "GDL_POOL__DIRECTORY": "etcd",
+        "GDL_POOL__NAME": "model-x-02",
+        "GDL_POOL__PARENTS": "global",
+        "GDL_POOL__READY__ENGINE": "1",
+        "GDL_POOL__REGION": "slurm-lab",
+        "GDL_POOL__SUMMARY_MS": "10000"
+      },
+      "name": "resolve",
+      "placement": {
+        "node": "head"
+      },
+      "preamble": "a=$(cat /fleet/directory.endpoint 2>/dev/null || true); case \"$a\" in http://?*:[0-9]*) export GDL_POOL__ENDPOINTS=\"[\\\"$a\\\"]\" ;; *) echo \"gdl: /shared/gdl-runs/api/directory.endpoint names no etcd: submit the fleet's directory job, and wait for it to write the file\" >&2; exit 1 ;; esac",
+      "readiness": {
+        "file": {
+          "path": "gdl-hub.toml"
+        },
+        "timeout_seconds": 300
+      },
+      "type": "generic"
+    },
+    {
+      "command": [
+        "/usr/local/bin/segment",
+        "/gdl/engine.toml",
+        "/logs/gdl-hub.toml"
+      ],
+      "container": "registry.example#gdl/api-engine@sha256:0000000000000000000000000000000000000000000000000000000000000003",
+      "env": {
+        "GDL_LISTEN": "{node_ip}:0",
+        "GDL_POOL__CLASS": "model_x",
+        "GDL_POOL__DIRECTORY": "etcd",
+        "GDL_POOL__NAME": "model-x-02",
+        "GDL_POOL__PARENTS": "global",
+        "GDL_POOL__READY__ENGINE": "1",
+        "GDL_POOL__REGION": "slurm-lab",
+        "GDL_POOL__SUMMARY_MS": "10000"
+      },
+      "name": "engine",
+      "nodes": 1,
+      "preamble": "a=$(cat /fleet/directory.endpoint 2>/dev/null || true); case \"$a\" in http://?*:[0-9]*) export GDL_POOL__ENDPOINTS=\"[\\\"$a\\\"]\" ;; *) echo \"gdl: /shared/gdl-runs/api/directory.endpoint names no etcd: submit the fleet's directory job, and wait for it to write the file\" >&2; exit 1 ;; esac; export GLIBC_TUNABLES=\"${GLIBC_TUNABLES-glibc.malloc.hugetlb=0}\"; end=$(cat /gdl/job.$SLURM_JOB_ID.end 2>/dev/null || true); case \"$end\" in ''|*[!0-9]*) ;; *) export GDL_RUNTIME__LEAVE_BY=\"$end\"000 ;; esac",
+      "readiness": {
+        "http": {
+          "path": "/live",
+          "port": 9090,
+          "status": 200
+        },
+        "timeout_seconds": 1800
+      },
+      "terminal": true,
+      "type": "generic"
+    }
+  ],
+  "slurm": {
+    "time_limit": "04:00:00"
+  }
+}

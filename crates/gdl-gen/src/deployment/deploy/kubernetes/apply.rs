@@ -44,14 +44,13 @@ pub(super) fn apply_fleet(
     // pruned, even where two clusters' contexts reach one namespace.
     let mut applied = BTreeSet::new();
 
-    // The directory's cluster first: the other clusters' hubs name its
-    // Local's pod IP, which exists only once the Local runs.
-    let home = fleet
-        .directory()
-        .filter(|directory| directory.local)
-        .and_then(|directory| directory.cluster.clone());
+    // The directory's cluster first: the other clusters' hubs name the pod
+    // IP of its store, a DynamoDB Local or etcd, which exists only once the
+    // store runs.
+    let store = k8s::Store::of(fleet);
+    let home = store.as_ref().map(|store| &store.cluster);
     let mut order: Vec<&Cluster> = clusters.0.iter().collect();
-    order.sort_by_key(|cluster| Some(&cluster.name) != home.as_ref());
+    order.sort_by_key(|cluster| Some(&cluster.name) != home);
     let mut local = None;
     for cluster in order {
         let objects = &rendered.0[&cluster.name];
@@ -64,18 +63,18 @@ pub(super) fn apply_fleet(
             None,
             "waiting for the namespace",
         )?;
-        if Some(&cluster.name) == home.as_ref() {
-            local = Some(local_ip(kube, cluster, waits)?);
+        if let Some(store) = store.as_ref().filter(|s| s.cluster == cluster.name) {
+            local = Some((store, local_ip(kube, cluster, store, waits)?));
         }
     }
     say("base: each cluster's namespace and service account");
     let mut rendered = rendered;
-    if let Some(ip) = &local {
-        rendered.fill(ip);
+    if let Some((store, ip)) = &local {
+        rendered.fill(store.placeholder, ip);
         for text in files.values_mut() {
-            *text = text.replace(k8s::PLACEHOLDER, ip);
+            *text = text.replace(store.placeholder, ip);
         }
-        say(&format!("base: the DynamoDB Local runs at {ip}"));
+        say(&format!("base: the {} runs at {ip}", store.what));
     }
     if let Some(out) = out {
         k8s::write_new(out, &files)?;
@@ -229,21 +228,56 @@ impl Rendered {
         Ok(Self(rendered))
     }
 
-    /// Write `ip`, the DynamoDB Local's pod IP, where the render left its
-    /// placeholder: in the other clusters' hubs and segments. It is in
-    /// their pod templates, so a new IP replaces their pods.
-    fn fill(&mut self, ip: &str) {
+    /// Write `ip`, the pod IP of the directory's store, where the render
+    /// left its `placeholder`: in the other clusters' hubs and segments. It
+    /// is in their pod templates, so a new IP replaces their pods.
+    fn fill(&mut self, placeholder: &str, ip: &str) {
         for objects in self.0.values_mut() {
-            objects.pools = objects.pools.replace(k8s::PLACEHOLDER, ip);
+            objects.pools = objects.pools.replace(placeholder, ip);
         }
     }
 }
 
-/// Wait until the DynamoDB Local of `cluster` is ready, within the objects
+/// Wait until `store`, which `cluster` runs, is ready, within the objects
 /// bound: its pod's IP.
-fn local_ip(kube: &mut dyn Kube, cluster: &Cluster, waits: &Waits) -> Result<String, Error> {
-    let selector = format!("{},gdl.dev/directory={}", cluster.selector, k8s::LOCAL);
+fn local_ip(
+    kube: &mut dyn Kube,
+    cluster: &Cluster,
+    store: &k8s::Store,
+    waits: &Waits,
+) -> Result<String, Error> {
+    let selector = format!("{},gdl.dev/directory={}", cluster.selector, store.name);
     let deadline = Instant::now() + waits.objects;
+    // An apply that changed the store's pod leaves the old pod ready, at
+    // its old IP, until the controller replaces it: wait for the rollout
+    // first, so that the IP read is the new pod's. A read of the
+    // Deployment, which needs only `get`, where `kubectl rollout status`
+    // would need `watch` too.
+    let deployment = format!("deployments.apps/{}", store.name);
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let reply = run(
+            kube,
+            cluster.at().object(&deployment),
+            left.max(Duration::from_secs(1)),
+            None,
+            &format!("reading the {}'s Deployment", store.what),
+        )?;
+        let read: Option<Value> = serde_json::from_str(&reply.stdout).ok();
+        if read.as_ref().is_some_and(rolled_out) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::new(format!(
+                "cluster `{}`: the {} `{}` did not finish its rollout within {} s",
+                cluster.name,
+                store.what,
+                store.name,
+                waits.objects.as_secs()
+            )));
+        }
+        std::thread::sleep(waits.interval);
+    }
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         let reply = run(
@@ -251,7 +285,7 @@ fn local_ip(kube: &mut dyn Kube, cluster: &Cluster, waits: &Waits) -> Result<Str
             cluster.at().pods(&selector),
             left.max(Duration::from_secs(1)),
             None,
-            "listing the DynamoDB Local's pods",
+            &format!("listing the {}'s pods", store.what),
         )?;
         let pods: Value = serde_json::from_str(&reply.stdout)
             .map_err(|e| Error::new(format!("`kubectl get pods` printed no JSON list: {e}")))?;
@@ -276,9 +310,10 @@ fn local_ip(kube: &mut dyn Kube, cluster: &Cluster, waits: &Waits) -> Result<Str
         }
         if Instant::now() >= deadline {
             return Err(Error::new(format!(
-                "cluster `{}`: the DynamoDB Local `{}` was not ready within {} s",
+                "cluster `{}`: the {} `{}` was not ready within {} s",
                 cluster.name,
-                k8s::LOCAL,
+                store.what,
+                store.name,
                 waits.objects.as_secs()
             )));
         }
@@ -407,4 +442,19 @@ fn apply(
     let reply = run(kube, cluster.at().apply(), budget, input, &what)?;
     let applied = Live::list(&reply.stdout).map_err(|e| Error::new(format!("{what}: {e}")))?;
     Ok(applied.into_iter().map(|object| object.uid).collect())
+}
+
+/// Whether `deployment`, a Deployment as the API server holds it, has
+/// finished its rollout: its controller has seen its latest change, and
+/// every one of its pods is of that change, with none of an earlier one
+/// left. Kubernetes leaves a count of 0 out of the status.
+fn rolled_out(deployment: &Value) -> bool {
+    let wanted = deployment["spec"]["replicas"].as_u64().unwrap_or(1);
+    let status = &deployment["status"];
+    let count = |key: &str| status[key].as_u64().unwrap_or(0);
+    deployment["metadata"]["generation"]
+        .as_u64()
+        .is_some_and(|generation| status["observedGeneration"].as_u64() >= Some(generation))
+        && count("updatedReplicas") == wanted
+        && count("replicas") == wanted
 }

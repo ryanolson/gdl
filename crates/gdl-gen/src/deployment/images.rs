@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gdl_model::{Fleet, PoolSettings};
+use gdl_model::{Fleet, FleetBackend, PoolSettings};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -367,12 +367,15 @@ pub(super) fn plan(prepared: &Prepared, fleet: &Fleet) -> Result<Vec<Image>, Err
         }
     }
     // The DynamoDB directory's tables step runs the hub's image in the
-    // directory's cluster, which may run no pool.
-    if let Some((name, cluster)) = fleet
-        .directory()
-        .filter(|directory| directory.local)
-        .and_then(|directory| directory.cluster.as_deref())
-        .and_then(|name| Some((name, fleet.cluster(name)?)))
+    // directory's cluster, which may run no pool; so does a Slurm site's
+    // etcd job, whose processes run in the job's container.
+    if let Some(directory) = fleet.directory().filter(|d| d.runs_store())
+        && let Some(name) = directory.cluster.as_deref()
+        && let Some(cluster) = fleet.cluster(name)
+        && match directory.backend {
+            FleetBackend::Dynamodb { .. } => true,
+            FleetBackend::Etcd => cluster.slurm().is_some(),
+        }
     {
         let bases = Bases::of(&bundle.settings, cluster);
         add(name, cluster, &hub_repository, &hub(bases.hub));
@@ -580,14 +583,11 @@ impl Local {
 /// copies.
 fn hub_dockerfile(bundle: &super::Bundle, fleet: &Fleet, base: &str) -> String {
     let settings = &bundle.settings;
-    // The DynamoDB directory, and its tables step, are a feature of the
-    // hub, off by default, since it links the AWS SDK.
-    let features = match fleet.directory() {
-        Some(_) => " --features dynamodb",
-        None => "",
-    };
+    // The directory's backend, and the DynamoDB tables step, are a feature
+    // of the hub, off by default.
+    let (needs, features) = super::hub_feature(fleet.directory().map(|d| &d.backend));
     let build = format!(
-        "cargo install {}{features} --locked --root /build-tools --target \"$GDL_TARGET\" gdl-hub && cp /build-tools/bin/gdl-hub /gdl/segment",
+        "{needs}cargo install {}{features} --locked --root /build-tools --target \"$GDL_TARGET\" gdl-hub && cp /build-tools/bin/gdl-hub /gdl/segment",
         bundle.hub_install
     );
     dockerfile(

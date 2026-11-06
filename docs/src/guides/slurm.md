@@ -21,12 +21,13 @@ registry = "registry.example/gdl"
 platform = "linux/arm64"
 time_limit = "08:00:00"
 
-[directory]                       # required: the pools find each other through DynamoDB Local
+[directory]                       # required: the pools find each other through a directory the site runs
 backend = "dynamodb"
 records_table = "gdl-pools"
 lists_table = "gdl-pool-lists"
 local = true
 cluster = "lab"                   # the site that runs the directory's job
+# or, in place of the four keys above: backend = "etcd"
 
 [pool.model-x-01]
 class = "model_x"
@@ -35,7 +36,7 @@ parents = "global"
 slurm = { partition = "gpu", spare_nodes = 1 }
 ```
 
-The fleet must have a `[directory]` with `local = true`. A child pool's hub under the relay needs its parent's hub's address, which a job learns only once it runs. A Slurm job has no AWS role to reach DynamoDB on AWS with.
+The fleet must have a `[directory]` that the site runs: DynamoDB with `local = true`, or etcd. A child pool's hub under the relay needs its parent's hub's address, which a job learns only once it runs. A Slurm job has no AWS role to reach DynamoDB on AWS with.
 
 ## Build the images
 
@@ -101,9 +102,11 @@ With the default `signal_lead_s`, 900 s, Slurm's `TERM` comes first, and starts 
 
 `directory.yaml` runs DynamoDB Local, pinned by digest, on a node of its own, and then the `tables` step beside it. The step removes this job's old endpoint file, runs `gdl-hub --tables`, and only then writes `http://{node_ip}:8000` to `<run_dir>/<fleet>/directory.<job id>.endpoint`, for the tool that submitted the job, and then points `<run_dir>/<fleet>/directory.endpoint`, the fleet's pointer, at that file: a link, written beside its place and renamed into it, so the latest directory job's pointer wins. When the job ends, its teardown removes its own file alone. A pointer to it then dangles, which a process reads as no address, and a later job's pointer is never touched.
 
-No recipe holds the Local's address. Each pool's and joining job's processes mount `<run_dir>/<fleet>` read-only at `/fleet`, and their preambles read the pointer as `GDL_POOL__ENDPOINT` when they start. A process with no pointer, or one that is not `http://<host>:<port>`, does not start, and says so in one line that names the file. So a new directory job moves no pool's recipe hash. A hub keeps the address it started with: after a new directory job, stop the pools and submit them again.
+Under `backend = "etcd"`, `directory.yaml` runs srt-slurm's own `etcd` service on the head node, with `--auto-compaction-mode=periodic --auto-compaction-retention=1h` and `--quota-backend-bytes=8589934592` as its `args` ([Running etcd for the directory](../concepts/pools.md#running-etcd-for-the-directory)). srt-slurm runs etcd from `/configs/etcd`, v3.5.21, in the job's container, and gives clients the node's IP. It keeps etcd's data on the node's own disk and starts each job with it empty, so the directory lasts as long as the job, as an in-memory Local does. The job ends when etcd does. srt-slurm starts the job's other services only once etcd's port answers. Then the `pointer` step writes `http://{node_ip}:2379` to the job's endpoint file and the fleet's pointer, as the `tables` step does, with no step before it: etcd needs no tables.
 
-The Local runs on the Slurm site of every Slurm pool, since a job reads the pointer from its own site's `run_dir`: `cargo gdl slurm` refuses a `[directory] cluster` that is another cluster.
+No recipe holds the store's address. Each pool's and joining job's processes mount `<run_dir>/<fleet>` read-only at `/fleet`, and their preambles read the pointer when they start: as `GDL_POOL__ENDPOINT` under DynamoDB, and as the one member of `GDL_POOL__ENDPOINTS` under etcd. A process with no pointer, or one that is not `http://<host>:<port>`, does not start, and says so in one line that names the file. So a new directory job moves no pool's recipe hash. A hub keeps the address it started with: after a new directory job, stop the pools and submit them again.
+
+The store runs on the Slurm site of every Slurm pool, since a job reads the pointer from its own site's `run_dir`: `cargo gdl slurm` refuses a `[directory] cluster` that is another cluster.
 
 The directory's job takes no `signal`. Each pool withdraws its record from the directory as it drains, on the signal before its own time limit. Run the directory's job on a partition with a longer time limit than its pools'.
 

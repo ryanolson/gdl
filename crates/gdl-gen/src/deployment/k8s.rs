@@ -23,13 +23,47 @@ use crate::spec::Allocator;
 use crate::{Error, Files, Offers, Spec, export::image_problem};
 
 mod dynamodb;
+mod etcd;
 mod objects;
 mod refusals;
 mod relay;
 
 pub(super) use refusals::SlurmSites;
 
-pub(super) use dynamodb::{LOCAL, PLACEHOLDER, TABLES};
+pub(super) use dynamodb::{LOCAL, TABLES};
+
+/// The store that a fleet's deployment runs for its directory in one of
+/// its Kubernetes clusters, which the other clusters' hubs reach at its
+/// pod's IP: a DynamoDB Local, or etcd.
+pub(super) struct Store {
+    /// The cluster that runs it.
+    pub(super) cluster: String,
+    /// The `gdl.dev/directory` label of its pod, and its objects' name.
+    pub(super) name: &'static str,
+    /// What the render writes in place of its pod's IP.
+    pub(super) placeholder: &'static str,
+    /// What it is, as a message names it.
+    pub(super) what: &'static str,
+}
+
+impl Store {
+    /// The store `fleet` runs in one of its clusters, if it runs one.
+    pub(super) fn of(fleet: &gdl_model::Fleet) -> Option<Self> {
+        let directory = fleet.directory().filter(|d| d.runs_store())?;
+        let (name, placeholder, what) = match directory.backend {
+            gdl_model::FleetBackend::Dynamodb { .. } => {
+                (LOCAL, dynamodb::PLACEHOLDER, "DynamoDB Local")
+            }
+            gdl_model::FleetBackend::Etcd => (super::etcd::NAME, etcd::PLACEHOLDER, "etcd"),
+        };
+        Some(Self {
+            cluster: directory.cluster.clone()?,
+            name,
+            placeholder,
+            what,
+        })
+    }
+}
 pub(super) use gdl_k8s::label_value;
 use objects::{Names, Pod, Segment};
 pub(super) use objects::{SYSTEM_HOST, check_tag, is_system, parse_port};
@@ -502,12 +536,16 @@ impl Render<'_> {
                     objects::stream(&[job]).map_err(io)?,
                 );
             }
+            if etcd::runs(self.fleet, name) {
+                let requests = self.fleet.pod_resources(name, None, None);
+                base.extend(etcd::objects(fleet_name, name, cluster, requests.as_ref()));
+            }
             self.files.insert(
                 Path::new(name).join("base.yaml"),
                 objects::stream(&base).map_err(io)?,
             );
         }
-        if let Some(directory) = self.fleet.directory().filter(|d| !d.local) {
+        if let Some(directory) = self.fleet.directory().filter(|d| !d.runs_store()) {
             self.files.insert(
                 Path::new("dynamodb").join("tables.json"),
                 dynamodb::tables_json(self.fleet, directory),
@@ -628,10 +666,11 @@ impl Render<'_> {
                 }
             }
         }
-        // Under the DynamoDB directory a hub reports to no parent's hub and
+        // Under a shared directory a hub reports to no parent's hub and
         // keeps no children's records.
         let relay = relay::Relay::of(pool, parent && self.fleet.directory().is_none());
-        let endpoint = dynamodb::endpoint(self.fleet, cluster_name);
+        let endpoint = dynamodb::endpoint(self.fleet, cluster_name)
+            .or_else(|| etcd::endpoint(self.fleet, cluster_name));
         let variables = |hub: String| {
             pools::variables(
                 pool,

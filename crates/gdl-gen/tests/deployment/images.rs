@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use super::k8s::{container, deployment, fleet, fleet_text, objects, spec};
 use super::{Mirror, SEGMENTS, SPLIT, WHOLE, nest, placed};
 
+/// The pin of the hub's Dockerfile under the DynamoDB directory.
+const DYNAMODB_HUB_PIN: &str = "tests/fixtures/images/dynamodb-hub.txt";
+
 /// What the fake Docker was asked to do.
 #[derive(Debug, Clone, PartialEq)]
 enum Call {
@@ -644,6 +647,12 @@ fn a_dynamodb_fleets_hub_is_built_with_its_feature() {
         "{dynamodb_file}"
     );
     assert_ne!(relay_hub, dynamodb_hub);
+    // The hub's Dockerfile, and so its tag, is pinned byte for byte, so
+    // that another backend's build changes nothing of it.
+    let pinned = dynamodb_file
+        .replace(&mirror.url, "<url>")
+        .replace(&mirror.rev, "<rev>");
+    super::assert_pinned(&pinned, Path::new(DYNAMODB_HUB_PIN));
     let segments = |docker: &Fake| -> BTreeSet<String> {
         docker
             .contexts
@@ -653,6 +662,53 @@ fn a_dynamodb_fleets_hub_is_built_with_its_feature() {
             .collect()
     };
     assert_eq!(segments(&relay), segments(&dynamodb));
+}
+
+/// A fleet under the etcd directory builds its hub with the hub's `etcd`
+/// feature, after it installs `protoc`, which the feature's build needs;
+/// the segments' images do not change. A Kubernetes cluster that runs the
+/// fleet's etcd and no pool gets no hub's image: nothing there runs it.
+#[test]
+fn an_etcd_fleets_hub_is_built_with_its_feature() {
+    let mirror = Mirror::new();
+    let spec = spec(&mirror);
+    let mut relay = Fake::default();
+    run(&mirror, &spec, &fleet(&fleet_text()), false, &mut relay);
+    let text = fleet_text().replace("cluster = \"use1\"", "cluster = \"euw1\"")
+        + "[directory]\nbackend = \"etcd\"\ncluster = \"use1\"\n";
+    let mut etcd = Fake::default();
+    run(&mirror, &spec, &fleet(&text), true, &mut etcd);
+    let dockerfile = |docker: &Fake| -> String {
+        docker
+            .contexts
+            .iter()
+            .find(|(reference, _)| reference.contains("/api-hub:"))
+            .map(|(_, context)| context[Path::new("Dockerfile")].clone())
+            .expect("the hub's build")
+    };
+    let file = dockerfile(&etcd);
+    let install = file
+        .lines()
+        .find(|line| line.contains("cargo install"))
+        .expect("the hub's install");
+    assert!(
+        install.contains(
+            "apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev && rm -rf /var/lib/apt/lists/* && cargo install"
+        ) && install.contains("--features etcd"),
+        "{install}"
+    );
+    assert!(!dockerfile(&relay).contains("protobuf-compiler"));
+    let hubs: Vec<&str> = etcd
+        .builds()
+        .into_iter()
+        .filter(|(reference, _, _)| reference.contains("/api-hub:"))
+        .map(|(reference, _, _)| reference)
+        .collect();
+    assert!(
+        hubs.iter()
+            .all(|hub| hub.starts_with("registry.example/gdl-eu/")),
+        "{hubs:?}"
+    );
 }
 
 /// A cluster that runs the DynamoDB directory's Local and tables Job, but

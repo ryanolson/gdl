@@ -451,3 +451,29 @@ fn a_directory_cluster_is_refused_where_it_names_nothing() {
         .check(Some(&laid()))
         .expect("a Local without clusters");
 }
+
+/// An etcd directory is always one the deployment runs, so it names the
+/// cluster that runs it as a Local does: required when the fleet names
+/// clusters, and one of the fleet's. Without clusters it needs none.
+#[test]
+fn an_etcd_directory_names_the_cluster_that_runs_it() {
+    const ETCD: &str = "[directory]\nbackend = \"etcd\"\n";
+    let named = fleet(&format!("{CLUSTERED}{ETCD}cluster = \"use1\"\n"));
+    named.check(Some(&laid())).expect("a sound fleet");
+    let directory = named.directory().expect("a directory");
+    assert!(directory.runs_store());
+    assert_eq!(directory.cluster.as_deref(), Some("use1"));
+    assert_eq!(
+        problems(&format!("{CLUSTERED}{ETCD}")),
+        [
+            "[directory] cluster: missing; the fleet names clusters, so an etcd directory names the one cluster that runs it, for every cluster to reach"
+        ]
+    );
+    assert_eq!(
+        problems(&format!("{CLUSTERED}{ETCD}cluster = \"apse1\"\n")),
+        ["[directory] cluster: the fleet has no cluster `apse1`"]
+    );
+    fleet(&format!("{FLEET}{ETCD}"))
+        .check(Some(&laid()))
+        .expect("an etcd without clusters");
+}

@@ -1018,6 +1018,8 @@ mod credentials;
 mod dgd;
 #[path = "k8s/dynamodb.rs"]
 mod dynamodb;
+#[path = "k8s/etcd.rs"]
+mod etcd;
 #[path = "k8s/images.rs"]
 mod images;
 #[path = "k8s/labels.rs"]

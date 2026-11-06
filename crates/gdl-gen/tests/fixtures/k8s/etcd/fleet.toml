@@ -1,0 +1,71 @@
+# The api example's fleet over two clusters under the etcd directory, in
+# one etcd that cluster `use1` runs, its data on a claim of its own. A
+# model pool in `euw1` is shared by both global pools, across clusters,
+# which the relay directory refuses: every hub reads every record from
+# etcd. Each cluster keeps its pods on a node group of their own, by a
+# selector and a toleration, and gives each pod its requests and limits.
+[fleet]
+name = "api"
+
+[cluster.use1]
+context = "kind-use1"
+namespace = "gdl-api"
+region = "us-east-1"
+registry = "registry.example/gdl"
+platform = "linux/amd64"
+secrets = { fingerprint = "api-fingerprint" }
+node_selector = { "gdl.dev/node-group" = "gdl-api" }
+tolerations = [{ key = "dedicated", operator = "Equal", value = "gdl-api", effect = "NoSchedule" }]
+
+[cluster.use1.resources.default]
+requests = { cpu = "100m", memory = "128Mi" }
+limits = { cpu = "500m", memory = "512Mi" }
+
+[cluster.use1.resources.segment.engine]
+requests = { cpu = "250m" }
+limits = { cpu = "1", memory = "1Gi" }
+
+[cluster.euw1]
+context = "kind-euw1"
+namespace = "gdl-api"
+region = "eu-west-1"
+registry = "registry.example/gdl-eu"
+platform = "linux/arm64"
+secrets = { fingerprint = "api-fingerprint-eu" }
+node_selector = { "gdl.dev/node-group" = "gdl-api" }
+tolerations = [{ key = "dedicated", operator = "Exists", effect = "NoSchedule" }]
+
+[cluster.euw1.resources.default]
+requests = { cpu = "100m", memory = "128Mi" }
+limits = { cpu = "500m", memory = "512Mi" }
+
+[directory]
+backend = "etcd"
+cluster = "use1"
+
+[class.global]
+ready = { front = 2 }
+
+[class.model_x]
+ready = { engine = 1 }
+
+[pool.global-us]
+class = "global"
+cluster = "use1"
+
+[pool.model-x-us]
+class = "model_x"
+cluster = "use1"
+home = "global-us"
+
+[pool.global-eu]
+class = "global"
+cluster = "euw1"
+
+[pool.model-x-shared]
+class = "model_x"
+cluster = "euw1"
+parents = "global"
+
+[pool.model-x-shared.resources.segment.engine]
+limits = { memory = "2Gi" }

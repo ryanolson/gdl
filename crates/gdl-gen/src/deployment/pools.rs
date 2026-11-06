@@ -5,16 +5,18 @@
 //! Under `relay`, each parent pool's hub mounts a volume of its own, where
 //! it keeps its children's records. Under a `[directory]` of DynamoDB, the
 //! bundle runs one DynamoDB Local and the tables step instead, and every
-//! hub waits for the step.
+//! hub waits for the step. Under one of etcd, it runs one etcd, its data on
+//! a volume of its own, and every hub waits for it to start.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use gdl_model::{
-    DirectoryBackend, Fleet, FleetDirectory, HUB_PUBLIC_PORT, Layout, Manifest, Parent,
-    PoolSettings,
+    DirectoryBackend, Fleet, FleetBackend, FleetDirectory, HUB_PUBLIC_PORT, Layout, Manifest,
+    Parent, PoolSettings,
 };
 use serde_json::{Map, Value, json};
 
+use super::etcd;
 use super::variables::{Names, pool_variables, string};
 use super::{
     Bundle, Secrets, check_segment_name, hosts, hub_healthcheck, io, keep_stdin_open,
@@ -65,6 +67,17 @@ pub(super) fn bundle(
     if let Some(directory) = directory {
         local_directory(directory, &pools)?;
     }
+    let on_etcd = directory.is_some_and(|d| d.backend == FleetBackend::Etcd);
+    // The address of the store the bundle runs, which every hub uses.
+    let endpoint = directory.map(|directory| match directory.backend {
+        FleetBackend::Dynamodb { .. } => format!("http://{LOCAL}:8000"),
+        FleetBackend::Etcd => format!("http://{}:{}", etcd::NAME, etcd::PORT),
+    });
+    // What every hub waits for: the store, or the tables step on it.
+    let store = match on_etcd {
+        true => json!({etcd::NAME: {"condition": "service_started"}}),
+        false => json!({TABLES: {"condition": "service_completed_successfully"}}),
+    };
     let graph = bundle.graph.clone();
     let mut services = Map::new();
     // The pools that run each segment, by its name, which its deployment
@@ -98,8 +111,8 @@ pub(super) fn bundle(
         );
         let hub_dockerfile = dir.join("hub/Dockerfile");
         let text = match directory {
-            None => bundle.hub_dockerfile(&deployment, Some(STATE_DIR), false),
-            Some(_) => bundle.hub_dockerfile(&deployment, None, true),
+            None => bundle.hub_dockerfile(&deployment, Some(STATE_DIR), None),
+            Some(directory) => bundle.hub_dockerfile(&deployment, None, Some(&directory.backend)),
         };
         bundle.files.insert(hub_dockerfile.clone(), text);
         let hub = Image {
@@ -148,7 +161,7 @@ pub(super) fn bundle(
                     _ => None,
                 },
                 parent,
-                directory.map(|_| format!("http://{LOCAL}:8000")),
+                endpoint.clone(),
             )?;
             let mut service = json!({
                 "image": hub.name,
@@ -164,14 +177,13 @@ pub(super) fn bundle(
                 volumes.insert(volume, json!({}));
             }
             if directory.is_some() {
-                service["depends_on"] =
-                    json!({TABLES: {"condition": "service_completed_successfully"}});
+                service["depends_on"] = store.clone();
             }
             hub.build(&mut service, &mut built);
             // The tables step runs from the hub's image, which a hub
             // service builds; it shares its pool's variables, and reads
             // only the directory's.
-            if directory.is_some() && !services.contains_key(TABLES) {
+            if directory.is_some() && !on_etcd && !services.contains_key(TABLES) {
                 services.insert(
                     TABLES.into(),
                     json!({
@@ -225,14 +237,30 @@ pub(super) fn bundle(
             )));
         }
     }
-    if directory.is_some() {
-        services.insert(
-            LOCAL.into(),
-            json!({
-                "image": DYNAMODB_LOCAL,
-                "command": ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb", "-port", "8000"],
-            }),
-        );
+    match directory.map(|d| &d.backend) {
+        None => {}
+        Some(FleetBackend::Dynamodb { .. }) => {
+            services.insert(
+                LOCAL.into(),
+                json!({
+                    "image": DYNAMODB_LOCAL,
+                    "command": ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb", "-port", "8000"],
+                }),
+            );
+        }
+        Some(FleetBackend::Etcd) => {
+            let mut command = etcd::args(&format!("http://{}:{}", etcd::NAME, etcd::PORT));
+            command.insert(0, etcd::BINARY.into());
+            services.insert(
+                etcd::NAME.into(),
+                json!({
+                    "image": etcd::IMAGE,
+                    "command": command,
+                    "volumes": [format!("{ETCD_VOLUME}:{}", etcd::MOUNT)],
+                }),
+            );
+            volumes.insert(ETCD_VOLUME.into(), json!({}));
+        }
     }
     let mut compose = json!({"services": services});
     if !volumes.is_empty() {
@@ -248,9 +276,10 @@ pub(super) fn bundle(
         serde_json::to_string_pretty(&compose).map_err(io)?,
     );
     let mut readme = String::from(README);
-    readme.push_str(match directory {
+    readme.push_str(match directory.map(|d| &d.backend) {
         None => RELAY_README,
-        Some(_) => DYNAMODB_README,
+        Some(FleetBackend::Dynamodb { .. }) => DYNAMODB_README,
+        Some(FleetBackend::Etcd) => ETCD_README,
     });
     readme.push_str(README_TAIL);
     for source in &sources {
@@ -290,27 +319,34 @@ pub(super) const STATE_DIR: &str = "/var/lib/gdl-hub";
 const LOCAL: &str = "dynamodb-local";
 const TABLES: &str = "dynamodb-tables";
 
+/// The volume that keeps the etcd directory's data.
+const ETCD_VOLUME: &str = "etcd-data";
+
 /// DynamoDB Local 3.3.2, pinned by the digest of its multi-architecture
 /// index, as `scripts/dynamodb-local.sh` runs it.
 pub(in crate::deployment) const DYNAMODB_LOCAL: &str =
     "amazon/dynamodb-local@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86";
 
-/// Whether the bundle can carry `directory` for `pools`: only with
-/// `local = true`, since a Compose bundle carries no AWS role and no
+/// Whether the bundle can carry `directory` for `pools`: DynamoDB only
+/// with `local = true`, since a Compose bundle carries no AWS role and no
 /// credential goes into a file, and only when no pool takes the name of a
 /// service the directory adds.
 fn local_directory(directory: &FleetDirectory, pools: &[PoolSettings]) -> Result<(), Error> {
-    if !directory.local {
+    if !directory.runs_store() {
         return Err(Error::new(
             "the fleet's [directory] backend = \"dynamodb\" needs [directory] local = true under Compose: a Compose bundle carries no AWS role for the tables, and no credential goes into its files. With local = true, the bundle runs one DynamoDB Local, which every hub uses",
         ));
     }
+    let (names, store): (&[&str], &str) = match directory.backend {
+        FleetBackend::Dynamodb { .. } => (&[LOCAL, TABLES], "DynamoDB"),
+        FleetBackend::Etcd => (&[etcd::NAME], "etcd"),
+    };
     if let Some(pool) = pools
         .iter()
-        .find(|pool| [LOCAL, TABLES].contains(&pool.name.as_str()))
+        .find(|pool| names.contains(&pool.name.as_str()))
     {
         return Err(Error::new(format!(
-            "pool `{}` takes the name of a service that the bundle's DynamoDB directory adds: rename the pool",
+            "pool `{}` takes the name of a service that the bundle's {store} directory adds: rename the pool",
             pool.name
         )));
     }
@@ -332,7 +368,8 @@ pub(super) fn parent(layout: &Layout, pool: &PoolSettings) -> bool {
 /// reports to its parent's, and, for a `parent`, the state directory its
 /// hub keeps its children's records in. Under the fleet's DynamoDB
 /// directory, which the pool's settings name, `endpoint`, the DynamoDB
-/// Local every hub uses, if the fleet runs one. Compose and Kubernetes both
+/// Local every hub uses, if the fleet runs one; under its etcd directory,
+/// `endpoint`, the one member every hub uses. Compose and Kubernetes both
 /// write a pool's variables here, so the two differ only in the addresses
 /// each network spells.
 pub(super) fn variables(
@@ -368,6 +405,12 @@ pub(super) fn table(
             lists_table,
             aws_region,
             endpoint,
+        },
+        // The etcd directory is always the deployment's own, so it always
+        // has an address.
+        DirectoryBackend::Etcd { prefix, .. } => DirectoryBackend::Etcd {
+            endpoints: endpoint.into_iter().collect(),
+            prefix,
         },
         _ => DirectoryBackend::Relay {
             parent_hub,
@@ -407,6 +450,9 @@ const RELAY_README: &str = "Each pool's hub publishes its record under the `rela
 
 /// The README's paragraph on a fleet's DynamoDB directory.
 const DYNAMODB_README: &str = "Every pool's hub publishes its record to the fleet's DynamoDB directory: two tables in one DynamoDB Local, the `dynamodb-local` service (`GDL_POOL__DIRECTORY=dynamodb`, `GDL_POOL__ENDPOINT=http://dynamodb-local:8000`), which every hub reads, whatever its region. The hubs sign with fixed test credentials in their code, which DynamoDB Local never checks: no credential is in this bundle. DynamoDB Local runs with `-sharedDb`, so that every region sees one database, and in memory: `docker compose down` removes the directory, and so does a restart of `dynamodb-local`, after which the hubs cannot publish until `docker compose up` runs the tables step again. Before any hub starts, the `dynamodb-tables` service runs `gdl-hub --tables` from the hub's image, which makes the tables, and checks the keys of tables that exist. The hubs share no volume, and need no parent's hub. The hub's image is built with its `dynamodb` feature.\n\n";
+
+/// The README's paragraph on a fleet's etcd directory.
+const ETCD_README: &str = "Every pool's hub publishes its record to the fleet's etcd directory: one etcd, the `etcd` service (`GDL_POOL__DIRECTORY=etcd`, `GDL_POOL__ENDPOINTS=[\"http://etcd:2379\"]`), which every hub reads, whatever its region. etcd keeps its data in the `etcd-data` volume, so the directory outlives a restart of `etcd`, and `docker compose down --volumes` removes it. It runs with `--auto-compaction-mode=periodic --auto-compaction-retention=1h` and `--quota-backend-bytes=8589934592`: the directory never compacts, so without them etcd would keep each heartbeat until its quota refused every write. Each hub starts once `etcd` has started, and needs no setup step: it writes its record on its first heartbeat. The hubs share no volume, and need no parent's hub. The hub's image is built with its `etcd` feature, whose build installs `protobuf-compiler` and `libprotobuf-dev`, for `protoc` and the well-known types etcd's protos import.\n\n";
 
 /// The rest of the README of a fleet's bundle.
 const README_TAIL: &str = "Each image is built once, from one Dockerfile per layout and segment, and every pool of that layout and class runs it. A segment's image is named for its package (`<graph>-<segment>`, or `<graph>-<layout>-<segment>` for a spec of several layouts), and a hub's is `<graph>-hub`, tagged with its layout for a spec of several.\n\n\

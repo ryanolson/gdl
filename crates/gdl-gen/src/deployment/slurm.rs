@@ -115,19 +115,22 @@ fn sites(fleet: &Fleet) -> impl Iterator<Item = (&str, &gdl_model::SlurmSite)> {
 /// Every problem that keeps `fleet`'s pools off its Slurm sites, before
 /// anything is rendered: those
 /// [`problems`] finds, and a fleet with a pool on a Slurm site that does
-/// not find its pools through a DynamoDB Local. A pool's job on Slurm
+/// not find its pools through a store its site runs: a DynamoDB Local, or
+/// etcd. A pool's job on Slurm
 /// learns no other job's address before it runs, so a child's hub cannot
 /// be given its parent's, as the relay directory needs; and a Slurm job has
 /// no AWS role to reach DynamoDB on AWS with. Each pool's processes read
-/// the Local's address from the fleet's directory on their site's
-/// `run_dir`, so the Local runs on the site of every Slurm pool.
+/// the store's address from the fleet's directory on their site's
+/// `run_dir`, so the store runs on the site of every Slurm pool.
 pub(super) fn refusals(fleet: &Fleet) -> Vec<Problem> {
     let mut found = problems(fleet);
-    if let Some(home) = fleet
-        .directory()
-        .filter(|directory| directory.local)
-        .and_then(|directory| directory.cluster.as_deref())
+    if let Some(directory) = fleet.directory().filter(|directory| directory.runs_store())
+        && let Some(home) = directory.cluster.as_deref()
     {
+        let store = match directory.backend {
+            gdl_model::FleetBackend::Dynamodb { .. } => "DynamoDB Local",
+            gdl_model::FleetBackend::Etcd => "etcd",
+        };
         for pool in fleet.pools() {
             let Some((site, _)) = fleet
                 .cluster_of(&pool.name)
@@ -140,7 +143,7 @@ pub(super) fn refusals(fleet: &Fleet) -> Vec<Problem> {
                     Some("directory".into()),
                     Some("cluster".into()),
                     format!(
-                        "is `{home}`, and pool `{}` runs on Slurm site `{site}`: a Slurm job reads the DynamoDB Local's address from the directory job's file in its own site's `run_dir`, which only a directory job on `{site}` writes. Run the directory on `{site}`",
+                        "is `{home}`, and pool `{}` runs on Slurm site `{site}`: a Slurm job reads the {store}'s address from the directory job's file in its own site's `run_dir`, which only a directory job on `{site}` writes. Run the directory on `{site}`",
                         pool.name
                     ),
                 ));
@@ -159,11 +162,11 @@ pub(super) fn refusals(fleet: &Fleet) -> Vec<Problem> {
                 Some(format!("pool.{}", pool.name)),
                 None,
                 format!(
-                    "pool `{}` runs on a Slurm site, whose pools find each other through the fleet's DynamoDB directory: give the fleet a `[directory]` with `backend = \"dynamodb\"` and `local = true`. Under the relay, a child's hub needs its parent's hub's address, which a job learns only once it runs",
+                    "pool `{}` runs on a Slurm site, whose pools find each other through a directory that the fleet runs: give the fleet a `[directory]` with `backend = \"etcd\"`, or `backend = \"dynamodb\"` and `local = true`. Under the relay, a child's hub needs its parent's hub's address, which a job learns only once it runs",
                     pool.name
                 ),
             )),
-            Some(directory) if !directory.local => found.push(Problem::at(
+            Some(directory) if !directory.runs_store() => found.push(Problem::at(
                 Some("directory".into()),
                 Some("local".into()),
                 format!(

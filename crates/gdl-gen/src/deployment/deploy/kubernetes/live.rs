@@ -36,8 +36,9 @@ pub(super) struct Live {
     pub(super) parents: Option<String>,
     /// For a Deployment, its pods' stop grace, in seconds.
     pub(super) grace: Option<u64>,
-    /// For a pool's Deployment, whether its pool publishes to the DynamoDB
-    /// directory (`GDL_POOL__DIRECTORY=dynamodb`).
+    /// For a pool's Deployment, whether its pool publishes to a directory
+    /// that every hub reads, where no parent's hub holds its record:
+    /// DynamoDB or etcd (`GDL_POOL__DIRECTORY=dynamodb` or `etcd`).
     pub(super) dynamodb: bool,
     /// Whether a `GdlPool` controls it: the gdl operator made it, and
     /// only the operator changes or deletes it.
@@ -92,7 +93,11 @@ impl Live {
             .any(|owner| owner["kind"] == "GdlPool" && owner["controller"] == true);
         let home = variable("GDL_POOL__HOME");
         let parents = variable("GDL_POOL__PARENTS");
-        let dynamodb = variable("GDL_POOL__DIRECTORY").as_deref() == Some("dynamodb");
+        // Under etcd, as under DynamoDB, no parent's hub holds the record.
+        let dynamodb = matches!(
+            variable("GDL_POOL__DIRECTORY").as_deref(),
+            Some("dynamodb" | "etcd")
+        );
         Ok(Self {
             pool: whole("gdl.dev/pool"),
             class: whole("gdl.dev/class"),

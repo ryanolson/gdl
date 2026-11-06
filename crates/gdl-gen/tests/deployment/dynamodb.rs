@@ -6,9 +6,23 @@
 
 use std::path::Path;
 
-use super::{Mirror, ONE_FLEET, SPLIT, fleet_bundle, placed};
+use super::{Mirror, ONE_FLEET, SPLIT, assert_pinned, fleet_bundle, pinned, placed};
 
 const DIRECTORY: &str = "[directory]\nbackend = \"dynamodb\"\nrecords_table = \"gdl-pools\"\nlists_table = \"gdl-pool-lists\"\nlocal = true\n";
+
+/// The pin of [`ONE_FLEET`]'s bundle under [`DIRECTORY`], over [`SPLIT`].
+const DYNAMODB_PIN: &str = "tests/fixtures/bundle/dynamodb.txt";
+
+/// A fleet that keeps the DynamoDB directory composes byte for byte as
+/// pinned: every file of the bundle, so that another backend changes
+/// nothing of it.
+#[test]
+fn a_dynamodb_fleets_bundle_is_pinned() {
+    let mirror = Mirror::new();
+    let fleet = gdl_model::Fleet::from_toml(&format!("{ONE_FLEET}{DIRECTORY}")).expect("a fleet");
+    let (files, _) = fleet_bundle(&mirror, &placed(&mirror, SPLIT), &fleet);
+    assert_pinned(&pinned(&mirror, &files), Path::new(DYNAMODB_PIN));
+}
 
 #[test]
 fn a_dynamodb_fleet_runs_one_local_and_the_tables_step_before_its_hubs() {

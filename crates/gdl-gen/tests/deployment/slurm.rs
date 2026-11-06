@@ -1295,3 +1295,6 @@ pub(super) fn every_segment_a_recipe_starts_gets_the_glibc_tunables(mirror: &Mir
     // Three pools and three join jobs, one segment service each.
     assert_eq!(segments, 6);
 }
+
+#[path = "slurm/etcd.rs"]
+mod etcd;

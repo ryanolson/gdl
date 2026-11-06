@@ -37,6 +37,11 @@
 # withdrawn, and takes the fleet down. kind runs one cluster, so the case covers only
 # the hubs of the Local's own cluster, which reach it at its Service, not the pod-IP address of other clusters.
 #
+# With ETCD=1 it then runs the same case under an etcd directory, in one etcd on a claim in the cluster: the deploy
+# waits for etcd before any pool, the claim is bound, and a new etcd pod, on the same claim, still holds the model
+# pools' records. `down` also leaves no claim. The hub's image is then built with the hub's `etcd` feature, whose build
+# installs protoc, with LOCAL=1 or GDL_REV as for DYNAMODB=1. Both cases run when both are set.
+#
 # With OPERATOR=1 (and LOCAL=1) it runs the same pools in the cluster the gdl operator runs (`operator = true`)
 # instead, as the cluster's owner installs it from this working tree (`gdl-operator manifests`), under a load of
 # streamed requests from a pod in the cluster, each on a new connection to the global pool's entry Service, and each
@@ -53,6 +58,7 @@
 #   INSTALL_TOOLS=1 bash scripts/kind-fleet.sh      # first downloads the pinned kind into TOOLS_DIR
 #   bash scripts/kind-fleet.sh
 #   LOCAL=1 DYNAMODB=1 bash scripts/kind-fleet.sh   # every image from this working tree, both cases
+#   LOCAL=1 ETCD=1 bash scripts/kind-fleet.sh       # the relay case, then the etcd one
 #   LOCAL=1 OPERATOR=1 bash scripts/kind-fleet.sh   # the pools in a cluster the gdl operator runs
 #
 # LOCAL=1 builds every image from this working tree, with `cargo gdl deploy --local`: the spec is
@@ -78,6 +84,7 @@ PROMETHEUS_IMAGE="prom/prometheus:v3.7.3@sha256:49214755b6153f90a597adcbff0252cc
 CURL_IMAGE="curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
 TIMEOUT="${TIMEOUT:-1800}"
 DYNAMODB="${DYNAMODB:-0}"
+ETCD="${ETCD:-0}"
 LOCAL="${LOCAL:-0}"
 OPERATOR="${OPERATOR:-0}"
 # The operator case's request: its words, and the engine's pace between them, so each streams for about 2 s.
@@ -89,6 +96,10 @@ if [[ "${OPERATOR}" == "1" && "${LOCAL}" != "1" ]]; then
 fi
 if [[ "${DYNAMODB}" == "1" && "${LOCAL}" != "1" && -z "${GDL_REV:-}" ]]; then
   echo "kind-fleet.sh: DYNAMODB=1 needs LOCAL=1, or GDL_REV, a commit of the spec's [gdl] git with the hub's dynamodb feature" >&2
+  exit 1
+fi
+if [[ "${ETCD}" == "1" && "${LOCAL}" != "1" && -z "${GDL_REV:-}" ]]; then
+  echo "kind-fleet.sh: ETCD=1 needs LOCAL=1, or GDL_REV, a commit of the spec's [gdl] git with the hub's etcd feature" >&2
   exit 1
 fi
 
@@ -736,32 +747,25 @@ k get namespace gdl-api >/dev/null || fail "down deleted the namespace"
 [[ "$(owner)" == "${owned}" ]] || fail "down changed the owner's label or annotations: $(owner)"
 echo "kind-fleet.sh: no object with the fleet's label is left, and the namespace stays as its owner made it"
 
-if [[ "${DYNAMODB}" == "1" ]]; then
+# The same pools under a directory that every hub reads, which the relay refuses: the model pools are shared by
+# their parents' class. $1 names it in messages, $2 is the fleet's `[directory]` table, and $3 a function that checks
+# the directory's own objects after the first deploy.
+directory_case() {
+  local name="$1" directory="$2" check="$3" spec="${scratch}/$1.gdl.toml"
   if [[ "${LOCAL}" == "1" ]]; then
-    cp "${scratch}/gdl.toml" "${scratch}/dynamodb.gdl.toml"
+    cp "${scratch}/gdl.toml" "${spec}"
   else
-    sed "s#^rev = \".*\"#rev = \"${GDL_REV}\"#" "${scratch}/gdl.toml" >"${scratch}/dynamodb.gdl.toml"
-    grep -q "^rev = \"${GDL_REV}\"" "${scratch}/dynamodb.gdl.toml" || fail "the spec names no [gdl] rev to replace"
+    sed "s#^rev = \".*\"#rev = \"${GDL_REV}\"#" "${scratch}/gdl.toml" >"${spec}"
+    grep -q "^rev = \"${GDL_REV}\"" "${spec}" || fail "the spec names no [gdl] rev to replace"
   fi
-  directory='
-[directory]
-backend = "dynamodb"
-records_table = "gdl-pools"
-lists_table = "gdl-pool-lists"
-local = true
-cluster = "kind"
-'
-  sed 's/^home = "global"$/parents = "global"/' "${scratch}/fleet.toml" >"${scratch}/dynamodb.toml"
-  printf '%s' "${directory}" >>"${scratch}/dynamodb.toml"
-  sed 's/^home = "global"$/parents = "global"/' "${scratch}/smaller.toml" >"${scratch}/dynamodb-smaller.toml"
-  printf '%s' "${directory}" >>"${scratch}/dynamodb-smaller.toml"
-  run deploy --spec "${scratch}/dynamodb.gdl.toml" --fleet "${scratch}/dynamodb.toml" --target-dir "${target}"
-  grep -q "tables: the DynamoDB directory's tables are ready" "${scratch}/deploy.err" \
-    || fail "the deploy ran no tables Job"
-  [[ "$(k --namespace gdl-api get job dynamodb-tables --output jsonpath='{.status.succeeded}')" == "1" ]] \
-    || fail "the tables Job did not succeed"
+  sed 's/^home = "global"$/parents = "global"/' "${scratch}/fleet.toml" >"${scratch}/$1.toml"
+  printf '%s' "${directory}" >>"${scratch}/$1.toml"
+  sed 's/^home = "global"$/parents = "global"/' "${scratch}/smaller.toml" >"${scratch}/$1-smaller.toml"
+  printf '%s' "${directory}" >>"${scratch}/$1-smaller.toml"
+  run deploy --spec "${spec}" --fleet "${scratch}/$1.toml" --target-dir "${target}"
+  "${check}"
   hub global /v1/ext/gdl-pool/health >/dev/null \
-    || fail "the global pool's health does not answer 200: it does not follow both model pools through DynamoDB"
+    || fail "the global pool's health does not answer 200: it does not follow both model pools through ${name}"
   k --namespace gdl-api port-forward service/global-front :8080 >"${scratch}/forward.out" 2>&1 &
   forward=$!
   for _ in $(seq 1 100); do
@@ -772,21 +776,63 @@ cluster = "kind"
   [[ -n "${local_port}" ]] || fail "the port-forward did not start: $(cat "${scratch}/forward.out")"
   answer="$(curl -sS -m 30 -X POST -H 'content-type: application/json' -d '{"messages":["chat words"]}' \
     "http://127.0.0.1:${local_port}/v1/chat/completions")"
-  [[ "${answer}" == $'{"delta":"chat"}\n{"delta":"words"}' ]] || fail "the request under DynamoDB got: ${answer}"
+  [[ "${answer}" == $'{"delta":"chat"}\n{"delta":"words"}' ]] || fail "the request under ${name} got: ${answer}"
   kill "${forward}"
   forward=""
-  echo "kind-fleet.sh: under DynamoDB every pool is healthy, and a request is answered"
-  run deploy --spec "${scratch}/dynamodb.gdl.toml" --fleet "${scratch}/dynamodb-smaller.toml" --target-dir "${target}"
-  grep -q "pool \`model-b\` has withdrawn" "${scratch}/deploy.err" || fail "the deploy did not drain model-b under DynamoDB"
+  echo "kind-fleet.sh: under ${name} every pool is healthy, and a request is answered"
+  run deploy --spec "${spec}" --fleet "${scratch}/$1-smaller.toml" --target-dir "${target}"
+  grep -q "pool \`model-b\` has withdrawn" "${scratch}/deploy.err" || fail "the deploy did not drain model-b under ${name}"
   left="$(k --namespace gdl-api get deployments,services,configmaps,pods --selector gdl.dev/pool=model-b --output name)"
-  [[ -z "${left}" ]] || fail "model-b's objects are left under DynamoDB: ${left}"
+  [[ -z "${left}" ]] || fail "model-b's objects are left under ${name}: ${left}"
   hub global /v1/ext/gdl-pool/health >/dev/null \
-    || fail "the global pool's health does not answer 200 under DynamoDB after model-b left"
-  echo "kind-fleet.sh: under DynamoDB, model-b drained, said that it withdrew, and was deleted"
-  run down --spec "${scratch}/dynamodb.gdl.toml" --fleet "${scratch}/dynamodb-smaller.toml" --target-dir "${target}"
-  labelled="$(k get serviceaccounts,configmaps,services,deployments,replicasets,pods,jobs \
+    || fail "the global pool's health does not answer 200 under ${name} after model-b left"
+  echo "kind-fleet.sh: under ${name}, model-b drained, said that it withdrew, and was deleted"
+  run down --spec "${spec}" --fleet "${scratch}/$1-smaller.toml" --target-dir "${target}"
+  labelled="$(k get serviceaccounts,configmaps,persistentvolumeclaims,services,deployments,replicasets,pods,jobs \
     --all-namespaces --selector gdl.dev/fleet=api --output name)"
-  [[ -z "${labelled}" ]] || fail "objects with the fleet's label are left under DynamoDB: ${labelled}"
-  echo "kind-fleet.sh: under DynamoDB, no object with the fleet's label is left"
+  [[ -z "${labelled}" ]] || fail "objects with the fleet's label are left under ${name}: ${labelled}"
+  echo "kind-fleet.sh: under ${name}, no object with the fleet's label is left"
+}
+
+dynamodb_objects() {
+  grep -q "tables: the DynamoDB directory's tables are ready" "${scratch}/deploy.err" \
+    || fail "the deploy ran no tables Job"
+  [[ "$(k --namespace gdl-api get job dynamodb-tables --output jsonpath='{.status.succeeded}')" == "1" ]] \
+    || fail "the tables Job did not succeed"
+}
+
+# etcd keeps the directory on its claim: a new etcd pod, on the same claim, still holds every pool's record, so the
+# global pool's health answers 200 again without a deploy. The hubs reach etcd at its Service, which follows the pod.
+etcd_objects() {
+  grep -q "base: the etcd runs at" "${scratch}/deploy.err" || fail "the deploy did not wait for etcd"
+  [[ "$(k --namespace gdl-api get persistentvolumeclaim etcd-data --output jsonpath='{.status.phase}')" == "Bound" ]] \
+    || fail "etcd's claim is not bound"
+  hub global /v1/ext/gdl-pool/health >/dev/null \
+    || fail "the global pool's health does not answer 200 before etcd restarts"
+  k --namespace gdl-api delete pod --selector gdl.dev/directory=etcd --wait=true >/dev/null
+  k --namespace gdl-api rollout status deployment/etcd --timeout=120s >/dev/null || fail "etcd did not come back"
+  k --namespace gdl-api exec deployment/etcd -- etcdctl get --prefix --keys-only /gdl/pools/model/ \
+    >"${scratch}/etcd-keys.out" || fail "etcdctl did not answer after the restart"
+  grep -q '^/gdl/pools/model/model-a$' "${scratch}/etcd-keys.out" \
+    || fail "the new etcd pod does not hold model-a's record: $(cat "${scratch}/etcd-keys.out")"
+  echo "kind-fleet.sh: a new etcd pod keeps the directory on its claim"
+}
+
+if [[ "${DYNAMODB}" == "1" ]]; then
+  directory_case DynamoDB '
+[directory]
+backend = "dynamodb"
+records_table = "gdl-pools"
+lists_table = "gdl-pool-lists"
+local = true
+cluster = "kind"
+' dynamodb_objects
+fi
+if [[ "${ETCD}" == "1" ]]; then
+  directory_case etcd '
+[directory]
+backend = "etcd"
+cluster = "kind"
+' etcd_objects
 fi
 echo "kind-fleet.sh: passed"

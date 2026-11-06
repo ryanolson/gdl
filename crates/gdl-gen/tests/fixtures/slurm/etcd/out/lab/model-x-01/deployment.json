@@ -1,0 +1,66 @@
+{
+  "graph": {
+    "name": "api",
+    "schema": 1,
+    "nodes": [
+      {
+        "name": "Http",
+        "role": "source",
+        "binding": null
+      },
+      {
+        "name": "Engine",
+        "role": "sink",
+        "binding": "engine"
+      }
+    ],
+    "hops": [
+      {
+        "outer": "Http",
+        "forward": [],
+        "inner": "Engine",
+        "backward": [],
+        "forward_types": [
+          {
+            "name": ":: api_frontend :: Prompt",
+            "wire": true,
+            "encoding": "msgpack"
+          }
+        ],
+        "backward_types": [
+          {
+            "name": ":: api_frontend :: Chunk",
+            "wire": true,
+            "encoding": "msgpack"
+          }
+        ]
+      }
+    ]
+  },
+  "placement": {
+    "segment": {
+      "engine": {
+        "nodes": [
+          "Engine"
+        ]
+      },
+      "front": {
+        "nodes": [
+          "Http"
+        ]
+      }
+    },
+    "class": {
+      "global": {
+        "segments": [
+          "front"
+        ]
+      },
+      "model_x": {
+        "segments": [
+          "engine"
+        ]
+      }
+    }
+  }
+}

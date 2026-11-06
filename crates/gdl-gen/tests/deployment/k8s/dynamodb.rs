@@ -11,6 +11,7 @@ use super::*;
 
 const DYNAMODB_FLEET: &str = "tests/fixtures/k8s/dynamodb/fleet.toml";
 const DYNAMODB_PINNED: &str = "tests/fixtures/k8s/dynamodb/out";
+const DYNAMODB_AWS_PINNED: &str = "tests/fixtures/k8s/dynamodb/aws";
 
 /// The endpoint of the hubs outside the directory's cluster until
 /// `deploy` writes the Local's pod IP in its place.
@@ -42,6 +43,15 @@ fn a_dynamodb_fleets_objects_are_pinned() {
         assert!(files.contains_key(Path::new(path)), "{path}");
     }
     assert!(!files.contains_key(Path::new("euw1/tables.yaml")));
+}
+
+/// The same fleet on AWS, without its Local, is pinned too: the objects,
+/// the README, and `dynamodb/tables.json`.
+#[test]
+fn a_dynamodb_fleets_objects_on_aws_are_pinned() {
+    let mirror = Mirror::new();
+    let files = render(&mirror, &spec(&mirror), &fleet(&aws_text())).expect("objects");
+    assert_pinned(&mirror, &files, DYNAMODB_AWS_PINNED);
 }
 
 #[test]

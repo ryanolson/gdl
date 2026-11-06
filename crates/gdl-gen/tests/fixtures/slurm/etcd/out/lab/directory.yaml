@@ -1,0 +1,65 @@
+{
+  "extra_mount": [
+    "/shared/gdl-runs/api:/fleet"
+  ],
+  "frontend": {
+    "type": "none"
+  },
+  "host_setup": {
+    "commands": [],
+    "nodes": "all",
+    "teardown": [
+      "rm -f '/shared/gdl-runs/api'/directory.$SLURM_JOB_ID.endpoint"
+    ]
+  },
+  "model": {
+    "container": "registry.example#gdl/api-hub@sha256:0000000000000000000000000000000000000000000000000000000000000001",
+    "path": "/shared/gdl-runs/api",
+    "precision": "bf16"
+  },
+  "name": "gdl-api-directory",
+  "observability": {
+    "tachometer": {
+      "enabled": false
+    }
+  },
+  "resources": {},
+  "sbatch_directives": {
+    "comment": "gdl:api:-:directory:8732c3a2382e6f09",
+    "exclusive": "",
+    "no-requeue": ""
+  },
+  "schema": 2,
+  "services": [
+    {
+      "args": [
+        "--auto-compaction-mode=periodic",
+        "--auto-compaction-retention=1h",
+        "--quota-backend-bytes=8589934592"
+      ],
+      "name": "etcd",
+      "placement": {
+        "node": "head"
+      },
+      "terminal": true,
+      "type": "etcd"
+    },
+    {
+      "command": [
+        "bash",
+        "-c",
+        "rm -f /fleet/directory.$SLURM_JOB_ID.endpoint && echo http://{node_ip}:2379 > /fleet/directory.$SLURM_JOB_ID.tmp && mv /fleet/directory.$SLURM_JOB_ID.tmp /fleet/directory.$SLURM_JOB_ID.endpoint && ln -sfn directory.$SLURM_JOB_ID.endpoint /fleet/directory.$SLURM_JOB_ID.ptr && mv /fleet/directory.$SLURM_JOB_ID.ptr /fleet/directory.endpoint"
+      ],
+      "container": "registry.example#gdl/api-hub@sha256:0000000000000000000000000000000000000000000000000000000000000001",
+      "critical": true,
+      "name": "pointer",
+      "placement": {
+        "node": "head"
+      },
+      "type": "generic"
+    }
+  ],
+  "slurm": {
+    "time_limit": "08:00:00"
+  }
+}

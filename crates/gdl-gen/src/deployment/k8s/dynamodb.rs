@@ -18,7 +18,9 @@
 //! table in one region would make a regional table there, and that region
 //! a directory of its own.
 
-use gdl_model::{Fleet, FleetDirectory, KubernetesCluster, Problem, Resources, dynamodb_tables};
+use gdl_model::{
+    Fleet, FleetBackend, FleetDirectory, KubernetesCluster, Problem, Resources, dynamodb_tables,
+};
 use serde_json::{Value, json};
 
 use super::objects::{place, resources};
@@ -42,11 +44,32 @@ pub(in crate::deployment) const PLACEHOLDER: &str = "DYNAMODB_LOCAL_POD_IP";
 /// directory: the Local's Service in its own cluster, the placeholder for
 /// its pod's IP in any other, and none on AWS.
 pub(super) fn endpoint(fleet: &Fleet, cluster: &str) -> Option<String> {
-    let directory = fleet.directory().filter(|directory| directory.local)?;
+    let directory = local_of(fleet)?;
     Some(match directory.cluster.as_deref() == Some(cluster) {
         true => format!("http://{LOCAL}:{PORT}"),
         false => address(PLACEHOLDER),
     })
+}
+
+/// The tables of `directory`, and whether the deployment runs a Local for
+/// them, when it names DynamoDB.
+pub(super) fn tables(directory: &FleetDirectory) -> Option<(&str, &str, bool)> {
+    match &directory.backend {
+        FleetBackend::Dynamodb {
+            records_table,
+            lists_table,
+            local,
+        } => Some((records_table, lists_table, *local)),
+        FleetBackend::Etcd => None,
+    }
+}
+
+/// `fleet`'s directory, when it is DynamoDB in a Local the deployment
+/// runs.
+fn local_of(fleet: &Fleet) -> Option<&FleetDirectory> {
+    fleet
+        .directory()
+        .filter(|directory| tables(directory).is_some_and(|(_, _, local)| local))
 }
 
 /// The Local's address at `host`.
@@ -56,14 +79,12 @@ pub(in crate::deployment) fn address(host: &str) -> String {
 
 /// Whether `cluster` runs `fleet`'s Local and its tables Job.
 pub(super) fn runs_local(fleet: &Fleet, cluster: &str) -> bool {
-    fleet
-        .directory()
-        .is_some_and(|directory| directory.local && directory.cluster.as_deref() == Some(cluster))
+    local_of(fleet).is_some_and(|directory| directory.cluster.as_deref() == Some(cluster))
 }
 
 /// Each pool of `fleet` that takes the name of the directory's objects.
 pub(super) fn refusals(fleet: &Fleet) -> Vec<Problem> {
-    if fleet.directory().is_none_or(|directory| !directory.local) {
+    if local_of(fleet).is_none() {
         return Vec::new();
     }
     // A Slurm site makes no such objects, so its pools may take the names.
@@ -89,7 +110,7 @@ pub(super) fn refusals(fleet: &Fleet) -> Vec<Problem> {
 }
 
 /// The labels of the directory's object `name` in cluster `cluster`.
-fn labels(fleet: &str, cluster: &str, name: &str) -> Value {
+pub(super) fn labels(fleet: &str, cluster: &str, name: &str) -> Value {
     json!({
         "gdl.dev/fleet": label_value(fleet),
         "gdl.dev/cluster": label_value(cluster),
@@ -98,7 +119,12 @@ fn labels(fleet: &str, cluster: &str, name: &str) -> Value {
 }
 
 /// The pod's placement and account, as a pool's pods have them.
-fn pod(fleet: &str, cluster: &KubernetesCluster, container: Value, restart: Option<&str>) -> Value {
+pub(super) fn pod(
+    fleet: &str,
+    cluster: &KubernetesCluster,
+    container: Value,
+    restart: Option<&str>,
+) -> Value {
     let mut pod = json!({
         "serviceAccountName": fleet,
         "enableServiceLinks": false,
@@ -177,9 +203,10 @@ pub(super) fn tables_job(
     image: &str,
     requests: Option<&Resources>,
 ) -> Value {
+    let (records_table, lists_table, _) = tables(directory).expect("a DynamoDB directory");
     let env = [
-        ("GDL_POOL__RECORDS_TABLE", directory.records_table.clone()),
-        ("GDL_POOL__LISTS_TABLE", directory.lists_table.clone()),
+        ("GDL_POOL__RECORDS_TABLE", records_table.to_string()),
+        ("GDL_POOL__LISTS_TABLE", lists_table.to_string()),
         ("GDL_POOL__AWS_REGION", cluster.region.clone()),
         ("GDL_POOL__ENDPOINT", format!("http://{LOCAL}:{PORT}")),
     ]
@@ -212,6 +239,7 @@ pub(super) fn tables_job(
 /// their keys, the lists table's TTL attribute, and every region of the
 /// fleet's clusters, each of which needs a replica.
 pub(super) fn tables_json(fleet: &Fleet, directory: &FleetDirectory) -> String {
+    let (records_table, lists_table, _) = tables(directory).expect("a DynamoDB directory");
     let regions: std::collections::BTreeSet<&str> = fleet
         .clusters()
         .map(|(_, cluster)| cluster.region())
@@ -224,12 +252,12 @@ pub(super) fn tables_json(fleet: &Fleet, directory: &FleetDirectory) -> String {
         "regions": regions,
         "tables": [
             {
-                "name": directory.records_table,
+                "name": records_table,
                 "partition_key": key(class),
                 "sort_key": key(pool),
             },
             {
-                "name": directory.lists_table,
+                "name": lists_table,
                 "partition_key": key(owner),
                 "sort_key": key(list),
                 "ttl_attribute": dynamodb_tables::TTL_ATTRIBUTE,
@@ -246,11 +274,11 @@ pub(super) fn readme(fleet: &Fleet) -> String {
     let Some(directory) = fleet.directory() else {
         return String::new();
     };
-    let tables = format!(
-        "`{}` and `{}`",
-        directory.records_table, directory.lists_table
-    );
-    match (directory.local, directory.cluster.as_deref()) {
+    let Some((records_table, lists_table, local)) = tables(directory) else {
+        return String::new();
+    };
+    let tables = format!("`{records_table}` and `{lists_table}`");
+    match (local, directory.cluster.as_deref()) {
         (true, Some(home)) => format!(
             "\nEvery pool's hub publishes its record to the DynamoDB tables {tables}, in one DynamoDB Local that cluster `{home}` runs (`base.yaml`: Deployment and Service `{LOCAL}`), shared by every region. Its hubs reach it at its Service. The other clusters' hubs reach it at its pod's IP, which exists only once the pod runs: their objects name it `{PLACEHOLDER}` (`GDL_POOL__ENDPOINT={}`), and `cargo gdl deploy` writes the pod's IP in its place. To apply these objects by hand, replace `{PLACEHOLDER}` with the Local pod's IP first. After the base, and before the pools, apply `{home}/tables.yaml`, the Job `{TABLES}`, and wait until it completes: it makes the tables. The Local keeps them in memory, so a new Local pod starts empty: deploy again.\n",
             address(PLACEHOLDER)

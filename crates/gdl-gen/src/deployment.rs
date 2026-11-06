@@ -1,4 +1,4 @@
-use gdl_model::Fleet;
+use gdl_model::{Fleet, FleetBackend};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -401,6 +401,7 @@ use crate::{
 pub(crate) mod context;
 mod deploy;
 pub(crate) mod dgd;
+mod etcd;
 mod images;
 mod k8s;
 pub(crate) mod locks;
@@ -707,14 +708,18 @@ impl Bundle {
     /// The Dockerfile of a hub that admits the deployment in
     /// `deployment`, a path in the bundle, with an empty directory at
     /// `state_dir` that any user can write, if it names one, and built with
-    /// its `dynamodb` feature when `dynamodb` is set.
-    fn hub_dockerfile(&self, deployment: &Path, state_dir: Option<&str>, dynamodb: bool) -> String {
+    /// the feature of the fleet's directory `backend`, if it names one
+    /// ([`hub_feature`]).
+    fn hub_dockerfile(
+        &self,
+        deployment: &Path,
+        state_dir: Option<&str>,
+        backend: Option<&FleetBackend>,
+    ) -> String {
         let settings = &self.settings;
-        // The DynamoDB directory is a feature of the hub, off by default,
-        // since it links the AWS SDK.
-        let features = if dynamodb { " --features dynamodb" } else { "" };
+        let (needs, features) = hub_feature(backend);
         let install = format!(
-            "cargo install {}{features} --locked --root /build-tools gdl-hub",
+            "{needs}cargo install {}{features} --locked --root /build-tools gdl-hub",
             self.hub_install
         );
         let Some(state_dir) = state_dir else {
@@ -950,7 +955,7 @@ fn single(spec: &Spec, mut bundle: Bundle, target: &Path) -> Result<Files, Error
         "hub".into(),
         json!({"build":build,"healthcheck":hub_healthcheck()}),
     );
-    let hub = bundle.hub_dockerfile(Path::new("deployment.json"), None, false);
+    let hub = bundle.hub_dockerfile(Path::new("deployment.json"), None, None);
     bundle.files.insert("hub/Dockerfile".into(), hub);
     let source = placement
         .segments()
@@ -1122,6 +1127,24 @@ fn dockerfile(
         emit::MARKER,
     )
 }
+/// What the build of a hub adds for the fleet's directory `backend`, if
+/// it names one: the commands that install what the backend's feature
+/// needs to build, run before cargo, and the cargo flag that turns the
+/// feature on. Each feature is off by default: DynamoDB's links the AWS
+/// SDK, and etcd's compiles etcd's protos with `protoc` and the well-known
+/// types they import, which the default build image does not hold and
+/// Debian packages apart: `libprotobuf-dev` holds the types.
+pub(crate) fn hub_feature(backend: Option<&FleetBackend>) -> (&'static str, &'static str) {
+    match backend {
+        None => ("", ""),
+        Some(FleetBackend::Dynamodb { .. }) => ("", " --features dynamodb"),
+        Some(FleetBackend::Etcd) => (
+            "apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev && rm -rf /var/lib/apt/lists/* && ",
+            " --features etcd",
+        ),
+    }
+}
+
 /// The Dockerfile line that gives a segment's image the glibc tunables
 /// each launcher gives a segment (`gdl_model::segment_tunables`), so that
 /// a container started from the image without them gets them too.

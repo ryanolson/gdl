@@ -8,11 +8,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use gdl_model::{
-    FleetDirectory, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, PoolSettings, Problem, SlurmSite,
+    FleetBackend, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, PoolSettings, Problem, SlurmSite,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 
+use crate::deployment::etcd;
 use crate::deployment::k8s::{Named, Naming, Prepared, SYSTEM_HOST, image, is_system, parse_port};
 use crate::deployment::pools::{self, DYNAMODB_LOCAL};
 use crate::deployment::variables::{Names, pool_variables, string};
@@ -26,12 +27,13 @@ const BINARY: &str = gdl_k8s::BINARY;
 const SETTINGS: &str = "/gdl";
 
 /// Where every job mounts the fleet's directory on the shared file system,
-/// `<run_dir>/<fleet>`: the directory job to write its DynamoDB Local's
-/// address there, and the others, read-only, to read it.
+/// `<run_dir>/<fleet>`: the directory job to write its store's address
+/// there, and the others, read-only, to read it.
 const FLEET_DIR: &str = "/fleet";
 
-/// The fleet's pointer to its DynamoDB Local, in [`FLEET_DIR`]: a link to
-/// the latest directory job's file of its Local's address.
+/// The fleet's pointer to its store, a DynamoDB Local or etcd, in
+/// [`FLEET_DIR`]: a link to the latest directory job's file of its store's
+/// address.
 const POINTER: &str = "directory.endpoint";
 
 /// The file a joining job's `resolve` writes, in the job's logs directory,
@@ -71,6 +73,7 @@ pub(super) fn render(
         bundle: prepared.bundle.clone(),
         files: Files::new(),
         problems: Vec::new(),
+        store: Store::of(fleet),
     };
     let pools: Vec<PoolSettings> = fleet
         .pools()
@@ -115,11 +118,19 @@ pub(super) fn render(
             render.pool(pool, &deployment, &members, &hub_repository)?;
         }
     }
-    if let Some(directory) = fleet.directory().filter(|directory| directory.local)
+    if let Some(directory) = fleet.directory().filter(|d| d.runs_store())
         && let Some(name) = directory.cluster.as_deref()
         && let Some(site) = fleet.cluster(name).and_then(gdl_model::Cluster::slurm)
     {
-        render.directory(name, site, directory, &hub_repository)?;
+        let tables = match &directory.backend {
+            FleetBackend::Dynamodb {
+                records_table,
+                lists_table,
+                ..
+            } => Some((records_table.as_str(), lists_table.as_str())),
+            FleetBackend::Etcd => None,
+        };
+        render.directory(name, site, tables, &hub_repository)?;
     }
     if !render.problems.is_empty() {
         return Err(Error::all(render.problems));
@@ -147,6 +158,8 @@ struct Render<'f> {
     bundle: Bundle,
     files: Files,
     problems: Vec<Problem>,
+    /// The store the fleet's directory job runs.
+    store: Store,
 }
 
 /// One segment of a layout as a job runs it.
@@ -292,7 +305,7 @@ impl Render<'_> {
             pool.drain_on_stop
                 .unwrap_or(PoolSettings::DEFAULT_STOP_WAIT),
         );
-        let hub_env = pool_variables(
+        let mut hub_env = pool_variables(
             &pools::table(
                 &stopping,
                 format!("{{node_ip}}:{HUB_PUBLIC_PORT}"),
@@ -312,6 +325,11 @@ impl Render<'_> {
             )?,
             Names::Shell,
         );
+        // Each process reads etcd's address when it starts (`read_address`),
+        // so the render names none.
+        for env in [&mut hub_env, &mut segment_env] {
+            env.remove("GDL_POOL__ENDPOINTS");
+        }
         // A segment joining from another job finds its hub in the file
         // `resolve` writes, and a variable would override that file.
         let mut join_env = segment_env.clone();
@@ -331,7 +349,7 @@ impl Render<'_> {
             "env": hub_env,
             "preamble": format!(
                 "{}; {}",
-                read_address(&self.fleet_dir(site)),
+                read_address(&self.fleet_dir(site), self.store),
                 leave_by("GDL_POOL__LEAVE_BY")
             ),
             "readiness": {
@@ -361,7 +379,7 @@ impl Render<'_> {
                 "container": image,
                 "command": [BINARY, format!("{SETTINGS}/{}.toml", segment.name)],
                 "env": segment_env,
-                "preamble": segment_preamble(&self.fleet_dir(site)),
+                "preamble": segment_preamble(&self.fleet_dir(site), self.store),
                 "readiness": segment_readiness(segment),
             }));
             placed.push(Placed {
@@ -474,7 +492,7 @@ impl Render<'_> {
                 "container": hub_image,
                 "command": ["bash", "-c", script],
                 "env": env,
-                "preamble": read_address(&self.fleet_dir(site)),
+                "preamble": read_address(&self.fleet_dir(site), self.store),
                 "readiness": {"file": {"path": RESOLVED}, "timeout_seconds": HUB_READY_S},
             }),
             json!({
@@ -485,7 +503,7 @@ impl Render<'_> {
                 "container": images[segment.name.as_str()],
                 "command": [BINARY, format!("{SETTINGS}/{}.toml", segment.name), resolved],
                 "env": env,
-                "preamble": segment_preamble(&self.fleet_dir(site)),
+                "preamble": segment_preamble(&self.fleet_dir(site), self.store),
                 "readiness": segment_readiness(segment),
             }),
         ];
@@ -505,64 +523,97 @@ impl Render<'_> {
         job
     }
 
-    /// The directory job on site `name`: DynamoDB Local on a node of its
-    /// own, then the tables step beside it, which writes the Local's
-    /// address only once the tables exist, to a file of this job's id,
-    /// written beside it and renamed into place. A requeued job would keep
-    /// its id, so no job is requeued, and the step removes the file first.
+    /// The directory job on site `name`, which runs the fleet's store: a
+    /// DynamoDB Local on a node of its own for `tables`, or, without them,
+    /// srt-slurm's etcd on the head node, with the backend's flags. A step
+    /// on the head node writes the store's address, to a file of this
+    /// job's id, written beside it and renamed into place: under DynamoDB,
+    /// the tables step, once the tables exist; under etcd, once srt-slurm
+    /// has found etcd's port open, before it starts any other service. A
+    /// requeued job would keep its id, so no job is requeued, and the step
+    /// removes the file first. etcd keeps its data in srt-slurm's data
+    /// directory on the node's own disk, which each job starts empty: the
+    /// directory lasts as long as the job, as a Local in memory does.
     fn directory(
         &mut self,
         name: &str,
         site: &SlurmSite,
-        directory: &FleetDirectory,
+        tables: Option<(&str, &str)>,
         hub_repository: &str,
     ) -> Result<(), Error> {
         let hub_image = self.pulled(name, hub_repository)?;
-        let address = local_address("{node_ip}");
+        let (address, step) = match tables {
+            Some(_) => (local_address("{node_ip}"), format!("{BINARY} --tables && ")),
+            None => (format!("http://{{node_ip}}:{}", etcd::PORT), String::new()),
+        };
         let file = |suffix: &str| format!("{FLEET_DIR}/directory.$SLURM_JOB_ID.{suffix}");
         // The job's own file, for the driver that submitted it; then the
         // fleet's pointer, for the pools' processes: a link to that file,
         // renamed into place, so the latest job's pointer wins.
         let script = format!(
-            "rm -f {endpoint} && {BINARY} --tables && echo {address} > {tmp} && mv {tmp} {endpoint} && ln -sfn directory.$SLURM_JOB_ID.endpoint {ptr} && mv {ptr} {FLEET_DIR}/{POINTER}",
+            "rm -f {endpoint} && {step}echo {address} > {tmp} && mv {tmp} {endpoint} && ln -sfn directory.$SLURM_JOB_ID.endpoint {ptr} && mv {ptr} {FLEET_DIR}/{POINTER}",
             endpoint = file("endpoint"),
             tmp = file("tmp"),
             ptr = file("ptr"),
         );
-        let env: Map<String, Value> = [
-            ("GDL_POOL__DIRECTORY", "dynamodb".to_string()),
-            ("GDL_POOL__RECORDS_TABLE", directory.records_table.clone()),
-            ("GDL_POOL__LISTS_TABLE", directory.lists_table.clone()),
-            ("GDL_POOL__AWS_REGION", site.region.clone()),
-            ("GDL_POOL__ENDPOINT", address.clone()),
-        ]
-        .into_iter()
-        .map(|(name, value)| (name.to_string(), string(&value).into()))
-        .collect();
-        let services = vec![
-            json!({
-                "name": "dynamodb",
-                "type": "generic",
-                "nodes": 1,
-                "critical": true,
-                "terminal": true,
-                "container": DYNAMODB_LOCAL,
-                "command": [
-                    "java", "-jar", "/home/dynamodblocal/DynamoDBLocal.jar",
-                    "-inMemory", "-sharedDb", "-port", LOCAL_PORT.to_string(),
-                ],
-                "readiness": {"tcp": {"port": LOCAL_PORT}, "timeout_seconds": LOCAL_READY_S},
-            }),
-            json!({
-                "name": "tables",
-                "type": "generic",
-                "placement": {"node": "head"},
-                "critical": true,
-                "container": hub_image,
-                "command": ["bash", "-c", script],
-                "env": env,
-            }),
-        ];
+        let services = match tables {
+            Some((records_table, lists_table)) => {
+                let env: Map<String, Value> = [
+                    ("GDL_POOL__DIRECTORY", "dynamodb".to_string()),
+                    ("GDL_POOL__RECORDS_TABLE", records_table.to_string()),
+                    ("GDL_POOL__LISTS_TABLE", lists_table.to_string()),
+                    ("GDL_POOL__AWS_REGION", site.region.clone()),
+                    ("GDL_POOL__ENDPOINT", address.clone()),
+                ]
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), string(&value).into()))
+                .collect();
+                vec![
+                    json!({
+                        "name": "dynamodb",
+                        "type": "generic",
+                        "nodes": 1,
+                        "critical": true,
+                        "terminal": true,
+                        "container": DYNAMODB_LOCAL,
+                        "command": [
+                            "java", "-jar", "/home/dynamodblocal/DynamoDBLocal.jar",
+                            "-inMemory", "-sharedDb", "-port", LOCAL_PORT.to_string(),
+                        ],
+                        "readiness": {"tcp": {"port": LOCAL_PORT}, "timeout_seconds": LOCAL_READY_S},
+                    }),
+                    json!({
+                        "name": "tables",
+                        "type": "generic",
+                        "placement": {"node": "head"},
+                        "critical": true,
+                        "container": hub_image,
+                        "command": ["bash", "-c", script],
+                        "env": env,
+                    }),
+                ]
+            }
+            // srt-slurm's etcd runs its own binary, `/configs/etcd`, in the
+            // job's container, and gives clients the node's IP; the job
+            // ends when etcd does.
+            None => vec![
+                json!({
+                    "name": "etcd",
+                    "type": "etcd",
+                    "placement": {"node": "head"},
+                    "terminal": true,
+                    "args": etcd::FLAGS,
+                }),
+                json!({
+                    "name": "pointer",
+                    "type": "generic",
+                    "placement": {"node": "head"},
+                    "critical": true,
+                    "container": hub_image,
+                    "command": ["bash", "-c", script],
+                }),
+            ],
+        };
         let limits = site
             .time_limit
             .as_ref()
@@ -784,31 +835,73 @@ fn leave_by(variable: &str) -> String {
 }
 
 /// The preamble of a segment process, whose fleet's directory is
-/// `fleet_dir`: the DynamoDB Local's address ([`read_address`]); glibc's
+/// `fleet_dir`: the address of `store` ([`read_address`]); glibc's
 /// tunables as every launcher gives them (`gdl_model::segment_tunables`),
 /// when the job's environment holds none, and the user's, as given, when
 /// it holds one, which a variable of the recipe's would replace; then its
 /// leave time.
-fn segment_preamble(fleet_dir: &str) -> String {
+fn segment_preamble(fleet_dir: &str, store: Store) -> String {
     let tunables = gdl_model::GLIBC_TUNABLES;
     format!(
         "{}; export {tunables}=\"${{{tunables}-{}}}\"; {}",
-        read_address(fleet_dir),
+        read_address(fleet_dir, store),
         gdl_model::segment_tunables(None),
         leave_by("GDL_RUNTIME__LEAVE_BY")
     )
 }
 
-/// The start of a gdl process's preamble: `GDL_POOL__ENDPOINT`, the
-/// address of the fleet's DynamoDB Local, read from the pointer the
-/// directory job writes in `fleet_dir`, mounted at [`FLEET_DIR`]. Read when
-/// the process starts, not rendered: a new directory job moves no pool's
-/// recipe. With no pointer, or one that is not `http://<host>:<port>`, the
-/// process does not start, and says why in one line, even after a
-/// cluster's preamble of `set -e`, which a failed read alone would end.
-fn read_address(fleet_dir: &str) -> String {
+/// The store that a fleet's directory job runs on a Slurm site, whose
+/// address each gdl process reads from the fleet's pointer when it starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Store {
+    /// A DynamoDB Local: `[directory] backend = "dynamodb"`, with
+    /// `local = true`.
+    Local,
+    /// srt-slurm's etcd: `[directory] backend = "etcd"`.
+    Etcd,
+}
+
+impl Store {
+    /// The store of `fleet`'s directory. [`super::refusals`] refused a
+    /// Slurm pool's fleet without one the site runs.
+    fn of(fleet: &gdl_model::Fleet) -> Self {
+        match fleet.directory().map(|directory| &directory.backend) {
+            Some(FleetBackend::Etcd) => Self::Etcd,
+            _ => Self::Local,
+        }
+    }
+
+    /// What it is, as a message names it.
+    fn what(self) -> &'static str {
+        match self {
+            Self::Local => "DynamoDB Local",
+            Self::Etcd => "etcd",
+        }
+    }
+
+    /// The export of its address, `$a`, as the backend's `[pool]` key
+    /// reads it: one etcd member is a list of one.
+    fn export(self) -> &'static str {
+        match self {
+            Self::Local => "export GDL_POOL__ENDPOINT=\"$a\"",
+            Self::Etcd => "export GDL_POOL__ENDPOINTS=\"[\\\"$a\\\"]\"",
+        }
+    }
+}
+
+/// The start of a gdl process's preamble: the address of the fleet's
+/// `store`, read from the pointer the directory job writes in `fleet_dir`,
+/// mounted at [`FLEET_DIR`]: `GDL_POOL__ENDPOINT` for a DynamoDB Local,
+/// `GDL_POOL__ENDPOINTS` for etcd. Read when the process starts, not
+/// rendered: a new directory job moves no pool's recipe. With no pointer,
+/// or one that is not `http://<host>:<port>`, the process does not start,
+/// and says why in one line, even after a cluster's preamble of `set -e`,
+/// which a failed read alone would end.
+fn read_address(fleet_dir: &str, store: Store) -> String {
     format!(
-        "a=$(cat {FLEET_DIR}/{POINTER} 2>/dev/null || true); case \"$a\" in http://?*:[0-9]*) export GDL_POOL__ENDPOINT=\"$a\" ;; *) echo \"gdl: {fleet_dir}/{POINTER} names no DynamoDB Local: submit the fleet's directory job, and wait for it to write the file\" >&2; exit 1 ;; esac"
+        "a=$(cat {FLEET_DIR}/{POINTER} 2>/dev/null || true); case \"$a\" in http://?*:[0-9]*) {} ;; *) echo \"gdl: {fleet_dir}/{POINTER} names no {}: submit the fleet's directory job, and wait for it to write the file\" >&2; exit 1 ;; esac",
+        store.export(),
+        store.what(),
     )
 }
 

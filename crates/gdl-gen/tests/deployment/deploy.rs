@@ -77,8 +77,12 @@ struct Kube {
     /// What `get pods` and `get events` print.
     pods: Value,
     events: Value,
-    /// What `get pods` prints for the DynamoDB Local's pods.
+    /// What `get pods` prints for the pods of the directory's store, a
+    /// DynamoDB Local or etcd.
     local_pods: Value,
+    /// Whether every Deployment read stays mid-rollout: its controller
+    /// never brings a pod of its latest change up.
+    stalled: bool,
     /// The status `get job` prints for the tables Job, and its log.
     job: Value,
     job_log: &'static str,
@@ -138,6 +142,7 @@ impl Kube {
             pods: json!({"items": []}),
             events: json!({"items": []}),
             local_pods: json!({"items": [local_pod(true)]}),
+            stalled: false,
             job: json!({"succeeded": 1}),
             job_log: "",
             without_monitors: Vec::new(),
@@ -535,10 +540,7 @@ impl gdl_gen::Kube for Kube {
                 }
             }
             ("get", None)
-                if rest[1] == "pods"
-                    && rest
-                        .iter()
-                        .any(|a| a.contains("gdl.dev/directory=dynamodb-local")) =>
+                if rest[1] == "pods" && rest.iter().any(|a| a.contains("gdl.dev/directory=")) =>
             {
                 gdl_gen::Reply::ok(self.local_pods.to_string())
             }
@@ -571,6 +573,18 @@ impl gdl_gen::Kube for Kube {
                             .chain([json!({"manager": "gdl", "fieldsV1": {"f:metadata": {}}})])
                             .collect();
                         held["metadata"]["managedFields"] = fields.into();
+                        // As the API server holds it: a Deployment's
+                        // controller has rolled out its latest change.
+                        if kind == "Deployment" {
+                            let replicas = held["spec"]["replicas"].as_u64().unwrap_or(1);
+                            let updated = if self.stalled { 0 } else { replicas };
+                            held["metadata"]["generation"] = 1.into();
+                            held["status"] = json!({
+                                "observedGeneration": 1,
+                                "replicas": replicas,
+                                "updatedReplicas": updated,
+                            });
+                        }
                         gdl_gen::Reply::ok(held.to_string())
                     }
                 }
@@ -860,7 +874,8 @@ fn deletes(log: &Log, context: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// The DynamoDB Local's pod, ready or not, at a pod IP.
+/// The pod of the store a fleet runs for its directory, a DynamoDB Local
+/// or etcd, ready or not, at a pod IP.
 fn local_pod(ready: bool) -> Value {
     json!({
         "metadata": {"name": "dynamodb-local-0"},
@@ -1427,6 +1442,8 @@ mod dynamodb;
 
 #[path = "deploy/empty.rs"]
 mod empty;
+#[path = "deploy/etcd.rs"]
+mod etcd;
 
 #[path = "deploy/hubless.rs"]
 mod hubless;
