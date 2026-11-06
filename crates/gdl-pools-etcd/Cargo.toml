@@ -1,0 +1,46 @@
+[package]
+name = "gdl-pools-etcd"
+description = "A pool directory in etcd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The `client` feature's. No TLS: etcd-client's default features are empty.
+# `pub-response-field` names the encoded request, so that a write is
+# measured against etcd's request limit before it is sent, and a watch
+# response's `fragment` flag.
+etcd-client = { version = "0.21", default-features = false, features = ["pub-response-field"], optional = true }
+futures = { workspace = true, optional = true }
+gdl-model = { path = "../gdl-model" }
+gdl-pools = { path = "../gdl-pools" }
+# The size of an encoded transaction: the version etcd-client builds on.
+prost = { version = "0.14", optional = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, optional = true }
+tracing = { version = "0.1", optional = true }
+
+[features]
+# The directory itself: the etcd client, whose build compiles etcd's protos
+# with `protoc`. Off by default, so that a build of the workspace needs no
+# `protoc`: `gdl-hub`'s `etcd` feature and `scripts/etcd.sh` turn it on.
+client = ["dep:etcd-client", "dep:futures", "dep:prost", "dep:tokio", "dep:tracing"]
+# The test target that runs against a real etcd, outside the default
+# suite, and the hooks its race cases need: `scripts/etcd.sh` fetches etcd
+# and runs it.
+etcd-local = ["client"]
+
+[[test]]
+name = "etcd"
+required-features = ["etcd-local"]
+
+[dev-dependencies]
+gdl-pools = { path = "../gdl-pools", features = ["conformance"] }
+serde = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["net", "io-util", "process", "rt-multi-thread"] }
+
+[lints]
+workspace = true

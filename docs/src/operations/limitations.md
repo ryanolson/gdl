@@ -185,7 +185,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** use a hub (`[hub]`). An instance that starts while the others serve joins once it is ready. See [Discovery](../concepts/hub.md) and [Segment lifecycle](../concepts/lifecycle.md).
 
 ### A job that joins a pool finds only a hub on the default control port
-- **What:** `gdl-hub --resolve` writes `[hub]` with the `host` and `public_port` from the pool's record, and no `control_port`, so the joining segment uses 8337. A pool's hub on another control port is not reached. The resolver reads the `dir` and `dynamodb` directories only, and refuses `relay`.
+- **What:** `gdl-hub --resolve` writes `[hub]` with the `host` and `public_port` from the pool's record, and no `control_port`, so the joining segment uses 8337. A pool's hub on another control port is not reached. The resolver reads the `dir`, `dynamodb`, and `etcd` directories only, and refuses `relay`.
 - **Why:** a pool's record names only its hub's public listener (`gdl_pools::PoolRecord::hub`), which is all that a follower needs. Under `relay`, the records are held in a parent pool's hub, not in a store a job can read.
 - **Workaround:** keep the hubs of pools that jobs join on the default ports, or give the segment the control port in its own settings (`[hub] control_port`). See [Joining a running pool](../concepts/hub.md#joining-a-running-pool).
 - **Lifts:** a record that also names the hub's control listener.
@@ -1177,3 +1177,33 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **Why:** a rule that expired more raced with writes of the same pool through other handles and other regions, and could expire the list that a live record names.
 - **Workaround:** none needed: each is bounded by the pool's withdrawals, refused or failed writes, and writes at the same or a lower `properties_version` that name a list of their own (commands, restarts behind the clock that kept the properties, heartbeats after another writer's write), which are rare. No sweeper removes them.
 - **Lifts:** a sweeper that deletes the lists that no record names.
+
+### The etcd pool directory links no TLS and sends no credentials
+- **What:** the etcd backend (`gdl_pools_etcd::EtcdDirectory`) reaches each member over plain `http://`, and sends no user or password. A hub refuses an `https://` endpoint. Anything that reaches etcd's client port can read and write every pool's record.
+- **Why:** the first sites are Slurm clusters, whose etcd runs on the cluster's private network, as Dynamo's does. TLS and authentication need certificates and credentials in each pool's settings, which no render writes yet.
+- **Workaround:** run etcd on a network only the fleet's hosts reach.
+- **Lifts:** the client's TLS feature and credentials from a mounted file.
+
+### A watch of the etcd directory is silent while etcd is down
+- **What:** while no member of etcd answers, a watch that has its snapshot sees no change and no error: the class's task watches again from its last revision, with a backoff up to 5 s, and readers see no break once it does. Meanwhile each reader lets the records it holds lapse by their lease, so a pool that cannot heartbeat drops out of discovery. A new watch fails after `EtcdLimits::timeout`, 10 s by default, and a write fails at once, each as `DirectoryError::Unavailable`. A resume token works only through the handle, and its clones, whose watch made it.
+- **Why:** the readers keep their place in the class's changes, so the store's own resume serves them without a new snapshot each time the connection drops.
+- **Workaround:** none needed: a follow keeps running through an outage ([Classes and pools](../concepts/pools.md#the-etcd-backend)).
+- **Lifts:** an error after an outage of a set length, if readers need to tell an outage from a quiet class.
+
+### The etcd directory needs etcd's compaction and quota set by hand
+- **What:** the backend never compacts. etcd keeps each write as a revision until it compacts it. Without `--auto-compaction-mode=periodic --auto-compaction-retention=1h`, the database grows with each heartbeat until it reaches `--quota-backend-bytes`, and then etcd refuses every write, so every hub's heartbeat fails. Nothing renders an etcd service yet: `cargo gdl compose`, `cargo gdl k8s`, and a fleet's `[directory]` name only DynamoDB, so a pool takes the etcd directory only through its own `[pool]` keys.
+- **Why:** compaction is etcd's, and the operator's choice of how long a cut-off watch can resume. Rendering an etcd service comes with the Slurm render.
+- **Workaround:** run etcd with the flags in [Running etcd for the directory](../concepts/pools.md#running-etcd-for-the-directory), and recover a full quota with its steps: compact, `etcdctl defrag`, `etcdctl alarm disarm`.
+- **Lifts:** an etcd service in the Slurm, Compose, and Kubernetes renders, with these flags.
+
+### A pool's property list must fit one etcd request
+- **What:** under the etcd backend, a write is one transaction, which must fit etcd's request limit, `--max-request-bytes`, 1.5 MiB by default, with the record and its list. A write that does not fit is refused as `DirectoryError::Malformed` and stores nothing, so a pool whose list grows past it cannot publish.
+- **Why:** the record and its list are written in one transaction, so a reader never finds one without the other. 1,000 properties of about 80 bytes each are about 78 KB.
+- **Workaround:** raise `--max-request-bytes` on every member and `EtcdLimits::request_bytes` in a hub built in code. The stock hub keeps the default.
+- **Lifts:** a list split over several keys, if pools need lists that large.
+
+### A restored copy of etcd's data forgets the writes made after it
+- **What:** an etcd started over a copy of an older data directory has the same identity, and older records and tombstones. A reader's watch takes a new snapshot, since the store's revision is below its own. But a withdrawal made after the copy is gone, so a withdrawn pool's record comes back until its pool writes again or an operator withdraws it ([A pool whose hub is gone](../concepts/pools.md#a-pool-whose-hub-is-gone)).
+- **Why:** the identity tells a store from an empty or another one, not from an older copy of itself.
+- **Workaround:** never restore a copy of the data directory: start the member over its own disk, or over an empty one, after which each live hub writes its record again on its next heartbeat.
+- **Lifts:** none planned.

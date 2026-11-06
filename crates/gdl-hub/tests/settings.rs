@@ -133,6 +133,46 @@ fn a_pools_settings_are_read_from_the_environment() {
     });
 }
 
+/// The `etcd` backend's endpoints are one variable holding a list, written
+/// as TOML writes one, and its prefix another. A bare URL is not a list,
+/// and is refused by name.
+#[test]
+fn the_etcd_backend_is_read_from_the_environment() {
+    Jail::expect_with(|jail| {
+        jail.set_env("GDL_POOL__NAME", "model-x-01-us-east-1");
+        jail.set_env("GDL_POOL__CLASS", "model_x");
+        jail.set_env("GDL_POOL__REGION", "us-east-1");
+        jail.set_env("GDL_POOL__HUB", "model-x-01-hub:1337");
+        jail.set_env("GDL_POOL__DIRECTORY", "etcd");
+        jail.set_env(
+            "GDL_POOL__ENDPOINTS",
+            r#"["http://etcd-a:2379", "http://10.0.0.2:2379"]"#,
+        );
+        let pool = pool_from_env(&spec())
+            .map_err(|e| e.to_string())?
+            .expect("a pool");
+        assert_eq!(
+            pool.directory,
+            DirectoryBackend::Etcd {
+                endpoints: vec!["http://etcd-a:2379".into(), "http://10.0.0.2:2379".into()],
+                prefix: DirectoryBackend::ETCD_PREFIX.into(),
+            }
+        );
+        jail.set_env("GDL_POOL__PREFIX", "/fleet-a/pools");
+        let pool = pool_from_env(&spec())
+            .map_err(|e| e.to_string())?
+            .expect("a pool");
+        let DirectoryBackend::Etcd { prefix, .. } = &pool.directory else {
+            panic!("{pool:?}");
+        };
+        assert_eq!(prefix, "/fleet-a/pools");
+        jail.set_env("GDL_POOL__ENDPOINTS", "http://etcd-a:2379");
+        let error = pool_from_env(&spec()).expect_err("a bare URL").to_string();
+        assert!(error.contains("GDL_POOL__ENDPOINTS"), "{error}");
+        Ok(())
+    });
+}
+
 /// The hub's pace and its watch caps are `GDL_POOL__*` variables too, and
 /// the timing the hub runs with is theirs, each one left out at its
 /// default.
@@ -845,6 +885,16 @@ async fn every_backend_refuses_a_static_property_its_class_does_not_provide() {
             lists_table: "lists".into(),
             aws_region: "us-east-1".into(),
             endpoint: Some("http://127.0.0.1:1".into()),
+        }],
+    ]
+    .concat();
+    // The etcd directory reads nothing until the hub publishes.
+    #[cfg(feature = "etcd")]
+    let backends = [
+        backends,
+        vec![DirectoryBackend::Etcd {
+            endpoints: vec!["http://127.0.0.1:1".into()],
+            prefix: DirectoryBackend::ETCD_PREFIX.into(),
         }],
     ]
     .concat();

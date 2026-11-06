@@ -37,6 +37,7 @@ timeout <limit> uv run -q --no-project --python '>=3.8' python -m unittest disco
 (cd examples/api && timeout <limit> cargo nextest run)
 bash scripts/build-book.sh                         # the book, with its host-name, link and heading checks (INSTALL_TOOLS=1 fetches or builds the tools)
 bash scripts/dynamodb-local.sh                     # gdl-pools-dynamodb, and gdl-hub with its dynamodb feature, against DynamoDB Local in Docker, outside the default suite (TIMEOUT=<limit>)
+bash scripts/etcd.sh                               # gdl-pools-etcd, and gdl-hub with its etcd feature, against etcd v3.5.21, outside the default suite (needs protoc; INSTALL_TOOLS=1 fetches etcd; TIMEOUT=<limit>)
 bash scripts/kubeconform.sh                        # the pinned Kubernetes objects against Kubernetes 1.35 schemas, offline (INSTALL_TOOLS=1 fetches kubeconform and the schemas)
 bash scripts/kind-fleet.sh                         # cargo gdl deploy and down on a kind cluster, outside the default suite (INSTALL_TOOLS=1 fetches kind; TIMEOUT=<limit>)
 LOCAL=1 OPERATOR=1 bash scripts/kind-fleet.sh     # the same, in a cluster the gdl operator runs: prune and down through GdlPool finalizers, under load

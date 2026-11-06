@@ -14,7 +14,7 @@ use gdl_model::DirectoryBackend;
 use gdl_pools::{DirDirectory, PoolDirectory, PoolEvent, PoolRecord, PoolState, PoolView};
 
 use crate::PoolError;
-use crate::setup::variables;
+use crate::setup::{by_variable, variables};
 
 /// The `[hub]` table of a pool's hub, as its record names the hub's public
 /// listener. The record has no control port, so the table names none and
@@ -190,8 +190,8 @@ pub async fn resolve_hub<D: PoolDirectory>(
 /// The binary's `--resolve` mode, from `args`, the arguments after
 /// `--resolve` (`<class>/<pool> --write <file>`), and the directory the
 /// `GDL_POOL__*` variables of `vars` name, as a pool's hub reads them:
-/// `dir` with `GDL_POOL__DIR`, or `dynamodb` with its tables, region, and
-/// endpoint. Any other `GDL_POOL__` variable is ignored, so a joining job
+/// `dir` with `GDL_POOL__DIR`, `dynamodb` with its tables, region, and
+/// endpoint, or `etcd` with its endpoints and prefix. Any other `GDL_POOL__` variable is ignored, so a joining job
 /// can share its pool's variables. Writes the pool's `[hub]` to the file
 /// ([`ResolvedHub::write`]) and returns a line that says so.
 ///
@@ -250,8 +250,21 @@ pub async fn resolve_from_args(
                 "GDL_POOL__DIRECTORY=dynamodb: this gdl-hub is built without its `dynamodb` feature, which links the AWS SDK; install it with `cargo install gdl-hub --features dynamodb`",
             ));
         }
+        #[cfg(feature = "etcd")]
+        DirectoryBackend::Etcd { endpoints, prefix } => {
+            let directory = gdl_pools_etcd::EtcdDirectory::connect(endpoints, prefix)
+                .await
+                .map_err(|error| PoolError::new(format!("GDL_POOL__ENDPOINTS: {error}")))?;
+            resolve_hub(&directory, class, pool).await?
+        }
+        #[cfg(not(feature = "etcd"))]
+        DirectoryBackend::Etcd { .. } => {
+            return Err(PoolError::new(
+                "GDL_POOL__DIRECTORY=etcd: this gdl-hub is built without its `etcd` feature, which links the etcd client; install it with `cargo install gdl-hub --features etcd`",
+            ));
+        }
         DirectoryBackend::Relay { .. } | DirectoryBackend::Memory => {
-            unreachable!("directory_from_vars gives `dir` or `dynamodb`")
+            unreachable!("directory_from_vars gives `dir`, `dynamodb`, or `etcd`")
         }
     };
     hub.write(&file)
@@ -263,27 +276,33 @@ pub async fn resolve_from_args(
     ))
 }
 
-/// The directory `vars` name for `--resolve`: `dir` or `dynamodb`.
+/// The directory `vars` name for `--resolve`: `dir`, `dynamodb`, or `etcd`.
 fn directory_from_vars(
     vars: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<DirectoryBackend, PoolError> {
     let vars: Vec<(OsString, OsString)> = vars.into_iter().collect();
     let mut backend = None;
     let mut dir = None;
+    let mut prefix = None;
+    let mut endpoints = None;
     for variable in variables(vars.iter().cloned()) {
-        // Only these two keys are decoded: a joining job shares its pool's
+        // Only these keys are decoded: a joining job shares its pool's
         // variables, such as `GDL_POOL__HEARTBEAT_MS`, which are not strings.
+        // Each value as the hub reads it, through figment, which decodes a
+        // value a generator quoted, and a list as TOML writes one.
+        let Ok(value) = variable.value.parse::<Value>();
+        let failed = |error: figment::Error| PoolError::new(format!("{}: {error}", variable.name));
         let slot = match variable.key.as_str() {
             "directory" => &mut backend,
             "dir" => &mut dir,
+            "prefix" => &mut prefix,
+            "endpoints" => {
+                endpoints = Some(value.deserialize::<Vec<String>>().map_err(failed)?);
+                continue;
+            }
             _ => continue,
         };
-        // Each value as the hub reads it, through figment, which decodes a
-        // value a generator quoted.
-        let Ok(value) = variable.value.parse::<Value>();
-        let value = value
-            .deserialize::<String>()
-            .map_err(|error| PoolError::new(format!("{}: {error}", variable.name)))?;
+        let value = value.deserialize::<String>().map_err(failed)?;
         *slot = Some((variable.name, value));
     }
     match backend.as_ref().map(|(_, value)| value.as_str()) {
@@ -294,13 +313,25 @@ fn directory_from_vars(
             )),
         },
         Some("dynamodb") => crate::directory_from_vars(vars),
+        Some("etcd") => {
+            let endpoints = endpoints.ok_or_else(|| {
+                PoolError::new(
+                    "GDL_POOL__ENDPOINTS: missing; with GDL_POOL__DIRECTORY=etcd it lists the etcd members' client URLs, as TOML writes a list",
+                )
+            })?;
+            let prefix = prefix.map_or_else(
+                || DirectoryBackend::ETCD_PREFIX.to_owned(),
+                |(_, prefix)| prefix,
+            );
+            DirectoryBackend::etcd(endpoints, prefix).map_err(by_variable)
+        }
         _ => {
             let (name, given) = backend.map_or_else(
                 || ("GDL_POOL__DIRECTORY".to_owned(), "missing".to_owned()),
                 |(name, value)| (name, format!("{value:?}")),
             );
             Err(PoolError::new(format!(
-                "{name}: {given}; --resolve reads the directory a pool's hub publishes to, `dir` or `dynamodb` (a `relay` pool's record is held by its parent's hub)"
+                "{name}: {given}; --resolve reads the directory a pool's hub publishes to, `dir`, `dynamodb`, or `etcd` (a `relay` pool's record is held by its parent's hub)"
             )))
         }
     }
@@ -390,6 +421,31 @@ mod tests {
         ]))
         .expect("dynamodb");
         assert!(matches!(dynamodb, DirectoryBackend::DynamoDb { .. }));
+        let etcd = directory_from_vars(vars(&[
+            ("GDL_POOL__DIRECTORY", "etcd"),
+            (
+                "GDL_POOL__ENDPOINTS",
+                r#"["http://etcd-a:2379", "http://etcd-b:2379"]"#,
+            ),
+        ]))
+        .expect("etcd");
+        assert_eq!(
+            etcd,
+            DirectoryBackend::Etcd {
+                endpoints: vec!["http://etcd-a:2379".into(), "http://etcd-b:2379".into()],
+                prefix: DirectoryBackend::ETCD_PREFIX.into(),
+            }
+        );
+        let prefixed = directory_from_vars(vars(&[
+            ("GDL_POOL__DIRECTORY", "etcd"),
+            ("GDL_POOL__ENDPOINTS", r#"["http://etcd:2379"]"#),
+            ("GDL_POOL__PREFIX", "/fleet-a/pools"),
+        ]))
+        .expect("etcd with a prefix");
+        assert!(
+            matches!(&prefixed, DirectoryBackend::Etcd { prefix, .. } if prefix == "/fleet-a/pools"),
+            "{prefixed:?}"
+        );
         // A joining job shares its pool's variables, whose values are not
         // all strings: they are not read.
         for backend in [
@@ -402,6 +458,10 @@ mod tests {
                 ("GDL_POOL__RECORDS_TABLE", "gdl-pools"),
                 ("GDL_POOL__LISTS_TABLE", "gdl-pool-lists"),
                 ("GDL_POOL__AWS_REGION", "us-east-1"),
+            ],
+            vec![
+                ("GDL_POOL__DIRECTORY", "etcd"),
+                ("GDL_POOL__ENDPOINTS", r#"["http://etcd:2379"]"#),
             ],
         ] {
             let mut shared = backend.clone();
@@ -432,6 +492,32 @@ mod tests {
             (
                 vars(&[("GDL_POOL__DIRECTORY", "dynamodb")]),
                 "GDL_POOL__RECORDS_TABLE: missing",
+            ),
+            (
+                vars(&[("GDL_POOL__DIRECTORY", "etcd")]),
+                "GDL_POOL__ENDPOINTS: missing",
+            ),
+            (
+                vars(&[
+                    ("GDL_POOL__DIRECTORY", "etcd"),
+                    ("GDL_POOL__ENDPOINTS", "http://etcd:2379"),
+                ]),
+                "GDL_POOL__ENDPOINTS:",
+            ),
+            (
+                vars(&[
+                    ("GDL_POOL__DIRECTORY", "etcd"),
+                    ("GDL_POOL__ENDPOINTS", r#"["https://etcd:2379"]"#),
+                ]),
+                "GDL_POOL__ENDPOINTS: \"https://etcd:2379\" must be an `http://` URL",
+            ),
+            (
+                vars(&[
+                    ("GDL_POOL__DIRECTORY", "etcd"),
+                    ("GDL_POOL__ENDPOINTS", r#"["http://etcd:2379"]"#),
+                    ("GDL_POOL__PREFIX", "pools"),
+                ]),
+                "GDL_POOL__PREFIX: \"pools\"",
             ),
         ] {
             let error = directory_from_vars(given).expect_err(expected);

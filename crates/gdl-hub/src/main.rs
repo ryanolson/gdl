@@ -21,7 +21,7 @@
 //!
 //! `gdl-hub --resolve <class>/<pool> --write <file>` is for a job that
 //! joins a running pool: it reads the pool's record from the directory the
-//! `GDL_POOL__*` variables name (`dir` or `dynamodb`), waits for the
+//! `GDL_POOL__*` variables name (`dir`, `dynamodb`, or `etcd`), waits for the
 //! record's heartbeat, and writes `[hub]` with its `host` and
 //! `public_port`, which the segment takes as an override file. A pool it
 //! cannot join writes nothing, and exits non-zero with one line.

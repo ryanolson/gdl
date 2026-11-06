@@ -38,6 +38,30 @@ test-group = 'timing'
 retries = 2
 
 [[profile.default.overrides]]
+# The deadline covers every page, even while each RPC answers in time.
+filter = 'binary_id(gdl-pools-etcd::etcd) & test(=deadline::a_paged_snapshot_has_one_deadline)'
+test-group = 'timing'
+retries = 2
+
+[[profile.default.overrides]]
+# A reader joining during reconnect keeps its snapshot deadline.
+filter = 'binary_id(gdl-pools-etcd::etcd) & test(=joining::a_reader_joining_reconnect_keeps_its_deadline)'
+test-group = 'timing'
+retries = 2
+
+[[profile.default.overrides]]
+# A reader waiting on its barrier's read keeps its snapshot deadline.
+filter = 'binary_id(gdl-pools-etcd::etcd) & test(=joining::a_reader_waiting_on_its_barrier_keeps_its_deadline)'
+test-group = 'timing'
+retries = 2
+
+[[profile.default.overrides]]
+# Registration shares the lock with token replays and counts toward the watch's bound.
+filter = 'binary_id(gdl-pools-etcd::etcd) & test(=replay::a_watch_bound_includes_registration_behind_token_replays)'
+test-group = 'timing'
+retries = 2
+
+[[profile.default.overrides]]
 # An instance or a hub with a leave point is gone before it: the entry
 # instance leaves its margin of 500 ms before it, a hub its margin of
 # 200 ms, the sink its pool's drain stopped within 1.5 s of the end of its

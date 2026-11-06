@@ -20,13 +20,15 @@ use crate::{Layout, LeaveBy, Problem, Problems, PropertyKey, check_layout_name};
 /// region = "us-east-1"
 /// home = "global-us-east-1"    # the parent pool, for a class that another sends to: whose hub follows this one
 /// # parents = "global"         # or, in place of `home`, the parent class: every pool of it follows this one (not with "relay")
-/// directory = "relay"          # optional: "relay" (the default), "memory", "dir", or "dynamodb"
+/// directory = "relay"          # optional: "relay" (the default), "memory", "dir", "dynamodb", or "etcd"
 /// parent_hub = "global-hub:1337" # with "relay", for a class that another sends to: the parent's hub
 /// # dir = "/var/lib/gdl/pools" # with "dir", and only with it: the shared directory
 /// # records_table = "gdl-pools"     # with "dynamodb", and only with it: the records table,
 /// # lists_table = "gdl-pool-lists"  # the lists table,
 /// # aws_region = "us-east-1"        # the region whose copy of the tables the hub uses,
 /// # endpoint = "http://dynamodb:8000" # and, optionally, a DynamoDB Local to use instead of AWS
+/// # endpoints = ["http://etcd:2379"] # with "etcd", and only with it: the etcd cluster's members,
+/// # prefix = "/gdl/pools"           # and, optionally, the prefix of the directory's keys
 /// hub = "model-x-01-hub:1337"  # optional: where other pools' hubs reach this pool's hub
 /// summary_ms = 10000           # optional: the load summary's period, at least 1000
 /// hold_ms = 2000               # optional, the hub's alone: how long the quorum holds before `ready`
@@ -84,7 +86,8 @@ pub struct PoolSettings {
     /// the `directory` key, with the `parent_hub` and `state_dir` keys for
     /// [`DirectoryBackend::Relay`], the `dir` key for
     /// [`DirectoryBackend::Dir`], and the `records_table`, `lists_table`,
-    /// `aws_region`, and `endpoint` keys for [`DirectoryBackend::DynamoDb`];
+    /// `aws_region`, and `endpoint` keys for [`DirectoryBackend::DynamoDb`],
+    /// and the `endpoints` and `prefix` keys for [`DirectoryBackend::Etcd`];
     /// [`DirectoryBackend::DEFAULT`] when it is not set.
     pub directory: DirectoryBackend,
     /// Usable instances each segment of the class needs for the pool to be
@@ -333,6 +336,18 @@ pub enum DirectoryBackend {
         /// role.
         endpoint: Option<String>,
     },
+    /// An etcd cluster that every hub reaches: one key per pool for its
+    /// last write and one for its property list, under `prefix`, and a
+    /// watch that pushes each change. The hub needs the `etcd` feature of
+    /// `gdl-hub`.
+    Etcd {
+        /// The members' client URLs, each `http://host:port`. The hub
+        /// links no TLS, so each is plain `http://`.
+        endpoints: Vec<String>,
+        /// The prefix of every key the directory writes, without a
+        /// trailing `/`: [`DirectoryBackend::ETCD_PREFIX`] when unsaid.
+        prefix: String,
+    },
 }
 
 impl DirectoryBackend {
@@ -349,6 +364,9 @@ impl DirectoryBackend {
     /// How often a `dynamodb` reader queries a watched class, unless its
     /// program sets another period: 1 s. Each query is billed.
     pub const DYNAMODB_POLL: Duration = Duration::from_secs(1);
+
+    /// The prefix of an `etcd` directory's keys when `prefix` is not set.
+    pub const ETCD_PREFIX: &str = "/gdl/pools";
 }
 
 /// The DynamoDB directory's tables, as `gdl-pools-dynamodb` makes and
@@ -391,6 +409,29 @@ impl DirectoryBackend {
             aws_region,
             endpoint,
         })
+    }
+}
+
+impl DirectoryBackend {
+    /// The `etcd` backend with its keys, checked as reading `[pool]`
+    /// checks them: at least one endpoint, each an `http://` URL, and a
+    /// prefix that starts with `/` and does not end with one. A problem
+    /// names its key in `[pool]`.
+    pub fn etcd(endpoints: Vec<String>, prefix: String) -> Result<Self, Problems> {
+        let at = |key: &str, message: String| {
+            Problems::from(Problem::at(Some("pool".into()), Some(key.into()), message))
+        };
+        if endpoints.is_empty() {
+            return Err(at(
+                "endpoints",
+                "is empty; it lists the etcd members' client URLs, `http://host:port`".into(),
+            ));
+        }
+        for endpoint in &endpoints {
+            check_etcd_endpoint(endpoint).map_err(|why| at("endpoints", why))?;
+        }
+        check_etcd_prefix(&prefix).map_err(|why| at("prefix", why))?;
+        Ok(Self::Etcd { endpoints, prefix })
     }
 }
 
@@ -875,6 +916,37 @@ fn check_endpoint(endpoint: &str) -> Result<(), String> {
     }
 }
 
+/// Whether `endpoint` can be an etcd member's client URL: `http://` and a
+/// host. Not `https://`: the hub links no TLS, so a URL it cannot reach is
+/// refused where it is written.
+fn check_etcd_endpoint(endpoint: &str) -> Result<(), String> {
+    let host = endpoint.strip_prefix("http://");
+    if host.is_some_and(|host| !host.is_empty() && !host.contains(char::is_whitespace)) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{endpoint:?} must be an `http://` URL, `http://host:port`, of an etcd member: the hub links no TLS"
+        ))
+    }
+}
+
+/// Whether `prefix` can prefix an etcd directory's keys: `/` and at least
+/// one more character, none of them whitespace or a control character,
+/// and no trailing `/`, since the directory adds `/<class>/<pool>`.
+fn check_etcd_prefix(prefix: &str) -> Result<(), String> {
+    let shaped = prefix.len() > 1
+        && prefix.starts_with('/')
+        && !prefix.ends_with('/')
+        && prefix.chars().all(|c| c.is_ascii_graphic());
+    if shaped {
+        Ok(())
+    } else {
+        Err(format!(
+            "{prefix:?} must start with `/`, not end with one, and hold no space, such as `/gdl/pools`"
+        ))
+    }
+}
+
 /// Whether `summary` can be a load summary's period: at least
 /// [`PoolSettings::MIN_SUMMARY`]. Reading [`PoolSettings`] applies it; a
 /// hub applies it again to settings made in code.
@@ -937,7 +1009,9 @@ fn polled(directory: &DirectoryBackend) -> Option<(&'static str, Duration)> {
     match directory {
         DirectoryBackend::Dir { .. } => Some(("dir", DirectoryBackend::DIR_POLL)),
         DirectoryBackend::DynamoDb { .. } => Some(("dynamodb", DirectoryBackend::DYNAMODB_POLL)),
-        DirectoryBackend::Relay { .. } | DirectoryBackend::Memory => None,
+        DirectoryBackend::Relay { .. }
+        | DirectoryBackend::Memory
+        | DirectoryBackend::Etcd { .. } => None,
     }
 }
 
@@ -975,7 +1049,7 @@ pub(crate) fn check_label(kind: &str, name: &str) -> Result<(), String> {
 }
 
 /// The `[pool]` table as written. `directory`, `parent_hub`, `state_dir`,
-/// `dir`, and the `dynamodb` backend's keys are keys of one choice, so
+/// `dir`, and the `dynamodb` and `etcd` backends' keys are keys of one choice, so
 /// that the settings read flat (`GDL_POOL__DIR`),
 /// and they are joined here, where a key given to a backend that reads
 /// none can be refused rather than left unread.
@@ -1007,6 +1081,10 @@ struct Table {
     aws_region: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    endpoints: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prefix: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ready: BTreeMap<String, u32>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1082,6 +1160,7 @@ enum Backend {
     Memory,
     Dir,
     Dynamodb,
+    Etcd,
 }
 
 impl Backend {
@@ -1091,6 +1170,7 @@ impl Backend {
             Backend::Memory => "memory",
             Backend::Dir => "dir",
             Backend::Dynamodb => "dynamodb",
+            Backend::Etcd => "etcd",
         }
     }
 }
@@ -1147,6 +1227,26 @@ impl TryFrom<Table> for PoolSettings {
                         ),
                     ));
                 }
+            }
+        }
+        if !matches!(table.directory, Backend::Etcd) {
+            if let Some(endpoints) = &table.endpoints {
+                return Err(at(
+                    "endpoints",
+                    format!(
+                        "{endpoints:?} is read only by the `etcd` backend, not by directory = \"{}\"",
+                        table.directory.name()
+                    ),
+                ));
+            }
+            if let Some(prefix) = &table.prefix {
+                return Err(at(
+                    "prefix",
+                    format!(
+                        "{prefix:?} is read only by the `etcd` backend, not by directory = \"{}\"",
+                        table.directory.name()
+                    ),
+                ));
             }
         }
         let timing = hub_timing(&table)?;
@@ -1230,6 +1330,18 @@ impl TryFrom<Table> for PoolSettings {
                     table.endpoint,
                 )?
             }
+            (Backend::Etcd, None) => DirectoryBackend::etcd(
+                table.endpoints.ok_or_else(|| {
+                    at(
+                        "directory",
+                        "is \"etcd\", which needs `endpoints`, the etcd members' client URLs"
+                            .into(),
+                    )
+                })?,
+                table
+                    .prefix
+                    .unwrap_or_else(|| DirectoryBackend::ETCD_PREFIX.to_owned()),
+            )?,
             (backend, Some(path)) => {
                 return Err(at(
                     "dir",
@@ -1420,6 +1532,7 @@ impl From<PoolSettings> for Table {
     fn from(settings: PoolSettings) -> Self {
         let (mut records_table, mut lists_table, mut aws_region, mut endpoint) =
             (None, None, None, None);
+        let (mut endpoints, mut prefix) = (None, None);
         let (directory, parent_hub, state_dir, dir) = match settings.directory {
             DirectoryBackend::Relay {
                 parent_hub,
@@ -1436,6 +1549,14 @@ impl From<PoolSettings> for Table {
                 (records_table, lists_table, aws_region, endpoint) =
                     (Some(records), Some(lists), Some(region), local);
                 (Backend::Dynamodb, None, None, None)
+            }
+            DirectoryBackend::Etcd {
+                endpoints: members,
+                prefix: under,
+            } => {
+                endpoints = Some(members);
+                prefix = set(under, DirectoryBackend::ETCD_PREFIX.to_owned());
+                (Backend::Etcd, None, None, None)
             }
         };
         let (home, parents) = Parent::into_keys(settings.parent);
@@ -1454,6 +1575,8 @@ impl From<PoolSettings> for Table {
             lists_table,
             aws_region,
             endpoint,
+            endpoints,
+            prefix,
             ready: settings.ready,
             requires: settings.requires,
             hub: settings.hub,

@@ -1170,6 +1170,7 @@ fn defaults() -> Vec<(&'static str, String)> {
         DirectoryBackend::Memory => "memory",
         DirectoryBackend::Dir { .. } => "dir",
         DirectoryBackend::DynamoDb { .. } => "dynamodb",
+        DirectoryBackend::Etcd { .. } => "etcd",
     };
     vec![
         (

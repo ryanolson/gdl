@@ -354,6 +354,26 @@ The rule on `properties_version` only limits which ended runs lead to an expiry;
 
 **Rejected: one list item per `properties_version` and digest, shared by every writer.** Two writers of one pool that wrote the same list at the same version wrote the same item, and each put replaced the other's. Every guard on that overwrite (a token per put, a condition on the expiry, a second put after the record, a condition on that put) closed one interleaving and opened another: a writer's delayed expiry, or TTL, reached the item that another writer's record named.
 
+## The etcd directory is for sites without AWS
+
+DynamoDB stays the directory between regions. For a site without AWS, such as a Slurm cluster, the directory is etcd: it fsyncs each write before it answers, it needs no setup after a restart over an empty data directory, and srt-slurm already runs it as a typed service, or points a job at one that runs. Each pool has a record key and a list key, written in one transaction that compares the record key's revision, so a heartbeat writes only the small record key and lists need no cleanup. The stock hub takes it behind an off-by-default `etcd` feature, as it takes DynamoDB, so a hub that does not use it links no etcd client.
+
+**Rejected: one key per pool, the whole record.** Each heartbeat would rewrite the list. etcd keeps every revision until it compacts, so 100 pools with 1,000 properties each would write about 2.8 GB an hour, and fill the default 2 GiB quota inside one hour of retention. With the list apart, the same pools write about 15 MB an hour.
+
+**Rejected: hand etcd's revisions to readers as resume tokens.** etcd keeps history by its compaction window, not by count, and the suite holds a backend to its `history`: a token followed by more changes than that must give `Resnapshot`. Tokens come from a ring in the handle, as for `dir` and DynamoDB. The store's own resume is used only by the handle's task, to reconnect without a new snapshot for every reader.
+
+**Rejected: check the store's identity before the watch is created.** The store can be replaced between the check and the watch. A replacement then accepted a watch from revision 7 while it was at revision 2, and skipped its own write at revision 3. The identity is read after the watch is created, on its connection.
+
+**Rejected: compare only the record key's revision in a write.** An empty store reuses small revisions. A stale write brought a withdrawn pool back on a replacement store whose tombstone had the revision of the record the writer read. Each write also compares the store's identity.
+
+**Rejected: page a snapshot by a count of keys.** A count does not bound a page's bytes: three lists of 1.5 MB in a page of six keys pass the client's response limit. A page holds as many keys as fit the limit at the largest value etcd takes, and is halved when still refused.
+
+**Rejected: NATS JetStream KV.** It fits the trait almost as well, with a pure Rust client. But it fsyncs every 2 minutes by default, and the fix needs a configuration file on each site. Its bucket must be made again after an empty restart. And it cannot write two keys in one step, so a small heartbeat would need lists in keys that are never overwritten, and their cleanup, as DynamoDB's backend has.
+
+**Rejected: DynamoDB Local as the site's directory.** It needs no new code, but AWS documents it as a development and test tool, it is a JVM image each site pulls, it is polled, its tables must be made again after an empty restart, and srt-slurm has no service for it.
+
+**Rejected: Postgres.** It has conditional writes, and a change stream through logical decoding, which the server must be set up for. Neither srt-slurm nor Dynamo runs it, so a site would run one more kind of server.
+
 ## A pool's KV numbers cover one set of instances
 
 A pool's KV numbers are node code's: gdl carries them in the load report and the summary, and sums them as it sums admission. A policy reads ratios of them, such as committed KV over capacity. So any two sizes of a summary must cover the same instances. A report with no KV number is left out, since it is of an earlier build or its nodes set none. Over the rest, a size is the sum only when every one of them reports it, and none otherwise. The eviction age is the least reported, since an instance that evicted nothing reports none. `crates/gdl-pools/tests/kv.rs` holds the rule.

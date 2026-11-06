@@ -134,6 +134,60 @@ fn the_binary_without_its_dynamodb_feature_says_so() {
     }
 }
 
+/// A hub built without its `etcd` feature refuses the `etcd` backend
+/// before it binds a port, and so does `--resolve`, and each says how to
+/// build one that takes it.
+#[cfg(not(feature = "etcd"))]
+#[test]
+fn the_binary_without_its_etcd_feature_says_so() {
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-hub-binary-")
+        .tempdir()
+        .expect("a directory");
+    let deployment = dir.path().join("deployment.json");
+    std::fs::write(
+        &deployment,
+        serde_json::to_vec(&spec()).expect("valid test fixture"),
+    )
+    .expect("written");
+    let output = Command::new(env!("CARGO_BIN_EXE_gdl-hub"))
+        .arg(&deployment)
+        .env("GDL_POOL__NAME", "global-us")
+        .env("GDL_POOL__CLASS", "global")
+        .env("GDL_POOL__REGION", "us-east-1")
+        .env("GDL_POOL__HUB", "global-us:1337")
+        .env("GDL_POOL__DIRECTORY", "etcd")
+        .env("GDL_POOL__ENDPOINTS", r#"["http://127.0.0.1:1"]"#)
+        .env("GDL_HUB__PUBLIC_PORT", "0")
+        .env("GDL_HUB__CONTROL_PORT", "0")
+        .output()
+        .expect("the binary runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "started");
+    assert!(
+        stderr.contains("built without its `etcd` feature")
+            && stderr.contains("cargo install gdl-hub --features etcd"),
+        "{stderr}"
+    );
+    // `--resolve` refuses it the same way, and writes nothing.
+    let file = dir.path().join("gdl-hub.toml");
+    let output = Command::new(env!("CARGO_BIN_EXE_gdl-hub"))
+        .args(["--resolve", "model_x/model-x-01", "--write"])
+        .arg(&file)
+        .env("GDL_POOL__DIRECTORY", "etcd")
+        .env("GDL_POOL__ENDPOINTS", r#"["http://127.0.0.1:1"]"#)
+        .output()
+        .expect("the binary runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "resolved");
+    assert!(
+        stderr.contains("built without its `etcd` feature")
+            && stderr.contains("cargo install gdl-hub --features etcd"),
+        "{stderr}"
+    );
+    assert!(!file.exists());
+}
+
 /// A parent pool's hub keeps its children's records in its state
 /// directory: the binary refuses to start without one, or with one it
 /// cannot read, rather than start without the records it kept.

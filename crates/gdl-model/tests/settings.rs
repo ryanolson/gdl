@@ -253,23 +253,150 @@ fn the_dynamodb_backend_takes_its_tables_and_region_and_no_other_backend_does() 
     }
 }
 
-/// A pool's hub under the `dynamodb` backend publishes to the tables, so
-/// it needs neither a parent's hub nor a state directory, whichever
+/// The `etcd` backend takes its endpoints, which it requires, and a
+/// prefix, which it does not (`/gdl/pools` by default); each of its keys is
+/// refused with any other backend, and the other backends' keys with it,
+/// so that nothing sits unread.
+#[test]
+fn the_etcd_backend_takes_its_endpoints_and_prefix_and_no_other_backend_does() {
+    const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+    const ENDPOINTS: &str = "endpoints = ['http://etcd-a:2379', 'http://10.0.0.2:2379']\n";
+    let pool = settings(&format!("{LEAST}directory = 'etcd'\n{ENDPOINTS}"));
+    assert_eq!(
+        pool.directory,
+        DirectoryBackend::Etcd {
+            endpoints: vec!["http://etcd-a:2379".into(), "http://10.0.0.2:2379".into()],
+            prefix: DirectoryBackend::ETCD_PREFIX.into(),
+        }
+    );
+    assert_eq!(DirectoryBackend::ETCD_PREFIX, "/gdl/pools");
+    let text = toml::to_string(&pool).expect("toml");
+    assert!(
+        !text.contains("prefix"),
+        "the default is not written: {text}"
+    );
+    assert_eq!(settings(&text), pool, "{text}");
+    let prefixed = settings(&format!(
+        "{LEAST}directory = 'etcd'\n{ENDPOINTS}prefix = '/fleet-a/pools'\n"
+    ));
+    let DirectoryBackend::Etcd { prefix, .. } = &prefixed.directory else {
+        panic!("{prefixed:?}");
+    };
+    assert_eq!(prefix, "/fleet-a/pools");
+    let text = toml::to_string(&prefixed).expect("toml");
+    assert_eq!(settings(&text), prefixed, "{text}");
+
+    for (bad, why) in [
+        (
+            "directory = 'etcd'\n".to_string(),
+            "[pool] directory: is \"etcd\", which needs `endpoints`",
+        ),
+        (
+            "directory = 'etcd'\nendpoints = []\n".to_string(),
+            "[pool] endpoints: is empty",
+        ),
+        (
+            "directory = 'etcd'\nendpoints = ['etcd:2379']\n".to_string(),
+            "[pool] endpoints: \"etcd:2379\" must be an `http://` URL",
+        ),
+        (
+            "directory = 'etcd'\nendpoints = ['https://etcd:2379']\n".to_string(),
+            "[pool] endpoints: \"https://etcd:2379\" must be an `http://` URL",
+        ),
+        (
+            "directory = 'etcd'\nendpoints = ['http://']\n".to_string(),
+            "[pool] endpoints: \"http://\" must be an `http://` URL",
+        ),
+        (
+            format!("directory = 'etcd'\n{ENDPOINTS}prefix = 'gdl/pools'\n"),
+            "[pool] prefix: \"gdl/pools\"",
+        ),
+        (
+            format!("directory = 'etcd'\n{ENDPOINTS}prefix = '/gdl/pools/'\n"),
+            "[pool] prefix: \"/gdl/pools/\"",
+        ),
+        (
+            format!("directory = 'etcd'\n{ENDPOINTS}prefix = '/'\n"),
+            "[pool] prefix: \"/\"",
+        ),
+        (
+            format!("directory = 'etcd'\n{ENDPOINTS}prefix = '/gdl pools'\n"),
+            "[pool] prefix: \"/gdl pools\"",
+        ),
+        (
+            format!("directory = 'etcd'\n{ENDPOINTS}endpoint = 'http://dynamodb:8000'\n"),
+            "read only by the `dynamodb` backend, not by directory = \"etcd\"",
+        ),
+        (
+            format!("directory = 'etcd'\n{ENDPOINTS}parent_hub = 'global-hub:1337'\n"),
+            "read only by the `relay` backend, not by directory = \"etcd\"",
+        ),
+        (
+            format!("directory = 'etcd'\n{ENDPOINTS}dir = '/srv/pools'\n"),
+            "read only by the `dir` backend, not by directory = \"etcd\"",
+        ),
+        (
+            ENDPOINTS.to_string(),
+            "[pool] endpoints: [\"http://etcd-a:2379\", \"http://10.0.0.2:2379\"] is read only by the `etcd` backend, not by directory = \"relay\"",
+        ),
+        (
+            "directory = 'dir'\ndir = '/srv/pools'\nprefix = '/gdl/pools'\n".to_string(),
+            "[pool] prefix: \"/gdl/pools\" is read only by the `etcd` backend, not by directory = \"dir\"",
+        ),
+    ] {
+        let Err(error) = toml::from_str::<PoolSettings>(&format!("{LEAST}{bad}")) else {
+            panic!("{bad}: accepted");
+        };
+        assert!(error.to_string().contains(why), "{bad}: {error}");
+    }
+}
+
+/// The `etcd` backend, checked as reading `[pool]` checks it, for a
+/// program that builds its settings in code.
+#[test]
+fn the_etcd_backend_is_checked_when_built_in_code() {
+    let built = DirectoryBackend::etcd(
+        vec!["http://etcd:2379".into()],
+        DirectoryBackend::ETCD_PREFIX.into(),
+    )
+    .expect("an etcd backend");
+    assert_eq!(
+        built,
+        DirectoryBackend::Etcd {
+            endpoints: vec!["http://etcd:2379".into()],
+            prefix: "/gdl/pools".into(),
+        }
+    );
+    let problems = DirectoryBackend::etcd(Vec::new(), "/gdl/pools".into()).expect_err("none");
+    assert!(
+        problems.to_string().contains("[pool] endpoints"),
+        "{problems}"
+    );
+    let problems =
+        DirectoryBackend::etcd(vec!["http://etcd:2379".into()], "pools".into()).expect_err("bad");
+    assert!(problems.to_string().contains("[pool] prefix"), "{problems}");
+}
+
+/// A pool's hub under the `dynamodb` or `etcd` backend publishes to the
+/// shared store, so it needs neither a parent's hub nor a state directory, whichever
 /// classes its class sends to or is sent from.
 #[test]
-fn a_hub_under_the_dynamodb_backend_needs_no_parent_hub_or_state_dir() {
+fn a_hub_under_the_dynamodb_or_etcd_backend_needs_no_parent_hub_or_state_dir() {
     const DYNAMODB: &str = "directory = 'dynamodb'\nrecords_table = 'gdl-pools'\nlists_table = 'gdl-pool-lists'\naws_region = 'us-east-1'\n";
-    let child = settings(&format!(
-        "name = 'm'\nclass = 'model_x'\nregion = 'r'\nhome = 'g'\n{DYNAMODB}"
-    ));
-    child.check_hub(&classed()).expect("a child");
-    child
-        .check(&classed(), "d")
-        .expect("an instance of the child");
-    let parent = settings(&format!(
-        "name = 'g'\nclass = 'global'\nregion = 'r'\n{DYNAMODB}"
-    ));
-    parent.check_hub(&classed()).expect("a parent");
+    const ETCD: &str = "directory = 'etcd'\nendpoints = ['http://etcd:2379']\n";
+    for backend in [DYNAMODB, ETCD] {
+        let child = settings(&format!(
+            "name = 'm'\nclass = 'model_x'\nregion = 'r'\nhome = 'g'\n{backend}"
+        ));
+        child.check_hub(&classed()).expect("a child");
+        child
+            .check(&classed(), "d")
+            .expect("an instance of the child");
+        let parent = settings(&format!(
+            "name = 'g'\nclass = 'global'\nregion = 'r'\n{backend}"
+        ));
+        parent.check_hub(&classed()).expect("a parent");
+    }
 }
 
 /// The address other pools' hubs reach this pool's hub at is `host:port`,
@@ -940,7 +1067,12 @@ fn a_polled_pool_refuses_a_lease_its_polls_cannot_cover() {
             "{backend}: {problem}"
         );
     }
-    for backend in ["", "directory = 'memory'\n"] {
+    // `etcd` pushes each change through its watch, so it polls nothing.
+    for backend in [
+        "",
+        "directory = 'memory'\n",
+        "directory = 'etcd'\nendpoints = ['http://etcd:2379']\n",
+    ] {
         let pool = settings(&format!(
             "{LEAST}{backend}heartbeat_ms = 2\nlease_ms = 300\n"
         ));

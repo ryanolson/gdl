@@ -41,6 +41,7 @@ gdl is two layers. A crate that implements nodes depends on `gdl`: the node role
 | `gdl-web` | Users | The composer: a page and its server |
 | `gdl-pools` | `gdl`, hub, and runtime | The pool plane's shared types: the pool record, a pool's state, load summary, presence, and properties, the `PoolDirectory` backends, and an operator's commands for a pool whose hub is gone. No velo |
 | `gdl-pools-dynamodb` | Deployments across regions | A pool directory in DynamoDB global tables, which the `gdl-hub` binary takes with its `dynamodb` feature |
+| `gdl-pools-etcd` | Sites without AWS, such as Slurm | A pool directory in etcd, which the `gdl-hub` binary takes with its `etcd` feature, whose build needs `protoc` |
 | `gdl-cgroup` | Hub and runtime | A process's own CPU and memory, and its cgroup's CPU use and throttling, quota, and memory, read at each scrape |
 | `gdl-watch` | Hub and runtime | The watches a pool's hub serves, as typed events, and their client |
 | `gdl-hub` | Deployments | The discovery hub, and a pool's quorum, health, record, follows, and keyed records; `--resolve` gives a job that joins a running pool its hub |
@@ -118,6 +119,7 @@ timeout 60 cargo test --workspace --doc             # doctests: nextest does not
 node --test crates/gdl-web/tests/editor.cjs         # the composer's page
 bash scripts/build-book.sh                          # needs mdbook, mdbook-mermaid, mdbook-linkcheck, uv
 bash scripts/dynamodb-local.sh                      # the DynamoDB directory and the hub on it against DynamoDB Local; needs Docker
+bash scripts/etcd.sh                                # the etcd directory and the hub on it against etcd v3.5.21; needs protoc, and INSTALL_TOOLS=1 fetches etcd
 bash scripts/kubeconform.sh                         # the pinned Kubernetes objects against pinned schemas; INSTALL_TOOLS=1 fetches them
 ```
 

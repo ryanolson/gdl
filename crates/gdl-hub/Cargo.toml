@@ -35,6 +35,9 @@ gdl-pools-dynamodb = { path = "../gdl-pools-dynamodb", optional = true }
 aws-config = { version = "1", default-features = false, features = ["rt-tokio"], optional = true }
 aws-sdk-dynamodb = { version = "1", default-features = false, features = ["rt-tokio"], optional = true }
 aws-smithy-http-client = { version = "1", default-features = false, features = ["rustls-ring"], optional = true }
+# The `etcd` feature's: the etcd pool directory, which links the etcd
+# client and builds its protos with `protoc`.
+gdl-pools-etcd = { path = "../gdl-pools-etcd", optional = true }
 
 [features]
 # The DynamoDB pool directory (`GDL_POOL__DIRECTORY=dynamodb`, and
@@ -47,9 +50,22 @@ dynamodb = ["dep:gdl-pools-dynamodb", "dep:aws-config", "dep:aws-sdk-dynamodb", 
 # it.
 dynamodb-local = ["dynamodb"]
 
+# The etcd pool directory (`GDL_POOL__DIRECTORY=etcd`). Off by default: it
+# links the etcd client, and its build needs `protoc`, which a hub under
+# `relay`, `dir`, or `dynamodb` never uses. Slurm images build the hub with
+# it.
+etcd = ["dep:gdl-pools-etcd", "gdl-pools-etcd/client"]
+# The test target that runs hub binaries against a real etcd, outside the
+# default suite: `scripts/etcd.sh` fetches etcd and runs it.
+etcd-local = ["etcd"]
+
 [[test]]
 name = "dynamodb"
 required-features = ["dynamodb-local"]
+
+[[test]]
+name = "etcd"
+required-features = ["etcd-local"]
 
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }

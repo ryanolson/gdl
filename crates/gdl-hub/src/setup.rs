@@ -75,7 +75,8 @@ pub fn pool_from_vars(
 /// whose client it builds from the settings: with an `endpoint`, a
 /// DynamoDB Local's, it signs with fixed test credentials, and without
 /// one it takes its credentials from the process's environment, such as a
-/// Kubernetes service account's role. `memory` is one directory inside one
+/// Kubernetes service account's role. With the `etcd` feature, `etcd`, at
+/// the settings' `endpoints`, under their `prefix`. `memory` is one directory inside one
 /// process, which no other hub could read, so a hub process refuses it.
 /// Settings made in code are checked as reading them checks them
 /// ([`gdl_model::check_hub_timing`], and under `dir` and `dynamodb`
@@ -138,6 +139,24 @@ pub async fn hub_builder(
         #[cfg(not(feature = "dynamodb"))]
         DirectoryBackend::DynamoDb { .. } => Err(PoolError::new(
             "[pool] directory = \"dynamodb\": this gdl-hub is built without its `dynamodb` feature, which links the AWS SDK; install it with `cargo install gdl-hub --features dynamodb`",
+        )),
+        #[cfg(feature = "etcd")]
+        DirectoryBackend::Etcd { endpoints, prefix } => {
+            // Reads nothing yet: the hub's first write makes the store's
+            // identity, so a hub starts while etcd is still coming up.
+            let directory =
+                gdl_pools_etcd::EtcdDirectory::connect(endpoints.clone(), prefix.clone())
+                    .await
+                    .map_err(|error| PoolError::new(format!("[pool] endpoints: {error}")))?;
+            let pool = PoolSettings {
+                directory: DirectoryBackend::DEFAULT,
+                ..pool
+            };
+            hub_builder_with(config, spec, pool, directory)
+        }
+        #[cfg(not(feature = "etcd"))]
+        DirectoryBackend::Etcd { .. } => Err(PoolError::new(
+            "[pool] directory = \"etcd\": this gdl-hub is built without its `etcd` feature, which links the etcd client; install it with `cargo install gdl-hub --features etcd`",
         )),
         DirectoryBackend::Memory => Err(PoolError::new(
             "[pool] directory = \"memory\" is a directory inside one process, which no other hub can read: a hub process publishes with GDL_POOL__DIRECTORY=relay, the default, and GDL_POOL__PARENT_HUB=<its parent pool's hub> for a class that another sends to",
@@ -234,19 +253,23 @@ pub fn directory_from_vars(
     let lists = required("lists_table", take("lists_table")?)?;
     let region = required("aws_region", take("aws_region")?)?;
     let endpoint = take("endpoint")?;
-    DirectoryBackend::dynamodb(records, lists, region, endpoint).map_err(|problems| {
-        let named = problems.0.into_iter().map(|mut problem| {
-            if let Some(key) = problem
-                .path()
-                .as_deref()
-                .and_then(|path| path.strip_prefix("pool."))
-            {
-                problem.origin = Some(Origin::Variable(pool_variable(key)));
-            }
-            problem
-        });
-        PoolError::new(Problems(named.collect()).to_string())
-    })
+    DirectoryBackend::dynamodb(records, lists, region, endpoint).map_err(by_variable)
+}
+
+/// `problems` with a `[pool]` key, as the `GDL_POOL__` variable that set
+/// it, for a step that reads its settings from variables alone.
+pub(crate) fn by_variable(problems: Problems) -> PoolError {
+    let named = problems.0.into_iter().map(|mut problem| {
+        if let Some(key) = problem
+            .path()
+            .as_deref()
+            .and_then(|path| path.strip_prefix("pool."))
+        {
+            problem.origin = Some(Origin::Variable(pool_variable(key)));
+        }
+        problem
+    });
+    PoolError::new(Problems(named.collect()).to_string())
 }
 
 /// The `GDL_POOL__` variables of `vars`, one provider to each, in their
