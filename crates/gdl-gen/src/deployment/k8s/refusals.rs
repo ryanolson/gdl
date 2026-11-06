@@ -25,9 +25,24 @@ const CREDENTIALS: &[&str] = &[
     "AWS_CONTAINER_AUTHORIZATION_TOKEN",
 ];
 
+/// What a judge of a fleet's Kubernetes clusters does with its Slurm
+/// sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::deployment) enum SlurmSites {
+    /// Refuse each: `k8s` renders Kubernetes clusters only.
+    Refuse,
+    /// Pass over each: `images` judges them as `slurm` does.
+    Pass,
+}
+
 /// Every problem that keeps `fleet` off Kubernetes with the spec's
-/// deployment `settings`, each at its table.
-pub(super) fn fleet(fleet: &Fleet, settings: &Settings) -> Vec<Problem> {
+/// deployment `settings`, each at its table, with its Slurm sites refused
+/// or passed over as `slurm` says.
+pub(in crate::deployment) fn fleet(
+    fleet: &Fleet,
+    settings: &Settings,
+    slurm: SlurmSites,
+) -> Vec<Problem> {
     let mut problems = Vec::new();
     if fleet.name().is_none() {
         problems.push(Problem::from(
@@ -50,13 +65,13 @@ pub(super) fn fleet(fleet: &Fleet, settings: &Settings) -> Vec<Problem> {
     for (name, cluster) in fleet.clusters() {
         let table = || Some(format!("cluster.{name}"));
         let Some(cluster) = cluster.kubernetes() else {
+            if slurm == SlurmSites::Pass {
+                continue;
+            }
             problems.push(Problem::at(
                 table(),
                 None,
-                super::slurm_refused(
-                    name,
-                    "`cargo gdl k8s` and `cargo gdl images` render and build for",
-                ),
+                super::slurm_refused(name, "`cargo gdl k8s` renders"),
             ));
             continue;
         };

@@ -15,7 +15,7 @@ use gdl_model::{
 };
 use serde_json::{Map, Value, json};
 
-use super::variables::{pool_variables, string};
+use super::variables::{Names, pool_variables, string};
 use super::{
     Bundle, Secrets, check_segment_name, hosts, hub_healthcheck, io, keep_stdin_open,
     segment_healthcheck, stdin_readme,
@@ -342,6 +342,20 @@ pub(super) fn variables(
     parent: bool,
     endpoint: Option<String>,
 ) -> Result<Map<String, Value>, Error> {
+    Ok(pool_variables(
+        &table(pool, hub, parent_hub, parent, endpoint)?,
+        Names::Any,
+    ))
+}
+
+/// The `[pool]` table whose variables [`variables`] are.
+pub(super) fn table(
+    pool: &PoolSettings,
+    hub: String,
+    parent_hub: Option<String>,
+    parent: bool,
+    endpoint: Option<String>,
+) -> Result<toml::Table, Error> {
     let mut pool = pool.clone();
     pool.directory = match pool.directory {
         DirectoryBackend::DynamoDb {
@@ -361,10 +375,10 @@ pub(super) fn variables(
         },
     };
     pool.hub = Some(hub);
-    let toml::Value::Table(table) = toml::Value::try_from(&pool).map_err(io)? else {
-        return Err(Error::new("a pool's settings are a table"));
-    };
-    Ok(pool_variables(&table))
+    match toml::Value::try_from(&pool).map_err(io)? {
+        toml::Value::Table(table) => Ok(table),
+        _ => Err(Error::new("a pool's settings are a table")),
+    }
 }
 
 /// Whether `port`, a port in Compose's short form,

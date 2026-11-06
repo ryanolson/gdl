@@ -26,16 +26,9 @@ pub(super) trait Site {
     /// Reach each place and ask what it has, as `down` needs.
     fn reach(&mut self) -> Result<(), Error>;
 
-    /// The fleet's files, each image named by its digest in `digests`.
-    fn render(
-        &self,
-        spec: &Spec,
-        fleet: &Fleet,
-        dgds: &Dgds,
-        target: &Path,
-        digests: &Digests,
-        sources: Sources,
-    ) -> Result<Files, Error>;
+    /// The fleet's files, from what `input` gives, each image named by its
+    /// digest there.
+    fn render(&self, input: &RenderInput<'_>) -> Result<Files, Error>;
 
     /// Apply `files`, the render, to every place, and write them to `out`
     /// when given, as they were applied.
@@ -82,6 +75,22 @@ pub(super) trait Site {
     /// End the work of `scope` in `place`, once its pools have stopped.
     fn finish(&mut self, place: &str, scope: Scope, say: &mut dyn FnMut(&str))
     -> Result<(), Error>;
+}
+
+/// What a site renders a fleet's files from. A site reads what it needs:
+/// only Kubernetes reads the DGD files.
+pub(super) struct RenderInput<'a> {
+    pub(super) spec: &'a Spec,
+    pub(super) fleet: &'a Fleet,
+    /// The DGD file of each pool that names one, read beside the fleet
+    /// file.
+    pub(super) dgds: &'a Dgds,
+    /// Where programs are built.
+    pub(super) target: &'a Path,
+    /// Each image's digest, as `images` pushed it.
+    pub(super) digests: &'a Digests,
+    /// Where the images take gdl and the crates they build.
+    pub(super) sources: Sources,
 }
 
 /// The routes of a pool's hub that `deploy` and `down` call. Each takes

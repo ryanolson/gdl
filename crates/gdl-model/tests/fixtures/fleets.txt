@@ -327,6 +327,37 @@ operator = true
 
 {"cluster":{"use1":{"context":"kind-use1","namespace":"gdl-api","region":"us-east-1","registry":"registry.example/gdl","platform":"linux/amd64","operator":true}}}
 
+## docs/src/guides/slurm.md block 0
+[fleet]
+name = "api"
+
+[cluster.lab]
+kind = "slurm"
+region = "slurm-lab"
+srtctl = "/shared/srt-slurm"
+run_dir = "/shared/gdl-runs"
+registry = "registry.example/gdl"
+platform = "linux/arm64"
+time_limit = "08:00:00"
+
+[pool.model-x-01]
+class = "model_x"
+cluster = "lab"
+parents = "global"
+
+[pool.model-x-01.slurm]
+partition = "gpu"
+spare_nodes = 1
+
+[directory]
+backend = "dynamodb"
+records_table = "gdl-pools"
+lists_table = "gdl-pool-lists"
+local = true
+cluster = "lab"
+
+{"fleet":{"name":"api"},"cluster":{"lab":{"kind":"slurm","region":"slurm-lab","srtctl":"/shared/srt-slurm","run_dir":"/shared/gdl-runs","registry":"registry.example/gdl","platform":"linux/arm64","time_limit":"08:00:00"}},"pool":{"model-x-01":{"class":"model_x","cluster":"lab","parents":"global","slurm":{"partition":"gpu","spare_nodes":1}}},"directory":{"backend":"dynamodb","records_table":"gdl-pools","lists_table":"gdl-pool-lists","local":true,"cluster":"lab"}}
+
 ## scripts/kind-fleet.sh
 [fleet]
 name = "api"

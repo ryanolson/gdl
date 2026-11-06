@@ -424,8 +424,10 @@ fn the_pool_variables_are_composes_except_addresses() {
 /// and the cluster's, as given, otherwise. The launchers are the pods
 /// `cargo gdl k8s` writes (euw1), the pods the operator makes from a
 /// `GdlPool` (use1), the `main` container of a DGD component that runs a
-/// segment, and each segment's image, which is how each Compose service
-/// gets it. A hub gets
+/// segment, each segment's image, which is how each Compose service
+/// gets it, and each segment service of a Slurm recipe, through its
+/// preamble ([`super::slurm::every_segment_a_recipe_starts_gets_the_glibc_tunables`]).
+/// A hub gets
 /// only what its cluster gives it. A `GdlPool` written by hand, whose DGD
 /// `cargo gdl` never read, is in `crates/gdl-k8s/tests/dgd.rs`.
 #[test]
@@ -477,6 +479,10 @@ fn every_launcher_gives_a_segment_the_glibc_tunables() {
     }
     // Four pools, one segment each, for each of four cluster settings.
     assert_eq!(checked, 16);
+
+    // Slurm: each segment service's preamble, which keeps a user's value
+    // from the job's environment.
+    super::slurm::every_segment_a_recipe_starts_gets_the_glibc_tunables(&mirror);
 
     // A pool's DGD, as the operator makes it from the `GdlPool`, which
     // holds the DGD file as written: the `main` container of the component

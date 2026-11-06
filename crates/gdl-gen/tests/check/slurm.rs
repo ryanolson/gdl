@@ -1,8 +1,8 @@
 //! A fleet's Slurm site (`[cluster.<name>] kind = "slurm"`), checked with
 //! the spec it deploys: the site's signal lead covers each pool's stop
-//! wait; a `[deployment.codegen.<arch>]` table
-//! for the site's architecture is refused, since no Slurm image is built
-//! with it yet; and its registry and platform are an image's.
+//! wait; a `[deployment.codegen.<arch>]` table for the site's
+//! architecture is taken, since its images apply it; and its registry and
+//! platform are an image's.
 
 use super::*;
 
@@ -49,18 +49,14 @@ fn the_signal_lead_covers_each_pools_stop_wait() {
     );
 }
 
-/// No Slurm site's images are built with target features yet, so a
-/// codegen table for a site's architecture is refused, never ignored; a
-/// table for another architecture is not the site's.
+/// A Slurm site's images are built by the path a Kubernetes cluster's
+/// are, which applies the codegen table of each image's architecture
+/// (`images::a_slurm_sites_images_apply_the_codegen_table`), so `check`
+/// takes a table for the site's architecture, as for any other.
 #[test]
-fn a_codegen_table_for_a_slurm_sites_architecture_is_refused() {
+fn a_codegen_table_for_a_slurm_sites_architecture_is_taken() {
     let codegen = "[deployment.codegen.arm64]\ntarget_features = [\"+lse\"]\n";
-    assert_eq!(
-        checked(codegen, ARM),
-        [
-            "[cluster.lab] platform: is `linux/arm64`, and the spec's `[deployment.codegen.arm64]` builds `arm64` images with target features, which no Slurm site's images are built with yet: leave the table out, or run the fleet's `arm64` pools on Kubernetes clusters"
-        ]
-    );
+    assert_eq!(checked(codegen, ARM), Vec::<String>::new());
     assert_eq!(
         checked(codegen, "platform = \"linux/amd64\""),
         Vec::<String>::new()

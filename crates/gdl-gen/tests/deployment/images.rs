@@ -693,6 +693,232 @@ fn the_directorys_cluster_gets_the_hubs_image_without_a_pool() {
     assert!(job.contains(&hub.0), "{job}");
 }
 
+/// The final image of a build's Dockerfile.
+fn base_of(context: &Context) -> &str {
+    context[Path::new("Dockerfile")]
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("FROM "))
+        .expect("a final FROM")
+}
+
+/// srt-slurm runs every command under `bash -c`, so a Slurm site's images
+/// are built on a base with bash: the site's own, else Debian's, never the
+/// spec's default, which has no shell. The recipes name what was pushed.
+#[test]
+fn a_slurm_sites_images_are_built_on_a_base_with_bash() {
+    let mirror = Mirror::new();
+    let spec = super::slurm::spec(&mirror);
+    let text = super::slurm::fleet_text();
+    let mut docker = Fake::default();
+    let built = run(&mirror, &spec, &fleet(&text), true, &mut docker);
+    assert_eq!(built.len(), 3, "{built:?}");
+    for (reference, context) in &docker.contexts {
+        assert_eq!(base_of(context), "debian:bookworm-slim", "{reference}");
+    }
+    let target = mirror.target();
+    let files = gdl_gen::slurm_files(
+        &spec,
+        &fleet(&text),
+        &gdl_gen::SlurmRender {
+            target: &target,
+            tag: None,
+            digests: &gdl_gen::Digests::of(&built),
+            sources: gdl_gen::Sources::Fetched,
+        },
+    )
+    .expect("the recipes");
+    let pool = &files[Path::new("lab/global-us/pool.yaml")];
+    for image in &built {
+        let digest = &image.digest;
+        let (_, repository, _) = split(&image.reference);
+        let pulled = format!("registry.example#gdl/{repository}@{digest}");
+        if repository != "api-engine" {
+            assert!(pool.contains(&pulled), "{pulled} in {pool}");
+        }
+    }
+
+    // The site's own base, and its own hub's.
+    let own = text.replace(
+        "time_limit = \"08:00:00\"\n",
+        "time_limit = \"08:00:00\"\nbase_image = \"registry.example/base:bash\"\nhub_image = \"registry.example/hub-base:bash\"\n",
+    );
+    let mut docker = Fake::default();
+    run(&mirror, &spec, &fleet(&own), false, &mut docker);
+    for (reference, context) in &docker.contexts {
+        let base = match reference.contains("/api-hub:") {
+            true => "registry.example/hub-base:bash",
+            false => "registry.example/base:bash",
+        };
+        assert_eq!(base_of(context), base, "{reference}");
+    }
+}
+
+/// A Slurm site's segment images are built by the path a Kubernetes
+/// cluster's are, so the spec's codegen table of their architecture
+/// reaches their builds, and its hub's does not.
+#[test]
+fn a_slurm_sites_images_apply_the_codegen_table() {
+    let mirror = Mirror::new();
+    let spec = placed(
+        &mirror,
+        &format!("{SPLIT}[deployment.codegen.arm64]\ntarget_features = [\"+lse\"]\n"),
+    );
+    let mut docker = Fake::default();
+    run(
+        &mirror,
+        &spec,
+        &fleet(&super::slurm::fleet_text()),
+        false,
+        &mut docker,
+    );
+    for (reference, context) in &docker.contexts {
+        let dockerfile = &context[Path::new("Dockerfile")];
+        let applied = dockerfile.contains("[deployment.codegen.arm64]");
+        assert_eq!(
+            applied,
+            !reference.contains("/api-hub:"),
+            "{reference}: {dockerfile}"
+        );
+    }
+}
+
+/// A Slurm site's segment image is built exactly as a Kubernetes
+/// cluster's of the same architecture, the codegen table's checks, flags,
+/// and thin LTO included: their Dockerfiles differ in the base image alone.
+#[test]
+fn a_slurm_segment_builds_as_a_kubernetes_one_but_for_its_base() {
+    let mirror = Mirror::new();
+    let spec = placed(
+        &mirror,
+        &format!("{SPLIT}[deployment.codegen.arm64]\ntarget_features = [\"+lse\"]\n"),
+    );
+    let text = super::slurm::fleet_text()
+        + "\n[cluster.use1]\ncontext = \"kind-use1\"\nnamespace = \"gdl-api\"\nregion = \"us-east-1\"\nregistry = \"registry.example/gdl\"\nplatform = \"linux/arm64\"\n\n[pool.model-x-k8s]\nclass = \"model_x\"\ncluster = \"use1\"\nparents = \"global\"\n";
+    let mut docker = Fake::default();
+    run(&mirror, &spec, &fleet(&text), false, &mut docker);
+    let engines: Vec<&String> = docker
+        .contexts
+        .iter()
+        .filter(|(reference, _)| reference.contains("/api-engine:"))
+        .map(|(_, context)| &context[Path::new("Dockerfile")])
+        .collect();
+    assert_eq!(engines.len(), 2, "{:?}", docker.contexts.keys());
+    let unbased = |dockerfile: &str| -> String {
+        dockerfile
+            .lines()
+            .filter(|line| !line.starts_with("FROM ") || line.contains(" AS build"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        engines[0].contains("[deployment.codegen.arm64]"),
+        "{}",
+        engines[0]
+    );
+    assert_eq!(unbased(engines[0]), unbased(engines[1]));
+    assert_ne!(engines[0], engines[1]);
+}
+
+/// A Kubernetes cluster and a Slurm site that share a registry and a
+/// platform each get images on their own base, with tags of their own, and
+/// each names its own: the cluster's objects and the site's recipes.
+#[test]
+fn a_cluster_and_a_site_that_share_a_registry_build_apart() {
+    let mirror = Mirror::new();
+    let spec = super::slurm::spec(&mirror);
+    let text = super::slurm::fleet_text()
+        + "\n[cluster.use1]\ncontext = \"kind-use1\"\nnamespace = \"gdl-api\"\nregion = \"us-east-1\"\nregistry = \"registry.example/gdl\"\nplatform = \"linux/arm64\"\n\n[pool.global-k8s]\nclass = \"global\"\ncluster = \"use1\"\n";
+    let fleet = fleet(&text);
+    let mut docker = Fake::default();
+    let built = run(&mirror, &spec, &fleet, true, &mut docker);
+    let hubs: Vec<&gdl_gen::Built> = built
+        .iter()
+        .filter(|image| image.reference.contains("/api-hub:"))
+        .collect();
+    assert_eq!(hubs.len(), 2, "{built:?}");
+    let bases: BTreeSet<&str> = hubs
+        .iter()
+        .map(|hub| base_of(&docker.contexts[&hub.reference]))
+        .collect();
+    assert_eq!(
+        bases,
+        BTreeSet::from([
+            "debian:bookworm-slim",
+            "gcr.io/distroless/cc-debian12:nonroot"
+        ])
+    );
+    let digests = gdl_gen::Digests::of(&built);
+    let target = mirror.target();
+    let recipes = gdl_gen::slurm_files(
+        &spec,
+        &fleet,
+        &gdl_gen::SlurmRender {
+            target: &target,
+            tag: None,
+            digests: &digests,
+            sources: gdl_gen::Sources::Fetched,
+        },
+    )
+    .expect("the recipes");
+    // `k8s` refuses a fleet with a Slurm site; its Kubernetes render is
+    // what `images` judges, and what a deploy will apply.
+    let refused = gdl_gen::k8s_files(
+        &spec,
+        &fleet,
+        &gdl_gen::Dgds::default(),
+        &target,
+        None,
+        Some(&digests),
+        gdl_gen::Sources::Fetched,
+    )
+    .expect_err("refused")
+    .to_string();
+    assert!(refused.contains("`lab` is a Slurm site"), "{refused}");
+    let pool = &recipes[Path::new("lab/global-us/pool.yaml")];
+    let slurm_hub = hubs
+        .iter()
+        .find(|hub| base_of(&docker.contexts[&hub.reference]) == "debian:bookworm-slim")
+        .expect("the site's hub");
+    assert!(pool.contains(&slurm_hub.digest), "{pool}");
+    assert!(
+        !recipes.keys().any(|path| path.starts_with("use1")),
+        "{:?}",
+        recipes.keys().collect::<Vec<_>>()
+    );
+}
+
+/// A fleet whose pools all run on a Slurm site, with a Kubernetes cluster
+/// that runs none, builds its images: the Kubernetes render is judged
+/// only for a fleet with a pool on Kubernetes.
+#[test]
+fn a_kubernetes_cluster_that_runs_no_pool_builds() {
+    let mirror = Mirror::new();
+    let spec = super::slurm::spec(&mirror);
+    let text = super::slurm::fleet_text()
+        + "\n[cluster.use1]\ncontext = \"kind-use1\"\nnamespace = \"gdl-api\"\nregion = \"us-east-1\"\nregistry = \"registry.example/gdl\"\nplatform = \"linux/arm64\"\n";
+    let fleet = fleet(&text);
+    fleet.check(None).expect("a fleet");
+    let mut docker = Fake::default();
+    let built = run(&mirror, &spec, &fleet, true, &mut docker);
+    assert_eq!(built.len(), 3, "{built:?}");
+}
+
+/// A pool on a Slurm site may take the name of a Kubernetes cluster's
+/// DynamoDB objects, which no Slurm site makes: `images` builds its
+/// images.
+#[test]
+fn a_slurm_pool_may_take_a_kubernetes_directory_objects_name() {
+    let mirror = Mirror::new();
+    let spec = super::slurm::spec(&mirror);
+    let text = super::slurm::fleet_text().replace("pool.global-us", "pool.dynamodb-local");
+    let fleet = fleet(&text);
+    fleet.check(None).expect("a fleet");
+    let mut docker = Fake::default();
+    let built = run(&mirror, &spec, &fleet, true, &mut docker);
+    assert_eq!(built.len(), 3, "{built:?}");
+}
+
 #[path = "images/local.rs"]
 mod local;
 

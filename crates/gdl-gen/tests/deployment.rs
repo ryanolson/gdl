@@ -15,6 +15,8 @@ mod images;
 mod k8s;
 #[path = "deployment/relay.rs"]
 mod relay;
+#[path = "deployment/slurm.rs"]
+mod slurm;
 #[path = "deployment/tunables.rs"]
 mod tunables;
 

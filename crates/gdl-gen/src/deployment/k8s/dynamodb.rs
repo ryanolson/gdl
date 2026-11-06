@@ -66,9 +66,15 @@ pub(super) fn refusals(fleet: &Fleet) -> Vec<Problem> {
     if fleet.directory().is_none_or(|directory| !directory.local) {
         return Vec::new();
     }
+    // A Slurm site makes no such objects, so its pools may take the names.
     fleet
         .pools()
         .filter(|pool| [LOCAL, TABLES].contains(&pool.name.as_str()))
+        .filter(|pool| {
+            fleet
+                .cluster_of(&pool.name)
+                .is_none_or(|(_, cluster)| cluster.slurm().is_none())
+        })
         .map(|pool| {
             Problem::at(
                 Some(format!("pool.{}", pool.name)),

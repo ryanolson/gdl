@@ -27,9 +27,12 @@ mod objects;
 mod refusals;
 mod relay;
 
+pub(super) use refusals::SlurmSites;
+
 pub(super) use dynamodb::{LOCAL, PLACEHOLDER, TABLES};
 pub(super) use gdl_k8s::label_value;
 use objects::{Names, Pod, Segment};
+pub(super) use objects::{SYSTEM_HOST, check_tag, is_system, parse_port};
 pub(super) use objects::{check_platform, check_registry};
 pub(super) use objects::{image, stream};
 
@@ -53,10 +56,11 @@ pub(super) fn kube_of<'a>(
 }
 
 /// Why `command` refuses Slurm site `name`: it renders or runs Kubernetes
-/// clusters only, and no command renders or runs a Slurm site yet.
+/// clusters only. `cargo gdl slurm` renders a Slurm site's recipes, and no
+/// command runs one yet.
 pub(super) fn slurm_refused(name: &str, command: &str) -> String {
     format!(
-        "`{name}` is a Slurm site: {command} only Kubernetes clusters, and no command renders or runs a Slurm site yet. Run the fleet's pools on Kubernetes clusters, or leave the site out of the fleet"
+        "`{name}` is a Slurm site: {command} only Kubernetes clusters. `cargo gdl slurm` renders a Slurm site's recipes, and no command runs one yet. Run the fleet's pools on Kubernetes clusters, or leave the site out of the fleet"
     )
 }
 
@@ -93,9 +97,13 @@ pub fn k8s_files(
     if let Some(tag) = tag {
         objects::check_tag(tag)?;
     }
-    let prepared = prepare(spec, fleet, dgds, target, sources)?;
+    let prepared = prepare(spec, fleet, target, sources, |fleet, settings| {
+        let mut problems = refusals::fleet(fleet, settings, SlurmSites::Refuse);
+        problems.extend(unread_dgds(fleet, dgds));
+        problems
+    })?;
     let plan = images::plan(&prepared, fleet)?;
-    render(prepared, fleet, dgds, &Naming::new(tag, &plan, digests))
+    render(&prepared, fleet, dgds, &Naming::new(tag, &plan, digests))
 }
 
 /// Write `fleet`'s objects ([`k8s_files`]) into `out`, which must not
@@ -147,8 +155,9 @@ pub(super) fn write_new(out: &Path, files: &Files) -> Result<(), Error> {
     Ok(())
 }
 
-/// The images of `fleet`'s pools, once the fleet's objects are judged as
-/// [`k8s_files`] judges them, so that no image is built for a fleet that
+/// The images of `fleet`'s pools, once the fleet is judged as [`k8s_files`]
+/// judges its Kubernetes clusters, and as `slurm` judges its Slurm sites
+/// ([`super::slurm::judge`]), so that no image is built for a fleet that
 /// cannot run.
 pub(super) fn judged(
     spec: &Spec,
@@ -157,9 +166,23 @@ pub(super) fn judged(
     target: &Path,
     sources: Sources,
 ) -> Result<Vec<Image>, Error> {
-    let prepared = prepare(spec, fleet, dgds, target, sources)?;
+    let prepared = prepare(spec, fleet, target, sources, |fleet, settings| {
+        let mut problems = refusals::fleet(fleet, settings, SlurmSites::Pass);
+        problems.extend(unread_dgds(fleet, dgds));
+        problems.extend(super::slurm::refusals(fleet));
+        problems
+    })?;
     let plan = images::plan(&prepared, fleet)?;
-    render(prepared, fleet, dgds, &Naming::new(None, &plan, None))?;
+    let naming = Naming::new(None, &plan, None);
+    // A Kubernetes cluster that runs no pool, as one that runs only the
+    // DynamoDB Local, has no pool objects to judge.
+    if fleet
+        .pools()
+        .any(|pool| kube_of(fleet, &pool.name).is_some())
+    {
+        render(&prepared, fleet, dgds, &naming)?;
+    }
+    super::slurm::judge(&prepared, fleet, &naming)?;
     Ok(plan)
 }
 
@@ -172,17 +195,19 @@ pub(super) struct Prepared {
     pub(super) layouts: crate::validate::Layouts,
 }
 
-/// `spec` prepared for `fleet`, refused as [`k8s_files`] says.
-fn prepare(
+/// `spec` prepared for `fleet`, refused as [`k8s_files`] says, with the
+/// problems `refusals` finds of the fleet in place of its Kubernetes
+/// ones.
+pub(super) fn prepare(
     spec: &Spec,
     fleet: &Fleet,
-    dgds: &Dgds,
     target: &Path,
     sources: Sources,
+    refusals: impl FnOnce(&Fleet, &super::Settings) -> Vec<Problem>,
 ) -> Result<Prepared, Error> {
     if pools::by_pool(spec).is_none() {
         return Err(Error::new(
-            "a fleet on Kubernetes deploys a spec by pool: give its placement classes, and the fleet its pools",
+            "a fleet on Kubernetes or Slurm deploys a spec by pool: give its placement classes, and the fleet its pools",
         ));
     }
     // What needs no layout is judged first, so that a refusal below never
@@ -191,19 +216,7 @@ fn prepare(
         .check(None)
         .map_err(|errors| Error::from(gdl_model::Problems::from(errors)))?;
     let settings = spec.deployment.clone().unwrap_or_default();
-    let mut problems = refusals::fleet(fleet, &settings);
-    for (pool, dgd) in fleet.dgds() {
-        if dgds.get(pool).is_none() {
-            problems.push(Problem::at(
-                Some(format!("pool.{pool}.dgd")),
-                Some("file".into()),
-                format!(
-                    "pool `{pool}` names a DGD file, `{}`, which this render was not given: read it beside the fleet file",
-                    dgd.file
-                ),
-            ));
-        }
-    }
+    let problems = refusals(fleet, &settings);
     if !problems.is_empty() {
         return Err(Error::all(problems));
     }
@@ -240,7 +253,7 @@ fn prepare(
         .map_err(|errors| Error::from(gdl_model::Problems::from(errors)))?;
     if let Some(source) = stdin_source(&spec, &checked.manifest)? {
         return Err(Error::new(format!(
-            "source `{source}` reads its requests on stdin, which a pod has no way to: pin a frontend on it to deploy on Kubernetes"
+            "source `{source}` reads its requests on stdin, which a pod or a Slurm job has no way to: pin a frontend on it to deploy on Kubernetes or Slurm"
         )));
     }
     Ok(Prepared {
@@ -251,9 +264,28 @@ fn prepare(
     })
 }
 
+/// Each pool of `fleet` that names a DGD file that `dgds` does not hold,
+/// read beside the fleet file ([`Dgds::read`]).
+fn unread_dgds(fleet: &Fleet, dgds: &Dgds) -> Vec<Problem> {
+    fleet
+        .dgds()
+        .filter(|(pool, _)| dgds.get(pool).is_none())
+        .map(|(pool, dgd)| {
+            Problem::at(
+                Some(format!("pool.{pool}.dgd")),
+                Some("file".into()),
+                format!(
+                    "pool `{pool}` names a DGD file, `{}`, which this render was not given: read it beside the fleet file",
+                    dgd.file
+                ),
+            )
+        })
+        .collect()
+}
+
 /// The objects of `fleet` from `prepared`, each image named by `naming`.
 fn render(
-    prepared: Prepared,
+    prepared: &Prepared,
     fleet: &Fleet,
     dgds: &Dgds,
     naming: &Naming<'_>,
@@ -261,7 +293,7 @@ fn render(
     Render {
         fleet,
         dgds,
-        bundle: prepared.bundle,
+        bundle: prepared.bundle.clone(),
         names: Names::default(),
         problems: Vec::new(),
         files: Files::new(),
@@ -278,44 +310,67 @@ fn render(
 /// by its digest when a run of `images` recorded them.
 pub(super) struct Naming<'a> {
     tag: Option<&'a str>,
-    /// Each image's own tag, by its repository and platform.
-    tags: BTreeMap<(String, String), String>,
+    /// Each image's registry and own tag, by a cluster that runs it and
+    /// its repository.
+    images: BTreeMap<(String, String), (String, String)>,
     digests: Option<&'a Digests>,
 }
 
+/// An image as [`Naming`] names it.
+pub(super) struct Named<'a> {
+    pub(super) registry: &'a str,
+    pub(super) repository: &'a str,
+    pub(super) tag: &'a str,
+    pub(super) digest: Option<&'a str>,
+}
+
 impl<'a> Naming<'a> {
-    fn new(tag: Option<&'a str>, plan: &[Image], digests: Option<&'a Digests>) -> Self {
-        let tags = plan
+    pub(super) fn new(tag: Option<&'a str>, plan: &[Image], digests: Option<&'a Digests>) -> Self {
+        let images = plan
             .iter()
-            .map(|image| {
-                (
-                    (image.repository.clone(), image.platform.clone()),
-                    image.tag.clone(),
-                )
+            .flat_map(|image| {
+                image.clusters.iter().map(|cluster| {
+                    (
+                        (cluster.clone(), image.repository.clone()),
+                        (image.registry.clone(), image.tag.clone()),
+                    )
+                })
             })
             .collect();
-        Self { tag, tags, digests }
+        Self {
+            tag,
+            images,
+            digests,
+        }
     }
 
-    /// The image of `repository` for `platform` in `registry`.
-    pub(super) fn image(
-        &self,
-        registry: &str,
-        repository: &str,
-        platform: &str,
-    ) -> Result<String, Error> {
-        let tag = match self.tag {
-            Some(tag) => tag,
-            None => self
-                .tags
-                .get(&(repository.to_string(), platform.to_string()))
-                .map(String::as_str)
-                .ok_or_else(|| {
-                    Error::new(format!(
-                        "no image of `{repository}` is built for `{platform}`"
-                    ))
-                })?,
-        };
+    /// The image of `repository` that cluster `cluster` runs, as a
+    /// Kubernetes object names it.
+    pub(super) fn image(&self, cluster: &str, repository: &str) -> Result<String, Error> {
+        let named = self.named(cluster, repository)?;
+        Ok(objects::image(
+            named.registry,
+            named.repository,
+            named.tag,
+            named.digest,
+        ))
+    }
+
+    /// The image of `repository` that cluster `cluster` runs.
+    pub(super) fn named<'n>(
+        &'n self,
+        cluster: &str,
+        repository: &'n str,
+    ) -> Result<Named<'n>, Error> {
+        let (registry, own) = self
+            .images
+            .get(&(cluster.to_string(), repository.to_string()))
+            .ok_or_else(|| {
+                Error::new(format!(
+                    "no image of `{repository}` is built for cluster `{cluster}`"
+                ))
+            })?;
+        let tag = self.tag.unwrap_or(own);
         let digest = match self.digests {
             None => None,
             Some(digests) => {
@@ -327,7 +382,12 @@ impl<'a> Naming<'a> {
                 })?)
             }
         };
-        Ok(objects::image(registry, repository, tag, digest))
+        Ok(Named {
+            registry,
+            repository,
+            tag,
+            digest,
+        })
     }
 }
 
@@ -351,7 +411,12 @@ impl Render<'_> {
         layouts: &crate::validate::Layouts,
         naming: &Naming<'_>,
     ) -> Result<Files, Error> {
-        let pools: Vec<PoolSettings> = self.fleet.pools().collect();
+        // A pool on a Slurm site is `slurm`'s to render.
+        let pools: Vec<PoolSettings> = self
+            .fleet
+            .pools()
+            .filter(|pool| kube_of(self.fleet, &pool.name).is_some())
+            .collect();
         if pools.is_empty() {
             return Err(Error::new(
                 "the fleet has no pools, so there is nothing to deploy",
@@ -421,9 +486,7 @@ impl Render<'_> {
                     cluster,
                     requests.as_ref(),
                 ));
-                let registry = cluster.registry.as_deref().unwrap_or_default();
-                let platform = cluster.platform.as_deref().unwrap_or_default();
-                let image = naming.image(registry, &hub_repository, platform)?;
+                let image = naming.image(name, &hub_repository)?;
                 super::reference::check_image(&image)
                     .map_err(|why| Error::new(format!("[cluster.{name}] registry: {why}")))?;
                 let job = dynamodb::tables_job(

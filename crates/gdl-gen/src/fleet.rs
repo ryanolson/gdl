@@ -38,8 +38,8 @@ pub fn check_files(spec: &Path, fleet: Option<&Path>, target: &Path) -> Problems
 
 /// Every problem with the fleet file at `path`, against the spec and its
 /// `layouts` when the spec reads, with each DGD file it names, read
-/// beside it ([`crate::deployment::dgd`]), and with what the spec asks of
-/// its Slurm sites ([`crate::deployment::slurm`]), and one note when a pool's
+/// beside it ([`crate::deployment::dgd`]), with what the generator refuses
+/// of its Slurm sites ([`crate::deployment::slurm`]), and one note when a pool's
 /// children could not be judged for want of its layout. The note comes only with a spec
 /// that has problems of its own, so it never fails a check alone.
 fn check_fleet(path: &Path, spec: Option<(&Spec, &BTreeMap<String, Option<Layout>>)>) -> Problems {
@@ -60,10 +60,9 @@ fn check_fleet(path: &Path, spec: Option<(&Spec, &BTreeMap<String, Option<Layout
             problems
                 .0
                 .extend(crate::deployment::dgd::problems(&fleet, path));
-            let spec = spec.map(|(spec, _)| spec);
             problems
                 .0
-                .extend(crate::deployment::slurm::problems(&fleet, spec));
+                .extend(crate::deployment::slurm::problems(&fleet));
             located(problems)
         }
     }

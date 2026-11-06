@@ -108,6 +108,16 @@ fn parse_normalized_named(s: &str) -> Result<Reference, Refusal> {
     parse(&format!("{domain}/{remainder}"))
 }
 
+/// The host Docker reads at the start of `name`, a repository's name with
+/// no tag or digest, and the rest of it, as [`split_docker_domain`] splits
+/// it; `None` for a name on Docker Hub (`docker.io`, written or not),
+/// which needs no host.
+pub(crate) fn host_of(name: &str) -> Option<(&str, &str)> {
+    let (first, rest) = name.split_once('/')?;
+    let (domain, _) = split_docker_domain(name);
+    (domain == first && domain != "docker.io").then_some((first, rest))
+}
+
 /// `splitDockerDomain`: the domain of `name`, and the rest of it.
 fn split_docker_domain(name: &str) -> (&str, String) {
     const LEGACY_DEFAULT_DOMAIN: &str = "index.docker.io";

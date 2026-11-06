@@ -1,0 +1,82 @@
+{
+  "extra_mount": [
+    "/shared/gdl-runs/api:/fleet"
+  ],
+  "frontend": {
+    "type": "none"
+  },
+  "host_setup": {
+    "commands": [],
+    "nodes": "all",
+    "teardown": [
+      "rm -f '/shared/gdl-runs/api'/directory.$SLURM_JOB_ID.endpoint"
+    ]
+  },
+  "model": {
+    "container": "registry.example#gdl/api-hub@sha256:0000000000000000000000000000000000000000000000000000000000000001",
+    "path": "/shared/gdl-runs/api",
+    "precision": "bf16"
+  },
+  "name": "gdl-api-directory",
+  "observability": {
+    "tachometer": {
+      "enabled": false
+    }
+  },
+  "resources": {},
+  "sbatch_directives": {
+    "comment": "gdl:api:-:directory:7613febe9fe7aa85",
+    "exclusive": "",
+    "no-requeue": ""
+  },
+  "schema": 2,
+  "services": [
+    {
+      "command": [
+        "java",
+        "-jar",
+        "/home/dynamodblocal/DynamoDBLocal.jar",
+        "-inMemory",
+        "-sharedDb",
+        "-port",
+        "8000"
+      ],
+      "container": "amazon/dynamodb-local@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86",
+      "critical": true,
+      "name": "dynamodb",
+      "nodes": 1,
+      "readiness": {
+        "tcp": {
+          "port": 8000
+        },
+        "timeout_seconds": 300
+      },
+      "terminal": true,
+      "type": "generic"
+    },
+    {
+      "command": [
+        "bash",
+        "-c",
+        "rm -f /fleet/directory.$SLURM_JOB_ID.endpoint && /usr/local/bin/segment --tables && echo http://{node_ip}:8000 > /fleet/directory.$SLURM_JOB_ID.tmp && mv /fleet/directory.$SLURM_JOB_ID.tmp /fleet/directory.$SLURM_JOB_ID.endpoint && ln -sfn directory.$SLURM_JOB_ID.endpoint /fleet/directory.$SLURM_JOB_ID.ptr && mv /fleet/directory.$SLURM_JOB_ID.ptr /fleet/directory.endpoint"
+      ],
+      "container": "registry.example#gdl/api-hub@sha256:0000000000000000000000000000000000000000000000000000000000000001",
+      "critical": true,
+      "env": {
+        "GDL_POOL__AWS_REGION": "slurm-lab",
+        "GDL_POOL__DIRECTORY": "dynamodb",
+        "GDL_POOL__ENDPOINT": "http://{node_ip}:8000",
+        "GDL_POOL__LISTS_TABLE": "gdl-pool-lists",
+        "GDL_POOL__RECORDS_TABLE": "gdl-pools"
+      },
+      "name": "tables",
+      "placement": {
+        "node": "head"
+      },
+      "type": "generic"
+    }
+  ],
+  "slurm": {
+    "time_limit": "08:00:00"
+  }
+}

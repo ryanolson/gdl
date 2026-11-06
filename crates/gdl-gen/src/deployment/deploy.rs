@@ -25,7 +25,7 @@ mod site;
 use kubernetes::Kubernetes;
 pub use kubernetes::{Kube, Kubectl, Reply};
 use order::Order;
-use site::{Answer, Driven, Readiness, Running, Scope, Site, Stopping, Which};
+use site::{Answer, Driven, Readiness, RenderInput, Running, Scope, Site, Stopping, Which};
 
 /// What `deploy` deploys, and where it builds.
 #[derive(Debug, Clone)]
@@ -139,14 +139,15 @@ pub fn deploy(
     let built = images(&spec, &fleet, &dgds, &how.target, true, how.sources, docker)?;
     say(&format!("images: {} in their registries", built.len()));
 
-    let files = site.render(
-        &spec,
-        &fleet,
-        &dgds,
-        &how.target,
-        &Digests::of(&built),
-        how.sources,
-    )?;
+    let digests = Digests::of(&built);
+    let files = site.render(&RenderInput {
+        spec: &spec,
+        fleet: &fleet,
+        dgds: &dgds,
+        target: &how.target,
+        digests: &digests,
+        sources: how.sources,
+    })?;
     site.apply(&fleet, files, how.out.as_deref(), say)?;
 
     // Every pool this run renders, in any cluster.

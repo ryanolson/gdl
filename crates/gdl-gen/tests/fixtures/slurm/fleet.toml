@@ -1,0 +1,47 @@
+# The api example's fleet on one Slurm site, under a DynamoDB Local that
+# the site runs in a directory job of its own. Every value is a
+# placeholder: the site's account, partition, and network interface stay in
+# srt-slurm's `srtslurm.yaml` on the cluster. `model-x-01` holds a spare
+# node for a segment that joins it inside its job, and `model-x-02` runs
+# for a shorter time limit than the site's.
+[fleet]
+name = "api"
+
+[cluster.lab]
+kind = "slurm"
+region = "slurm-lab"
+srtctl = "/shared/srt-slurm"
+run_dir = "/shared/gdl-runs"
+registry = "registry.example/gdl"
+platform = "linux/arm64"
+time_limit = "08:00:00"
+
+[directory]
+backend = "dynamodb"
+records_table = "gdl-pools"
+lists_table = "gdl-pool-lists"
+local = true
+cluster = "lab"
+
+[class.global]
+ready = { front = 1 }
+
+[class.model_x]
+ready = { engine = 2 }
+
+[pool.global-us]
+class = "global"
+cluster = "lab"
+
+[pool.model-x-01]
+class = "model_x"
+cluster = "lab"
+parents = "global"
+slurm = { partition = "gpu", spare_nodes = 1 }
+
+[pool.model-x-02]
+class = "model_x"
+cluster = "lab"
+parents = "global"
+ready = { engine = 1 }
+slurm = { time_limit = "04:00:00" }

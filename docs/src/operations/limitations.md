@@ -705,17 +705,41 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** drop the table for that image. Or move the build image's flags into its own `RUSTC_WRAPPER` or `RUSTC_WORKSPACE_WRAPPER`, which the build trusts, as it trusts `RUSTC` and the image's Cargo configuration.
 - **Lifts:** a way to read rustc's flags as rustc does, before the build.
 
-### A fleet with a Slurm site is checked, and nothing runs it yet
-- **What:** `cargo gdl check` reads and judges a `[cluster.<name>]` table with `kind = "slurm"`, and the pools that name it. `cargo gdl k8s`, `images`, `deploy`, and `down` refuse a fleet with a Slurm site, and name the site, before they run kubectl or Docker. Compose reads only a site's region.
-- **Why:** the fleet file's model of a Slurm site comes first, so that a fleet's shape is settled before the render of srt-slurm recipes and the commands that submit and stop the jobs are built on it.
-- **Workaround:** run the fleet's pools on Kubernetes clusters, or compose them on one host.
-- **Lifts:** a Slurm render and a Slurm driver for `deploy` and `down`.
+### No command runs a Slurm site yet
+- **What:** `cargo gdl slurm` writes a Slurm site's recipes, and `cargo gdl images` builds its images, but nothing submits, watches, or stops its jobs. `cargo gdl k8s`, `deploy`, and `down` refuse a fleet with a Slurm site, and name the site, before they run kubectl or Docker. Compose reads only a site's region.
+- **Why:** the recipes come first, so that what a job runs is pinned and checked by srt-slurm before the commands that submit and stop jobs are built on them.
+- **Workaround:** apply the recipes with `srtctl apply` by hand ([Deploy a fleet on Slurm](../guides/slurm.md#apply-the-recipes-by-hand)), or run the fleet's pools on Kubernetes clusters.
+- **Lifts:** a Slurm driver for `deploy` and `down`.
 
-### A Slurm site refuses a `[deployment.codegen]` table for its architecture
-- **What:** `check` refuses a `[deployment.codegen.<arch>]` table when a Slurm site's `platform` is of that architecture, at the site's `platform`.
-- **Why:** no Slurm site's images are built yet, so none would be built with the table's target features. A table the build would not apply is refused, never ignored.
-- **Workaround:** leave the table out, or run that architecture's pools on Kubernetes clusters.
-- **Lifts:** Slurm images built by the same path as a Kubernetes cluster's, which applies the table of the image's architecture.
+### A Slurm site's pools need a DynamoDB Local
+- **What:** `cargo gdl slurm` refuses a fleet with a pool on a Slurm site unless its `[directory]` names DynamoDB with `local = true`, and runs the Local on that site (`[directory] cluster`). The Local runs in a job of its own, and each process reads its address when it starts: after a new directory job, every pool must be stopped and submitted again.
+- **Why:** under the relay, a child's hub needs its parent's hub's address, which a job learns only once it runs. A Slurm job has no AWS role to reach DynamoDB on AWS with. A job reads the Local's address from its own site's `run_dir`.
+- **Workaround:** none on Slurm. Run the directory's job on a partition with a longer time limit than its pools'.
+- **Lifts:** rendering the etcd pool directory (`directory = "etcd"`), which needs no job of the fleet's own, for a Slurm site; or AWS credentials on the cluster's shared file system.
+
+### Slurm recipes need a gdl that reads what they set
+- **What:** a pool's recipe sets its hub's `drain_on_stop` and `leave_by`, and each instance's `leave_by`, and a joining job runs `gdl-hub --resolve`. A spec whose `[gdl]` pins an earlier gdl by `rev` builds a hub and segments that refuse those settings when they start, and a hub with no `--resolve`. `cargo gdl slurm` does not know what a pinned gdl reads, and renders the recipes all the same.
+- **Why:** the generator writes the settings of its own gdl. A pin names a commit, which says nothing the render can read about the settings it takes.
+- **Workaround:** pin a gdl at least as recent as the generator that renders the recipes, or take gdl by `path`.
+- **Lifts:** a gdl version the render can compare, recorded with the images.
+
+### A Slurm recipe replaces the cluster's default host setup
+- **What:** each pool's and joining job's recipe has a `host_setup`, which writes the job's end time. srt-slurm then runs it in place of `default_host_setup` in the cluster's `srtslurm.yaml`, which the job does not run.
+- **Why:** srt-slurm runs one host setup per job: a recipe's, else the cluster's. `squeue`, the end time's source where Slurm sets no `SLURM_JOB_END_TIME`, runs only on the host.
+- **Workaround:** none in the recipe. A cluster whose nodes need its default host setup runs it some other way.
+- **Lifts:** srt-slurm running a recipe's host setup beside the cluster's, or a cluster known to set `SLURM_JOB_END_TIME`, where the step can read it inside the container.
+
+### A segment on a Slurm site cannot mount a secret
+- **What:** `cargo gdl slurm` refuses a pool on a Slurm site whose segment names `[deployment.segment.<name>] secrets`.
+- **Why:** nothing gives a Slurm job a secret yet, and a secret is never written into a recipe.
+- **Workaround:** run the segment's pools on a Kubernetes cluster.
+- **Lifts:** a secret read from the cluster's shared file system, mounted into the segment's container.
+
+### A segment on a Slurm site cannot be named `spare` or `resolve`
+- **What:** `cargo gdl slurm` refuses a segment named `spare` or `resolve` that a pool on a Slurm site runs. `hub` is refused everywhere.
+- **Why:** each service of a recipe has its segment's name, and a pool's recipe has `hub` and `spare` of its own, and a joining job's `resolve`.
+- **Workaround:** rename the segment.
+- **Lifts:** service names that cannot be a segment's.
 
 ### A Slurm site cannot ask gdl for a time limit over a year
 - **What:** `check` refuses a Slurm site's or a pool's `time_limit` above 365 days (`SlurmSite::MAX_TIME_LIMIT_S`), naming the limit and the cap.

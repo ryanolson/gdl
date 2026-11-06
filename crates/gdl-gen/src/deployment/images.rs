@@ -17,7 +17,7 @@
 //! differ, so that no compiler runs under emulation. See
 //! `docs/src/guides/kubernetes.md`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -221,6 +221,8 @@ pub(super) struct Image {
     pub(super) platform: String,
     /// The sha256 of the platform and the context, as hex.
     pub(super) tag: String,
+    /// The clusters whose pools run it, by name.
+    pub(super) clusters: BTreeSet<String>,
     /// Its build context, shared by every registry it goes to.
     context: Source,
 }
@@ -264,10 +266,11 @@ impl Image {
     }
 }
 
-/// Every image the pools of `fleet` run, once for each registry and
-/// platform of their clusters, in reference order. [`Prepared`] has
-/// checked that each pool has a cluster, and each cluster a registry and a
-/// platform.
+/// Every image the pools of `fleet` run, once for each registry, platform,
+/// and base image of their clusters, in reference order, each with the
+/// clusters that run it. [`Prepared`] has checked that each pool has a
+/// cluster, and each cluster a registry and a platform. A Slurm site's
+/// images are built on its own base image ([`Bases::of`]).
 pub(super) fn plan(prepared: &Prepared, fleet: &Fleet) -> Result<Vec<Image>, Error> {
     let bundle = &prepared.bundle;
     let graph = &bundle.graph;
@@ -275,30 +278,48 @@ pub(super) fn plan(prepared: &Prepared, fleet: &Fleet) -> Result<Vec<Image>, Err
         Some(context) => Some(Local::new(prepared, context)?),
         None => None,
     };
-    let hub = match &local {
-        None => Source::Files(Rc::new(Files::from([(
-            PathBuf::from("Dockerfile"),
-            hub_dockerfile(bundle, fleet),
-        )]))),
-        Some(local) => local.source(hub_dockerfile(bundle, fleet)),
+    // The hub's build context, by the image it is built on.
+    let mut hubs: BTreeMap<String, Source> = BTreeMap::new();
+    let mut hub = |base: &str| {
+        hubs.entry(base.to_string())
+            .or_insert_with(|| {
+                let dockerfile = hub_dockerfile(bundle, fleet, base);
+                match &local {
+                    None => Source::Files(Rc::new(Files::from([(
+                        PathBuf::from("Dockerfile"),
+                        dockerfile,
+                    )]))),
+                    Some(local) => local.source(dockerfile),
+                }
+            })
+            .clone()
     };
     let hub_repository = emit::package_name(graph, "hub");
     let pools: Vec<PoolSettings> = fleet.pools().collect();
-    // By registry, repository, and platform: two clusters that share a
-    // registry and a platform share each image.
+    // By registry, repository, platform, and tag: two clusters that share
+    // a registry, a platform, and a base image share each image.
     let mut images = BTreeMap::new();
-    let mut add = |cluster: &gdl_model::Cluster, repository: &str, context: &Source| {
+    let mut add = |name: &str, cluster: &gdl_model::Cluster, repository: &str, context: &Source| {
         let registry = cluster.registry().unwrap_or_default().to_string();
         let platform = cluster.platform().unwrap_or_default().to_string();
+        let tag = context.tag(&platform);
         images
-            .entry((registry.clone(), repository.to_string(), platform.clone()))
+            .entry((
+                registry.clone(),
+                repository.to_string(),
+                platform.clone(),
+                tag.clone(),
+            ))
             .or_insert_with(|| Image {
-                tag: context.tag(&platform),
+                tag,
                 registry,
                 repository: repository.to_string(),
                 platform,
+                clusters: BTreeSet::new(),
                 context: context.clone(),
-            });
+            })
+            .clusters
+            .insert(name.to_string());
     };
     for laid in prepared.spec.layouts() {
         let layout = prepared
@@ -306,15 +327,16 @@ pub(super) fn plan(prepared: &Prepared, fleet: &Fleet) -> Result<Vec<Image>, Err
             .get(laid.name)
             .and_then(Option::as_ref)
             .ok_or_else(|| Error::new(laid.named("the placement does not fit the graph".into())))?;
-        let mut contexts: BTreeMap<(&str, &str), Source> = BTreeMap::new();
+        let mut contexts: BTreeMap<(&str, &str, String), Source> = BTreeMap::new();
         for pool in pools
             .iter()
             .filter(|pool| pool.layout.as_deref().unwrap_or(laid.name) == laid.name)
         {
-            let (_, cluster) = fleet
+            let (name, cluster) = fleet
                 .cluster_of(&pool.name)
                 .expect("Prepared requires every pool's cluster");
-            add(cluster, &hub_repository, &hub);
+            let bases = Bases::of(&bundle.settings, cluster);
+            add(name, cluster, &hub_repository, &hub(bases.hub));
             for (segment, _) in laid.placement.segments() {
                 if layout.class_of(segment) != Some(pool.class.as_str()) {
                     continue;
@@ -322,37 +344,83 @@ pub(super) fn plan(prepared: &Prepared, fleet: &Fleet) -> Result<Vec<Image>, Err
                 // By architecture: `[deployment.codegen.<arch>]` reaches
                 // the Dockerfile of its own architecture's images only.
                 let arch = arch(cluster.platform().unwrap_or_default());
-                let context = contexts.entry((segment, arch)).or_insert_with(|| {
-                    let package = laid.package(graph, segment);
-                    let crate_dir = laid.dir().join(segment);
-                    let codegen = codegen(bundle, segment, arch);
-                    match &local {
-                        None => Source::Files(Rc::new(segment_context(
-                            bundle, &crate_dir, &package, &codegen,
-                        ))),
-                        Some(local) => local.source(
-                            local.segment_dockerfile(bundle, &crate_dir, &package, &codegen),
-                        ),
-                    }
-                });
+                let base = bases.segment(&bundle.settings, segment).to_string();
+                let context =
+                    contexts
+                        .entry((segment, arch, base.clone()))
+                        .or_insert_with(|| {
+                            let package = laid.package(graph, segment);
+                            let crate_dir = laid.dir().join(segment);
+                            let codegen = codegen(bundle, segment, arch);
+                            match &local {
+                                None => Source::Files(Rc::new(segment_context(
+                                    bundle, &crate_dir, &package, &codegen, &base,
+                                ))),
+                                Some(local) => local.source(local.segment_dockerfile(
+                                    bundle, &crate_dir, &package, &codegen, &base,
+                                )),
+                            }
+                        });
                 let context = context.clone();
-                add(cluster, &laid.package(graph, segment), &context);
+                add(name, cluster, &laid.package(graph, segment), &context);
             }
         }
     }
-    // The DynamoDB directory's tables Job runs the hub's image in the
+    // The DynamoDB directory's tables step runs the hub's image in the
     // directory's cluster, which may run no pool.
-    if let Some(cluster) = fleet
+    if let Some((name, cluster)) = fleet
         .directory()
         .filter(|directory| directory.local)
         .and_then(|directory| directory.cluster.as_deref())
-        .and_then(|name| fleet.cluster(name))
+        .and_then(|name| Some((name, fleet.cluster(name)?)))
     {
-        add(cluster, &hub_repository, &hub);
+        let bases = Bases::of(&bundle.settings, cluster);
+        add(name, cluster, &hub_repository, &hub(bases.hub));
     }
     let mut images: Vec<Image> = images.into_values().collect();
     images.sort_by_key(Image::reference);
     Ok(images)
+}
+
+/// The images a cluster's images are built on. A Kubernetes cluster's are
+/// the spec's `[deployment] base_image` and `hub_image`. A Slurm site's
+/// are its own `base_image` and `hub_image`, or
+/// [`gdl_model::SlurmSite::DEFAULT_BASE_IMAGE`]: srt-slurm runs every
+/// command under `bash -c`, and the spec's default base has no shell. A
+/// segment's own `[deployment.segment.<name>] base_image` wins on either.
+struct Bases<'a> {
+    base: &'a str,
+    hub: &'a str,
+}
+
+impl<'a> Bases<'a> {
+    fn of(settings: &'a super::Settings, cluster: &'a gdl_model::Cluster) -> Self {
+        match cluster.slurm() {
+            None => Self {
+                base: &settings.base_image,
+                hub: settings.hub_image.as_ref().unwrap_or(&settings.base_image),
+            },
+            Some(site) => {
+                let base = site
+                    .base_image
+                    .as_deref()
+                    .unwrap_or(gdl_model::SlurmSite::DEFAULT_BASE_IMAGE);
+                Self {
+                    base,
+                    hub: site.hub_image.as_deref().unwrap_or(base),
+                }
+            }
+        }
+    }
+
+    /// The image segment `segment`'s image is built on.
+    fn segment(&self, settings: &'a super::Settings, segment: &str) -> &'a str {
+        settings
+            .segment
+            .get(segment)
+            .and_then(|image| image.base_image.as_deref())
+            .unwrap_or(self.base)
+    }
 }
 
 /// The tag of an image built for `platform` from `context`: the sha256,
@@ -379,12 +447,13 @@ fn tag(platform: &str, context: &Files) -> String {
 /// The build context of the segment whose crate is in `crate_dir`, which
 /// builds package `package`: the contract crate, the segment's crate
 /// without its settings, each file with no absolute path ([`placeless`]),
-/// and a Dockerfile.
+/// and a Dockerfile, whose binary is copied into `base`.
 fn segment_context(
     bundle: &super::Bundle,
     crate_dir: &Path,
     package: &str,
     codegen: &str,
+    base: &str,
 ) -> Files {
     let settings = crate_dir.join("config.toml");
     let mut files: Files = bundle
@@ -396,15 +465,6 @@ fn segment_context(
         .map(|(path, text)| (path.clone(), placeless(text)))
         .collect();
     let settings = &bundle.settings;
-    let segment = crate_dir
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let base = settings
-        .segment
-        .get(&segment)
-        .and_then(|image| image.base_image.as_ref())
-        .unwrap_or(&settings.base_image);
     let manifest = format!("/app/{}/Cargo.toml", crate_dir.display());
     let build = format!(
         "{codegen}cargo build --release --target \"$GDL_TARGET\" --manifest-path {} && cp \"$CARGO_TARGET_DIR/$GDL_TARGET/release/{package}\" /gdl/segment",
@@ -489,24 +549,17 @@ impl Local {
     }
 
     /// The Dockerfile of the segment whose crate is `crate_dir` in the
-    /// bundle, which builds package `package` by its settled lock.
+    /// bundle, which builds package `package` by its settled lock, and
+    /// copies it into `base`.
     fn segment_dockerfile(
         &self,
         bundle: &super::Bundle,
         crate_dir: &Path,
         package: &str,
         codegen: &str,
+        base: &str,
     ) -> String {
         let settings = &bundle.settings;
-        let segment = crate_dir
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let base = settings
-            .segment
-            .get(&segment)
-            .and_then(|image| image.base_image.as_ref())
-            .unwrap_or(&settings.base_image);
         let manifest = format!("/app/{}/Cargo.toml", self.bundle.join(crate_dir).display());
         let build = format!(
             "{codegen}cargo build --locked --release --target \"$GDL_TARGET\" --manifest-path {} && cp \"$CARGO_TARGET_DIR/$GDL_TARGET/release/{package}\" /gdl/segment",
@@ -522,9 +575,10 @@ impl Local {
     }
 }
 
-/// The Dockerfile of the hub, installed as the spec's `[gdl]` names it:
-/// with local sources, from the hub's crate in the context it copies.
-fn hub_dockerfile(bundle: &super::Bundle, fleet: &Fleet) -> String {
+/// The Dockerfile of the hub, installed as the spec's `[gdl]` names it,
+/// on `base`: with local sources, from the hub's crate in the context it
+/// copies.
+fn hub_dockerfile(bundle: &super::Bundle, fleet: &Fleet, base: &str) -> String {
     let settings = &bundle.settings;
     // The DynamoDB directory, and its tables step, are a feature of the
     // hub, off by default, since it links the AWS SDK.
@@ -538,7 +592,7 @@ fn hub_dockerfile(bundle: &super::Bundle, fleet: &Fleet) -> String {
     );
     dockerfile(
         &settings.build_image,
-        settings.hub_image.as_ref().unwrap_or(&settings.base_image),
+        base,
         bundle.context.is_some(),
         &build,
         "",

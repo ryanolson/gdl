@@ -11,6 +11,7 @@
 //! cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--direction lr|tb] [--target-dir <dir>]
 //! cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
 //! cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--images <images.json>] [--local] [--target-dir <dir>]
+//! cargo gdl slurm --spec <gdl.toml> --fleet <fleet.toml> --images <images.json> --out <directory> [--tag <tag>] [--local] [--target-dir <dir>]
 //! cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--local] [--target-dir <dir>]
 //! cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--local] [--allow-pool-restart] [--target-dir <dir>]
 //! cargo gdl down --fleet <fleet.toml> [--spec <gdl.toml>] [--target-dir <dir>]
@@ -58,7 +59,14 @@
 //! objects, one directory per cluster, after the same check; each image
 //! is tagged `--tag`, else with the sha256 of what it is built from, and
 //! with `--images`, the file `images` writes, also named by its digest. It
-//! needs no Docker and no cluster. `images` builds the hub's image and one
+//! needs no Docker and no cluster. `slurm` writes the srt-slurm recipes of
+//! a fleet's Slurm sites, one directory per site, after the same check:
+//! each pool's job, the DynamoDB Local's job, a job per segment of a pool
+//! that adds an instance of it to the running pool, and the settings each
+//! job mounts. Each image is named by its digest in `--images`, looked up
+//! by `--tag` when given. Each process reads the DynamoDB Local's address
+//! when it starts, from the file the directory's job writes. It needs no
+//! Docker, no srt-slurm, and no cluster. `images` builds the hub's image and one
 //! per layout and segment that the fleet's pools run, for each cluster's
 //! platform, with `docker buildx`; with `--push` it pushes each to each
 //! cluster's registry, unless the registry already holds its tag, and
@@ -101,6 +109,7 @@ const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <d
        cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--direction lr|tb] [--target-dir <dir>]
        cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
        cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--images <images.json>] [--local] [--target-dir <dir>]
+       cargo gdl slurm --spec <gdl.toml> --fleet <fleet.toml> --images <images.json> --out <directory> [--tag <tag>] [--local] [--target-dir <dir>]
        cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--local] [--target-dir <dir>]
        cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--local] [--allow-pool-restart] [--target-dir <dir>]
        cargo gdl down --fleet <fleet.toml> [--spec <gdl.toml>] [--target-dir <dir>]
@@ -120,6 +129,13 @@ enum Command {
         fleet: PathBuf,
         tag: Option<String>,
         images: Option<PathBuf>,
+        local: bool,
+    },
+    Slurm {
+        out: PathBuf,
+        fleet: PathBuf,
+        tag: Option<String>,
+        images: PathBuf,
         local: bool,
     },
     Images {
@@ -261,6 +277,16 @@ fn args() -> Result<Args, String> {
             images: images.take(),
             local: std::mem::take(&mut local),
         },
+        "slurm" => Command::Slurm {
+            out: out.ok_or_else(|| USAGE.to_string())?,
+            fleet: fleet.take().ok_or_else(|| USAGE.to_string())?,
+            tag: tag.take(),
+            // A Slurm site pulls each image by its digest.
+            images: images.take().ok_or_else(|| {
+                format!("slurm: --images names the digests file `cargo gdl images --push --out` writes: a Slurm site pulls each image by its digest\n{USAGE}")
+            })?,
+            local: std::mem::take(&mut local),
+        },
         "images" => {
             // The digests file names images in their registries, which a
             // run without `--push` does not reach.
@@ -315,8 +341,8 @@ fn args() -> Result<Args, String> {
         command,
         Command::Extract { .. } | Command::Catalog(_) | Command::Down { .. }
     );
-    // `--fleet`, `--tag`, `--images`, `--push`, `--local`, `--release`, and
-    // `--direction` are for the commands that took them above.
+    // `--fleet`, `--tag`, `--images`, `--push`, `--local`, `--release`,
+    // and `--direction` are for the commands that took them above.
     // `--prepare-into` is internal to `run`, and in no usage line.
     if (needs_spec && spec.is_none())
         || direction.is_some()
@@ -500,6 +526,38 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 tag.as_deref(),
                 digests.as_ref(),
                 sources(*local),
+            )?;
+        }
+        Command::Slurm {
+            out,
+            fleet,
+            tag,
+            images,
+            local,
+        } => {
+            let Some(Deployed {
+                spec,
+                fleet,
+                dgds: _,
+                target,
+            }) = fleet_and_spec(&args, fleet, &target)?
+            else {
+                return Ok(ExitCode::FAILURE);
+            };
+            let text = std::fs::read_to_string(images)
+                .map_err(|e| format!("{}: {e}", images.display()))?;
+            let digests = gdl_gen::Digests::from_json(&text)
+                .map_err(|e| format!("{}: {e}", images.display()))?;
+            gdl_gen::slurm(
+                &spec,
+                &fleet,
+                out,
+                &gdl_gen::SlurmRender {
+                    target: &target,
+                    tag: tag.as_deref(),
+                    digests: &digests,
+                    sources: sources(*local),
+                },
             )?;
         }
         Command::Images {

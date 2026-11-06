@@ -18,7 +18,7 @@ use crate::deployment::{Published, reference};
 
 /// The address every segment's system listener binds in a pod: every
 /// interface, so that the kubelet's probes reach it at the pod's IP.
-pub(super) const SYSTEM_HOST: &str = "0.0.0.0";
+pub(in crate::deployment) const SYSTEM_HOST: &str = "0.0.0.0";
 
 /// One segment of a layout, as its pods run it: what [`gdl_k8s::Segment`]
 /// takes from the spec, before a pool's cluster names its image and its
@@ -38,7 +38,7 @@ pub(super) struct Segment {
 /// `port`, in Compose's short form `[[IP:][HOST]:]CONTAINER[/PROTOCOL]`,
 /// as a segment publishes it in a cluster: its container port. The host
 /// port is Compose's alone. A range is refused: a Service lists each port.
-pub(super) fn parse_port(port: &str) -> Result<Port, String> {
+pub(in crate::deployment) fn parse_port(port: &str) -> Result<Port, String> {
     let refuse = |why: &str| format!("`{port}` {why}");
     let published = Published::of(port);
     let protocol = match published.protocol {
@@ -60,7 +60,7 @@ pub(super) fn parse_port(port: &str) -> Result<Port, String> {
 
 /// Whether `port` is the port of the system listener that `settings` ask
 /// the probes at, which the pod declares as `system`.
-pub(super) fn is_system(port: &Port, settings: &Settings) -> bool {
+pub(in crate::deployment) fn is_system(port: &Port, settings: &Settings) -> bool {
     port.port == settings.port && port.protocol == Protocol::Tcp
 }
 
@@ -195,9 +195,7 @@ impl Pod<'_> {
     /// The image of `repository` in the cluster's registry, for its
     /// platform.
     fn image(&self, repository: &str) -> Result<String, Error> {
-        let registry = self.cluster.registry.as_deref().unwrap_or_default();
-        let platform = self.cluster.platform.as_deref().unwrap_or_default();
-        let image = self.naming.image(registry, repository, platform)?;
+        let image = self.naming.image(self.cluster_name, repository)?;
         reference::check_image(&image).map_err(|why| {
             Error::new(format!("[cluster.{}] registry: {why}", self.cluster_name))
         })?;
@@ -377,7 +375,7 @@ pub(in crate::deployment) fn check_registry(registry: &str) -> Result<(), String
 }
 
 /// Refuse a tag that an image reference cannot hold.
-pub(super) fn check_tag(tag: &str) -> Result<(), Error> {
+pub(in crate::deployment) fn check_tag(tag: &str) -> Result<(), Error> {
     let shaped = reference::tag(tag);
     if shaped {
         return Ok(());

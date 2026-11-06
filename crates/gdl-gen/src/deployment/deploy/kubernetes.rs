@@ -15,11 +15,9 @@ use std::time::{Duration, Instant};
 use gdl_model::Fleet;
 
 use super::Waits;
-use super::site::{HubRoutes, Readiness, Running, Scope, Site, Stopping, Which};
-use crate::deployment::Dgds;
-use crate::deployment::images::Digests;
+use super::site::{HubRoutes, Readiness, RenderInput, Running, Scope, Site, Stopping, Which};
 use crate::deployment::k8s::{self, label_value};
-use crate::{Error, Files, Sources, Spec};
+use crate::{Error, Files};
 
 mod apply;
 mod cluster;
@@ -156,16 +154,16 @@ impl Site for Kubernetes<'_> {
 
     /// The objects, as [`k8s::k8s_files`] renders them; with
     /// `allowPoolRestart` on each `GdlPool` when the deploy allows it.
-    fn render(
-        &self,
-        spec: &Spec,
-        fleet: &Fleet,
-        dgds: &Dgds,
-        target: &Path,
-        digests: &Digests,
-        sources: Sources,
-    ) -> Result<Files, Error> {
-        let mut files = k8s::k8s_files(spec, fleet, dgds, target, None, Some(digests), sources)?;
+    fn render(&self, input: &RenderInput<'_>) -> Result<Files, Error> {
+        let mut files = k8s::k8s_files(
+            input.spec,
+            input.fleet,
+            input.dgds,
+            input.target,
+            None,
+            Some(input.digests),
+            input.sources,
+        )?;
         if self.allow_pool_restart {
             allow_restart(&mut files, &self.clusters)?;
         }

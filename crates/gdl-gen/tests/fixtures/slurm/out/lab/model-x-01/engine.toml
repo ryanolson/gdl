@@ -1,0 +1,9 @@
+listen = "0.0.0.0:9000"
+rendezvous_ms = 60000
+
+[runtime]
+drain_ms = 90000
+
+[system]
+host = "0.0.0.0"
+port = 9090

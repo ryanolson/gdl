@@ -9,16 +9,28 @@ use figment::value::Value as Read;
 use gdl_model::pool_variable;
 use serde_json::{Map, Value};
 
+/// Which names a variable may have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Names {
+    /// Any a container's environment takes, as Compose and Kubernetes set
+    /// it.
+    Any,
+    /// Letters, digits, and `_` alone: srt-slurm sets each variable with
+    /// bash's `export`, which refuses any other name.
+    Shell,
+}
+
 /// `table`, a `[pool]` table, as one variable per setting:
 /// `GDL_POOL__NAME`, `GDL_POOL__READY__ENGINE`. A nested table whose keys
-/// a variable's name can spell is one variable per entry; one with a key
-/// that holds `__`, which the name would split, is one variable holding
-/// the whole table (`GDL_POOL__READY={"engine__work"=2}`).
-pub(super) fn pool_variables(table: &toml::Table) -> Map<String, Value> {
+/// a variable's name can spell, by `names`, is one variable per entry; one
+/// with a key that holds `__`, which the name would split, or, for
+/// [`Names::Shell`], a character bash's names do not take, is one variable
+/// holding the whole table (`GDL_POOL__READY={"engine__work"=2}`).
+pub(super) fn pool_variables(table: &toml::Table, names: Names) -> Map<String, Value> {
     let mut variables = Map::new();
     for (key, value) in table {
         match value {
-            toml::Value::Table(nested) if nested.keys().all(|name| spelled(name)) => {
+            toml::Value::Table(nested) if nested.keys().all(|name| spelled(name, names)) => {
                 for (name, value) in nested {
                     variables.insert(
                         pool_variable(&format!("{key}.{name}")),
@@ -43,9 +55,14 @@ pub(super) fn string(text: &str) -> String {
 }
 
 /// Whether a variable's name can spell `name` as one key: the reader splits
-/// a name at each `__`, and matches it without regard to case.
-fn spelled(name: &str) -> bool {
-    !name.contains("__") && name.bytes().all(|b| !b.is_ascii_uppercase())
+/// a name at each `__`, and matches it without regard to case; and bash
+/// takes only letters, digits, and `_`.
+fn spelled(name: &str, names: Names) -> bool {
+    !name.contains("__")
+        && name.bytes().all(|b| match names {
+            Names::Any => !b.is_ascii_uppercase(),
+            Names::Shell => b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_',
+        })
 }
 
 /// `value` as a variable's value that reads back as it is.
@@ -107,7 +124,7 @@ mod tests {
             "name = \"true\"\nready = { engine__work = 2, front = 1 }\nrequires = { model_x = 1 }\n",
         )
         .expect("a table");
-        let variables = pool_variables(&table);
+        let variables = pool_variables(&table, Names::Any);
         let found: Vec<(&str, &str)> = variables
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str().expect("a string")))

@@ -415,6 +415,7 @@ pub use dgd::Dgds;
 pub use dgd::tunables_warnings;
 pub use images::{Buildx, Built, Digests, Docker, Outcome, images};
 pub use k8s::{k8s, k8s_files};
+pub use slurm::{SlurmRender, slurm, slurm_files};
 
 /// Where a bundle's images take the crates they build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -581,6 +582,7 @@ fn localize(files: &mut Files, context: &context::Context, crate_dir: &Path) -> 
 /// What every bundle of a spec starts from: its deployment settings, how
 /// its hub is installed, its generated crates, its graph's name, and the
 /// build context of a bundle that builds local sources.
+#[derive(Clone)]
 struct Bundle {
     settings: Settings,
     hub_install: String,

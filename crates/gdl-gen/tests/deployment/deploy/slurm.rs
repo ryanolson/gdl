@@ -1,6 +1,7 @@
 //! A fleet with a Slurm site: `deploy` and `down` run Kubernetes clusters
-//! only, and no command runs a Slurm site yet, so both refuse the fleet,
-//! naming the site, before they run kubectl or Docker once.
+//! only, and no command runs a Slurm site yet (`cargo gdl slurm` renders
+//! its recipes), so both refuse the fleet, naming the site, before they run
+//! kubectl or Docker once.
 
 use super::*;
 
@@ -25,7 +26,7 @@ fn deploy_and_down_refuse_a_fleet_with_a_slurm_site() {
     let named = [
         "[cluster.lab]",
         "`lab` is a Slurm site",
-        "no command renders or runs a Slurm site yet",
+        "no command runs one yet",
     ];
     let refusal = deploy(&mirror, &files, &mut docker, &mut kube)
         .expect_err("refused")
