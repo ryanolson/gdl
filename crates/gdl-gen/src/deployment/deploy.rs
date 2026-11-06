@@ -198,7 +198,9 @@ pub fn deploy(
 ///    Refused, before anything changes, for two jobs of one pool, for a
 ///    directory job of another recipe, and for a pool's job of another
 ///    recipe without `--replace`, which drains that pool and cancels its
-///    job, as `down` does;
+///    job, as `down` does. Then, before anything else changes, the record
+///    of each pool the fleet no longer runs whose job is gone is withdrawn
+///    through a parent's hub, children first;
 /// 4. write the recipes into `<run_dir>/<fleet>`, and to `out` when given;
 /// 5. submit the directory's job when it has none, and wait until the
 ///    fleet's pointer names the file of the directory's job: never a file
@@ -296,7 +298,9 @@ fn drive(
 /// it cancels the jobs that wait to join the pool, drains a pool that has
 /// a parent and waits for its withdrawal, lets the instances of a pool
 /// with none leave on `SIGTERM` until its hub lists none, and cancels the
-/// pool's job and those that joined it. The directory's job goes last.
+/// pool's job and those that joined it. A pool whose job is gone has its
+/// record withdrawn once through a running parent's hub. The directory's
+/// job goes last.
 /// The fleet's directory on the shared file system stays.
 pub fn down(
     fleet: &Path,
@@ -418,8 +422,9 @@ fn stop_in_order(
 /// Stop `pools` of `place`: drain each that has a parent, wait until its
 /// record is withdrawn, and then remove `which`. A pool whose hub is gone
 /// cannot drain: the site refuses it unless it is known to have withdrawn,
-/// checked before any drain starts, so that nothing changes when one
-/// cannot be shown to have withdrawn.
+/// or withdraws it through a parent's hub, checked before any drain
+/// starts, so that no pool drains when one cannot be shown to have
+/// withdrawn.
 fn stop(
     site: &mut dyn Site,
     place: &str,
@@ -433,7 +438,7 @@ fn stop(
         .filter_map(|pool| pool.drain.as_ref())
         .partition(|pool| pool.hub);
     for pool in &hubless {
-        site.refuse_unwithdrawn(place, pool)?;
+        site.withdrawn_without_hub(place, pool, say)?;
     }
     let names: Vec<&str> = pools.iter().map(|pool| pool.pool.as_str()).collect();
     site.stop_joining(place, &names, say)?;

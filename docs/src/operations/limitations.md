@@ -718,10 +718,10 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Lifts:** a cancel that does not depend on the version, such as holding a waiting job (`scontrol hold`) before cancelling it.
 
 ### A Slurm deploy sees only your own jobs
-- **What:** `cargo gdl deploy` and `down` list a fleet's jobs with `squeue --me`. A job of the same fleet that another user submitted is not listed: a deploy submits the pool again, and `down` leaves the job running.
+- **What:** `cargo gdl deploy` and `down` list a fleet's jobs with `squeue --me`. A job of the same fleet that another user submitted is not listed: a deploy submits the pool again, and `down` leaves the job running. `down`, and a deploy that no longer runs the pool, take it as a pool whose job is gone, and withdraw its record through a parent's hub, though its hub runs.
 - **Why:** a fleet's name is not unique across a cluster's users, and `scancel` cancels only your own jobs.
 - **Workaround:** deploy, and take down, a fleet as one user.
-- **Lifts:** a fleet's jobs listed by a name that is unique on the cluster, with the rights to cancel them.
+- **Lifts:** a fleet's jobs listed by a name that is unique on the cluster, with the rights to cancel them; for the withdrawal, a parent's hub that refuses to withdraw a record whose lease is still fresh.
 
 ### A Slurm deploy waits for queued jobs only within its waits
 - **What:** `cargo gdl deploy` waits up to 600 s for the directory's job to point the fleet at its store, and up to 600 s for each pool's health. A job still in Slurm's queue then stops the deploy.
@@ -729,11 +729,17 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** run the deploy again once the jobs run: it keeps each job it finds.
 - **Lifts:** a command-line wait for the queue.
 
-### A pool whose job ended without a drain keeps its record until its lease lapses
-- **What:** a pool's job that ended on its own, because its hub's node failed or the job was cancelled by hand, is not listed by `squeue`, so `deploy` and `down` do not see it. Its record stays in the directory until its lease lapses, and its parent offers it nothing meanwhile.
-- **Why:** with no job, no hub runs to withdraw the record, and only a parent's hub can withdraw it for the pool.
-- **Workaround:** withdraw it on a parent's hub (`POST /v1/ext/gdl-pool/children/<class>/<pool>/withdraw` on its control port).
-- **Lifts:** `deploy` and `down` that withdraw the record of a pool whose job is gone through a parent's hub.
+### A pool whose job is gone keeps its record while no parent's hub runs
+- **What:** `cargo gdl down`, and `deploy` for a pool the fleet no longer runs, withdraw the record of a pool whose job is gone through a parent's hub ([Take the fleet down](../guides/slurm.md#take-the-fleet-down)). A pool with no parent, such as a global pool, has no parent's hub. Neither has a pool whose parents' jobs are gone too. Its record stays in the directory, and its readers hold it as missing, until a new hub of the pool replaces it or the directory's job ends.
+- **Why:** with no job, no hub of the pool runs to withdraw its record. Only a parent's hub can withdraw it for the pool, and only for a pool whose record names that hub's pool as its parent.
+- **Workaround:** `down` needs none: the directory's job ends last, and the records go with it. For a pool that the fleet still runs, `deploy` submits it again, and its new hub's record replaces the old one.
+- **Lifts:** a withdrawal that `cargo gdl` writes in the directory itself.
+
+### A Slurm pool does not restart what dies in it
+- **What:** a segment instance that dies, for example with its node under `no_kill`, is not started again. Its lease lapses, its hub drops it, and the pool runs on with the rest, as `degraded` or `unavailable`. A pool's hub that dies ends the pool's job: its segments lose their lease and leave, and so do the jobs that joined it. `deploy` submits the pool again, whose new hub's record replaces the old one, and `down` withdraws the record through a parent's hub. The directory's job bounds the whole fleet: when it ends, its store is gone, and no hub can publish or read a record ([A Slurm site's pools need a directory job of the fleet's own](#a-slurm-sites-pools-need-a-directory-job-of-the-fleets-own)).
+- **Why:** srt-slurm does not restart a service, and a pool has one hub, which is `critical` and `terminal` in its job.
+- **Workaround:** replace a dead instance with a job that joins the pool (`join-<segment>.yaml`). Run `cargo gdl deploy` again for a pool whose job ended.
+- **Lifts:** srt-slurm services that restart, and a hub that keeps its registrations across a restart.
 
 ### A running pool whose hub has not started cannot be stopped
 - **What:** `cargo gdl down`, a deploy's prune, and `--replace` refuse a pool whose job runs but whose hub has not written `hub.<job id>.address`, and cancel nothing.

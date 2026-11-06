@@ -23,6 +23,8 @@ mod completing;
 mod directory;
 #[path = "slurm/down.rs"]
 mod down;
+#[path = "slurm/gone.rs"]
+mod gone;
 #[path = "slurm/hostnames.rs"]
 mod hostnames;
 #[path = "slurm/monitoring.rs"]
@@ -237,6 +239,14 @@ struct Fake {
     refuse: Option<String>,
     /// How many reads of a drained hub's `withdrawn` answer false first.
     withdrawn_after: usize,
+    /// Each child pool whose record a parent's hub withdrew, as `class/pool`:
+    /// a second withdrawal finds no record.
+    withdrawals: Vec<String>,
+    /// What a parent's hub answers a withdrawal instead, when set.
+    withdraw_answer: Option<(u16, &'static str)>,
+    /// The job whose hub alone holds a child's record, when set: any other
+    /// parent's hub answers that it holds none.
+    holder: Option<u64>,
     /// What `scancel --version` prints.
     version: &'static str,
 }
@@ -251,6 +261,9 @@ impl Fake {
             hold: Vec::new(),
             refuse: None,
             withdrawn_after: 1,
+            withdrawals: Vec::new(),
+            withdraw_answer: None,
+            holder: None,
             version: "slurm 24.05.4\n",
         }
     }
@@ -453,9 +466,29 @@ impl Fake {
                     && pair[1].parse::<u64>().is_ok_and(|secs| secs > 0)),
             "{args:?}"
         );
+        assert_eq!(self.job(number(id)).state, "RUNNING", "{url}");
+        // A parent's hub withdraws a child's record once: then it holds
+        // none.
+        if let Some(child) = route
+            .strip_prefix("/v1/ext/gdl-pool/children/")
+            .and_then(|rest| rest.strip_suffix("/withdraw"))
+            .map(str::to_string)
+        {
+            assert_eq!((port, post), ("8337", true), "{url}");
+            let held = !self.withdrawals.contains(&child)
+                && self.holder.is_none_or(|holder| holder == number(id));
+            let (status, body) = match (self.withdraw_answer, held) {
+                (Some((status, body)), _) => (status, body.to_string()),
+                (None, true) => {
+                    self.withdrawals.push(child);
+                    (204, String::new())
+                }
+                (None, false) => (404, "no record".to_string()),
+            };
+            return gdl_gen::Reply::ok(format!("{body}\n{status}"));
+        }
         let withdrawn_after = self.withdrawn_after;
         let job = self.job(number(id));
-        assert_eq!(job.state, "RUNNING", "{url}");
         let (status, body) = match (port, route.as_str(), post) {
             ("8337", "/v1/ext/gdl-pool/drain", true) => (200, "{}".to_string()),
             ("1337", "/v1/ext/gdl-pool/health", false) => (200, "{}".to_string()),

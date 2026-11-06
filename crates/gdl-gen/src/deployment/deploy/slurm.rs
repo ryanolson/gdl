@@ -10,7 +10,7 @@
 //! recipe is unchanged, and replaces one whose recipe changed only when
 //! told to.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -18,8 +18,10 @@ use gdl_model::{Fleet, SlurmReach};
 use serde_json::Value;
 
 use super::Waits;
+use super::order::Parentage;
 use super::site::{
     Answer, Driven, HubRoutes, Readiness, RenderInput, Running, Scope, Site, Stopping, Which,
+    Withdrawal,
 };
 use crate::deployment::k8s;
 use crate::deployment::slurm::{SlurmRender, slurm_files};
@@ -113,6 +115,9 @@ struct Found {
     /// What is cancelled last: the directory's job, and jobs that join a
     /// pool that has no job.
     rest: Vec<Job>,
+    /// The pools whose job is gone, each with its parent, whose hub
+    /// withdraws its record.
+    gone: BTreeMap<String, Parentage>,
 }
 
 impl<'s> SlurmPlace<'s> {
@@ -312,6 +317,156 @@ impl<'s> SlurmPlace<'s> {
             self.found.pools.insert(pool, job);
         }
         Ok(running)
+    }
+
+    /// Add to `running` each pool of the fleet's directory that `stops`
+    /// takes, that has a parent and no job in `listed`: its job is gone,
+    /// killed, preempted, or lost with its hub's node, and its record may
+    /// still be in the directory, where its parents hold it missing. The
+    /// driver stops it children first as a pool whose hub is gone, and
+    /// [`Site::withdrawn_without_hub`] withdraws its record. A pool with no
+    /// parent has no parent's hub to withdraw it, and is passed over.
+    fn jobless(
+        &mut self,
+        listed: &BTreeSet<String>,
+        stops: impl Fn(&str) -> bool,
+        running: &mut Running,
+    ) -> Result<(), Error> {
+        let entries = match std::fs::read_dir(&self.home.dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(Error::new(format!("{}: {e}", self.home.dir.display()))),
+        };
+        let mut pools: Vec<String> = entries
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|pool| !listed.contains(pool) && stops(pool))
+            .filter(|pool| self.home.dir.join(pool).join("pool.yaml").is_file())
+            .collect();
+        pools.sort();
+        for pool in pools {
+            let ran = Ran::read(&self.home.dir.join(&pool), &pool)?;
+            let Some(parent) = ran.parent.clone() else {
+                continue;
+            };
+            running.notes.push(ran.note(&pool));
+            running.driven.push(Driven {
+                pool: pool.clone(),
+                drain: Some(Stopping {
+                    pool: pool.clone(),
+                    class: ran.class,
+                    grace: ran.grace,
+                    hub: false,
+                    seen: ran.seen,
+                }),
+            });
+            self.found.gone.insert(pool, parent);
+        }
+        running.driven.sort_by(|a, b| a.pool.cmp(&b.pool));
+        Ok(())
+    }
+
+    /// Withdraw the record of `pool`, whose job is gone, once, through the
+    /// hub of a running pool of its parent's class, `parent` as its recipe
+    /// names it first. The recipe is the last render: a deploy whose submit
+    /// then failed may have moved the pool to another home of that class
+    /// than the one its job ran under, so the others are asked too. Under
+    /// DynamoDB and etcd no parent's hub holds the record: the parent's hub
+    /// writes the withdrawal in the directory, at an epoch past the pool's
+    /// last record, so that a late write of the pool's own cannot bring it
+    /// back. A hub that holds no record of it answers 404, and the next is
+    /// asked: when none holds it, as after an earlier withdrawal, nothing
+    /// is left to withdraw. With no parent's hub running, nothing can
+    /// withdraw it, and nothing offers it work: it is named, and passed
+    /// over.
+    fn withdraw_gone(
+        &mut self,
+        pool: &Stopping,
+        parent: &Parentage,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<(), Error> {
+        let (named, class) = match parent {
+            Parentage::Home(home) => {
+                let class = Ran::read(&self.home.dir.join(home), home).map(|ran| ran.class);
+                (Some(home.as_str()), class.ok())
+            }
+            Parentage::Parents(class) => (None, Some(class.clone())),
+        };
+        let mut hubs = BTreeMap::new();
+        for job in self.list()? {
+            let Kind::Pool(name) = &job.kind else {
+                continue;
+            };
+            // A job submitted for the pool since the run listed the fleet's
+            // jobs publishes a record of its own, which the withdrawal,
+            // written past the last record, would withdraw.
+            if *name == pool.pool {
+                return Err(Error::new(format!(
+                    "pool `{}` has job {} ({}), which was not listed when this run began, so its record is not withdrawn. Nothing above it stops: run this again",
+                    pool.pool, job.id, job.state
+                )));
+            }
+            if job.state != "RUNNING" || hubs.contains_key(name) {
+                continue;
+            }
+            let dir = self.home.dir.join(name);
+            let of_parent = named == Some(name.as_str())
+                || class.as_ref().is_some_and(|class| {
+                    Ran::read(&dir, name).is_ok_and(|ran| &ran.class == class)
+                });
+            if of_parent && let Some(address) = hubs::address(&dir, &job.id)? {
+                hubs.insert(name.clone(), address);
+            }
+        }
+        let mut asked: Vec<String> = hubs.keys().cloned().collect();
+        if let Some(at) = asked.iter().position(|name| Some(name.as_str()) == named) {
+            let first = asked.remove(at);
+            asked.insert(0, first);
+        }
+        if asked.is_empty() {
+            let named = match parent {
+                Parentage::Home(home) => format!("`{home}`"),
+                Parentage::Parents(class) => format!("of class `{class}`"),
+            };
+            say(&format!(
+                "withdraw: pool `{}`'s job is gone, and no hub of its parent {named} runs: nothing can withdraw its record, and no parent offers it work",
+                pool.pool
+            ));
+            return Ok(());
+        }
+        for home in asked {
+            let answer = Hubs {
+                slurm: &mut *self.slurm,
+                reach: self.home.reach,
+                hubs: &hubs,
+            }
+            .withdraw(&home, &pool.class, &pool.pool, self.waits.objects)?;
+            match answer {
+                Answer::Body(_) => {
+                    let done = match &pool.seen {
+                        Withdrawal::Shared { directory } => {
+                            format!("wrote its withdrawal in the {directory} directory")
+                        }
+                        Withdrawal::Relay { .. } => "withdrew its record".to_string(),
+                    };
+                    say(&format!(
+                        "withdraw: pool `{}`'s job is gone; parent `{home}`'s hub {done}",
+                        pool.pool
+                    ));
+                    return Ok(());
+                }
+                Answer::NotFound => continue,
+                Answer::NoHub(why) | Answer::Failed(why) => {
+                    return Err(Error::new(format!(
+                        "pool `{}`'s job is gone, and parent `{home}`'s hub did not withdraw its record (`POST /v1/ext/gdl-pool/children/{}/{}/withdraw` on its control port): {}. Nothing above it stops: run this again",
+                        pool.pool,
+                        pool.class,
+                        pool.pool,
+                        why.trim()
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Decide what the apply submits and keeps, from what runs: a pool or
@@ -883,10 +1038,11 @@ impl Site for SlurmPlace<'_> {
 
     /// The fleet's jobs on the site, of `scope`: for [`Scope::Replaced`],
     /// the pools whose job runs another recipe, once the reconcile has
-    /// refused what it must; for [`Scope::Prune`], the pools the fleet no
-    /// longer runs; for [`Scope::Pools`], every pool; for [`Scope::Rest`],
-    /// the directory's job and any job that joins a pool with none. Each
-    /// pool's joining jobs stop with it.
+    /// refused what it must, and the pools the fleet no longer runs whose
+    /// job is gone; for [`Scope::Prune`], the pools the fleet no longer
+    /// runs; for [`Scope::Pools`], every pool, those whose job is gone
+    /// included; for [`Scope::Rest`], the directory's job and any job
+    /// that joins a pool with none. Each pool's joining jobs stop with it.
     fn live(&mut self, place: &str, scope: Scope) -> Result<Running, Error> {
         if !self.home(place) {
             return Ok(Running::default());
@@ -894,8 +1050,17 @@ impl Site for SlurmPlace<'_> {
         self.found = Found::default();
         self.cancelled = 0;
         let mut grouped = self.grouped()?;
+        let listed: BTreeSet<String> = grouped.pools.keys().cloned().collect();
         let running = match scope {
-            Scope::Replaced => return self.reconcile(grouped),
+            Scope::Replaced => {
+                let wanted = self.wanted.pools.clone();
+                let mut running = self.reconcile(grouped)?;
+                // A pool the fleet no longer runs whose job is gone is
+                // withdrawn now, before anything changes: its parents still
+                // run as they ran, and `--replace` may stop one of them.
+                self.jobless(&listed, |pool| !wanted.contains_key(pool), &mut running)?;
+                return Ok(running);
+            }
             Scope::Prune => {
                 let wanted = self.wanted.pools.clone();
                 let jobs = grouped.one_each(|pool| !wanted.contains_key(pool))?;
@@ -905,7 +1070,9 @@ impl Site for SlurmPlace<'_> {
             }
             Scope::Pools => {
                 let jobs = grouped.one_each(|_| true)?;
-                self.stopping(jobs, &mut grouped.joins)?
+                let mut running = self.stopping(jobs, &mut grouped.joins)?;
+                self.jobless(&listed, |_| true, &mut running)?;
+                running
             }
             Scope::Rest => {
                 self.found.rest.extend(grouped.directories);
@@ -927,9 +1094,19 @@ impl Site for SlurmPlace<'_> {
         })
     }
 
-    /// A pool's job that runs but whose hub has not said where it listens
-    /// cannot be drained, so it is not stopped.
-    fn refuse_unwithdrawn(&mut self, _place: &str, pool: &Stopping) -> Result<(), Error> {
+    /// A pool whose job is gone is withdrawn through a parent's hub
+    /// ([`SlurmPlace::withdraw_gone`]). A pool's job that runs but whose
+    /// hub has not said where it listens cannot be drained, so it is not
+    /// stopped.
+    fn withdrawn_without_hub(
+        &mut self,
+        _place: &str,
+        pool: &Stopping,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<(), Error> {
+        if let Some(parent) = self.found.gone.remove(&pool.pool) {
+            return self.withdraw_gone(pool, &parent, say);
+        }
         let job = self
             .found
             .pools

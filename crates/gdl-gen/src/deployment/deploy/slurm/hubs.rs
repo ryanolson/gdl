@@ -175,6 +175,23 @@ impl Hubs<'_> {
     }
 }
 
+impl Hubs<'_> {
+    /// `POST /v1/ext/gdl-pool/children/{class}/{pool}/withdraw` on
+    /// `parent`'s hub's control port: it writes the withdrawal of `pool`,
+    /// whose hub is gone, past its last record. 2xx once stored; 404 when
+    /// the parent holds no record of it.
+    pub(super) fn withdraw(
+        &mut self,
+        parent: &str,
+        class: &str,
+        pool: &str,
+        budget: Duration,
+    ) -> Result<Answer, Error> {
+        let route = format!("/children/{class}/{pool}/withdraw");
+        self.call(parent, Listener::Control, &route, true, budget)
+    }
+}
+
 impl HubRoutes for Hubs<'_> {
     fn drain(&mut self, pool: &str, budget: Duration) -> Result<(), Error> {
         match self.call(pool, Listener::Control, "/drain", true, budget)? {

@@ -48,9 +48,15 @@ pub(super) trait Site {
     /// The routes of the hubs in `place`.
     fn hub(&mut self, place: &str) -> Box<dyn HubRoutes + '_>;
 
-    /// Refuse to remove `pool` of `place`, whose hub is gone, unless it is
-    /// known to have withdrawn its record.
-    fn refuse_unwithdrawn(&mut self, place: &str, pool: &Stopping) -> Result<(), Error>;
+    /// Show that `pool` of `place`, whose hub is gone, has withdrawn its
+    /// record, or withdraw it through a parent's hub where the site can;
+    /// refused otherwise, and then `pool` is not removed.
+    fn withdrawn_without_hub(
+        &mut self,
+        place: &str,
+        pool: &Stopping,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<(), Error>;
 
     /// Stop what waits to join `pools` of `place`, before they drain: once
     /// a pool stops, it has no hub to join.

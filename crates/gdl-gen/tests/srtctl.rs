@@ -580,7 +580,11 @@ fn launch(cluster: &Shared, id: u64, recipe: &Value) -> Result<(), String> {
                     .env("GDL_HUB__PUBLIC_PORT", public.to_string())
                     .env("GDL_HUB__CONTROL_PORT", control.to_string())
                     .env("GDL_POOL__HUB", format!("127.0.0.1:{public}"))
-                    .env("GDL_SYSTEM__PORT", "0");
+                    .env("GDL_SYSTEM__PORT", "0")
+                    // The api example's `Http` source listens on a fixed
+                    // port, which a second fleet on this host would take
+                    // too: a test running beside this one, for one.
+                    .env("GDL_FRONTEND__LISTEN", format!("127.0.0.1:{}", free_port()));
             }
             let mut process = Running(
                 command
@@ -842,61 +846,108 @@ fn find(calls: &[String], from: usize, prefix: &str) -> usize {
         .unwrap_or_else(|| panic!("no call `{prefix}` after {from} in {calls:#?}"))
 }
 
+/// A fleet's scratch directories, its built programs, and the fake Slurm
+/// that runs them.
+struct Up {
+    fake: Fake,
+    bins: PathBuf,
+    state: PathBuf,
+    spec: PathBuf,
+    fleet: PathBuf,
+    digests: PathBuf,
+    target: PathBuf,
+    /// `<run_dir>/api`: the fleet's directory.
+    fleet_dir: PathBuf,
+    _temp: tempfile::TempDir,
+}
+
+impl Up {
+    /// Build the fleet's programs and start the fake Slurm: nothing is
+    /// submitted yet.
+    fn new() -> Self {
+        let temp = tempfile::Builder::new()
+            .prefix("gdl-srtctl-")
+            .tempdir()
+            .expect("scratch");
+        let dir = temp.path();
+        let (srtctl, run_dir, pools, state, bins) = (
+            dir.join("srt-slurm"),
+            dir.join("runs"),
+            dir.join("pools"),
+            dir.join("state"),
+            dir.join("fakes"),
+        );
+        for made in [&srtctl, &run_dir, &pools] {
+            std::fs::create_dir_all(made).expect("a directory");
+        }
+        let spec = spec_file(dir);
+        let fleet = fleet_file(dir, &srtctl, &run_dir);
+        let digests = dir.join("images.json");
+        images(&spec, &fleet, &digests);
+        let (bin, hub) = build(&spec, dir);
+        fakes(&bins, &real_curl());
+        let fake = Fake::start(
+            &state,
+            Cluster {
+                next: 1001,
+                jobs: BTreeMap::new(),
+                hold: BTreeSet::from(["gdl-api-model-x-01-join-engine".to_string()]),
+                srtctl,
+                bin,
+                hub,
+                pools,
+                failures: Vec::new(),
+            },
+        );
+        Self {
+            fake,
+            bins,
+            state,
+            spec,
+            fleet,
+            digests,
+            target: target("examples"),
+            fleet_dir: run_dir.join("api"),
+            _temp: temp,
+        }
+    }
+
+    /// `cargo gdl deploy`: whether it succeeded, and what it said.
+    fn deploy(&self) -> (bool, String) {
+        let deploy: Vec<&std::ffi::OsStr> = vec![
+            "deploy".as_ref(),
+            "--spec".as_ref(),
+            self.spec.as_os_str(),
+            "--fleet".as_ref(),
+            self.fleet.as_os_str(),
+            "--images".as_ref(),
+            self.digests.as_os_str(),
+            "--local".as_ref(),
+            "--target-dir".as_ref(),
+            self.target.as_os_str(),
+        ];
+        gdl(&self.bins, &self.state, &deploy)
+    }
+
+    /// `cargo gdl down`: whether it succeeded, and what it said.
+    fn down(&self) -> (bool, String) {
+        gdl(
+            &self.bins,
+            &self.state,
+            &["down".as_ref(), "--fleet".as_ref(), self.fleet.as_os_str()],
+        )
+    }
+}
+
 #[test]
 fn a_fleet_deploys_on_a_slurm_site_and_comes_down_children_first() {
-    let temp = tempfile::Builder::new()
-        .prefix("gdl-srtctl-")
-        .tempdir()
-        .expect("scratch");
-    let dir = temp.path();
-    let (srtctl, run_dir, pools, state, bins) = (
-        dir.join("srt-slurm"),
-        dir.join("runs"),
-        dir.join("pools"),
-        dir.join("state"),
-        dir.join("fakes"),
-    );
-    for made in [&srtctl, &run_dir, &pools] {
-        std::fs::create_dir_all(made).expect("a directory");
-    }
-    let spec = spec_file(dir);
-    let fleet = fleet_file(dir, &srtctl, &run_dir);
-    let digests = dir.join("images.json");
-    images(&spec, &fleet, &digests);
-    let (bin, hub) = build(&spec, dir);
-    fakes(&bins, &real_curl());
-    let fake = Fake::start(
-        &state,
-        Cluster {
-            next: 1001,
-            jobs: BTreeMap::new(),
-            hold: BTreeSet::from(["gdl-api-model-x-01-join-engine".to_string()]),
-            srtctl: srtctl.clone(),
-            bin,
-            hub,
-            pools,
-            failures: Vec::new(),
-        },
-    );
-    let target = target("examples");
-    let deploy: Vec<&std::ffi::OsStr> = vec![
-        "deploy".as_ref(),
-        "--spec".as_ref(),
-        spec.as_os_str(),
-        "--fleet".as_ref(),
-        fleet.as_os_str(),
-        "--images".as_ref(),
-        digests.as_os_str(),
-        "--local".as_ref(),
-        "--target-dir".as_ref(),
-        target.as_os_str(),
-    ];
+    let up = Up::new();
+    let (fake, fleet_dir) = (&up.fake, &up.fleet_dir);
 
     // The first deploy submits the directory's job, then each pool's, and
     // ends once each pool's hub answers its health.
-    let fleet_dir = run_dir.join("api");
-    let (ok, said) = gdl(&bins, &state, &deploy);
-    assert!(ok, "{said}\n{}", fake.report(&fleet_dir));
+    let (ok, said) = up.deploy();
+    assert!(ok, "{said}\n{}", fake.report(fleet_dir));
     assert!(
         said.contains("wait: every pool's health answers 200"),
         "{said}"
@@ -949,7 +1000,7 @@ fn a_fleet_deploys_on_a_slurm_site_and_comes_down_children_first() {
     }
 
     // A second deploy of the same fleet submits nothing.
-    let (ok, said) = gdl(&bins, &state, &deploy);
+    let (ok, said) = up.deploy();
     assert!(ok, "{said}");
     let again = fake.calls();
     assert_eq!(
@@ -970,11 +1021,7 @@ fn a_fleet_deploys_on_a_slurm_site_and_comes_down_children_first() {
     // `down` stops the child pool, then the global pool, then the
     // directory's job.
     let from = fake.calls().len();
-    let (ok, said) = gdl(
-        &bins,
-        &state,
-        &["down".as_ref(), "--fleet".as_ref(), fleet.as_os_str()],
-    );
+    let (ok, said) = up.down();
     assert!(ok, "{said}\n{:#?}", fake.calls());
     let calls = fake.calls();
     let cancel_waiting = find(
@@ -1029,5 +1076,62 @@ fn a_fleet_deploys_on_a_slurm_site_and_comes_down_children_first() {
             );
         }
     }
+    assert!(held.failures.is_empty(), "{:?}", held.failures);
+}
+
+/// The child pool's job is lost with its node: its hub and segment are
+/// killed, and Slurm no longer lists the job, while its record is still in
+/// the directory. `down` withdraws the record once, on the global pool's
+/// real hub, which writes the withdrawal in the directory and answers 204;
+/// then the global pool and the directory's job go as before.
+#[test]
+fn down_withdraws_a_pool_whose_job_is_gone_through_its_parents_hub() {
+    let up = Up::new();
+    let (ok, said) = up.deploy();
+    assert!(ok, "{said}\n{}", up.fake.report(&up.fleet_dir));
+    {
+        let mut held = up.fake.cluster.lock().expect("the cluster");
+        let job = held.jobs.get_mut(&1003).expect("the child's job");
+        for step in &mut job.steps {
+            let _ = step.process.0.kill();
+            let _ = step.process.exits_within(WAIT);
+        }
+        job.state = "NODE_FAIL".into();
+    }
+
+    let from = up.fake.calls().len();
+    let (ok, said) = up.down();
+    let calls = up.fake.calls();
+    assert!(ok, "{said}\n{calls:#?}");
+    let withdraw = find(&calls, from, "curl ");
+    assert!(
+        calls[withdraw].contains("--request POST")
+            && calls[withdraw].ends_with("/v1/ext/gdl-pool/children/model_x/model-x-01/withdraw"),
+        "{}",
+        calls[withdraw]
+    );
+    assert_eq!(
+        calls[from..]
+            .iter()
+            .filter(|call| call.ends_with("/withdraw"))
+            .count(),
+        1,
+        "{calls:#?}"
+    );
+    let terminate = find(&calls, withdraw + 1, "scancel --signal=TERM");
+    assert_eq!(calls[terminate], "scancel --signal=TERM 1002.1");
+    find(&calls, terminate + 1, "scancel 1002");
+    assert!(
+        !calls[from..].iter().any(|call| call.contains("1003")),
+        "{calls:#?}"
+    );
+    assert!(
+        said.contains(
+            "withdraw: pool `model-x-01`'s job is gone; parent `global-us`'s hub wrote its withdrawal in the DynamoDB directory"
+        ),
+        "{said}"
+    );
+    assert_eq!(up.fake.listed(), Vec::<String>::new());
+    let held = up.fake.cluster.lock().expect("the cluster");
     assert!(held.failures.is_empty(), "{:?}", held.failures);
 }

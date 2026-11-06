@@ -272,7 +272,12 @@ impl Site for Kubernetes<'_> {
         })
     }
 
-    fn refuse_unwithdrawn(&mut self, place: &str, pool: &Stopping) -> Result<(), Error> {
+    fn withdrawn_without_hub(
+        &mut self,
+        place: &str,
+        pool: &Stopping,
+        _say: &mut dyn FnMut(&str),
+    ) -> Result<(), Error> {
         let at = self.clusters.get(place).at();
         proxy::withdrawn_without_hub(self.kube, at, pool, &self.waits)
     }
