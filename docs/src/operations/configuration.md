@@ -43,9 +43,13 @@ The launch refuses:
 | `host` | required | the hub's host name or address |
 | `public_port` | 1337 (`gdl_model::HUB_PUBLIC_PORT`) | the hub's public listener |
 | `control_port` | 8337 (`gdl_model::HUB_CONTROL_PORT`) | the hub's control listener |
-| `heartbeat_ms` | 5000 | the lease's heartbeat. 0 is refused |
+| `heartbeat_ms` | 5000 | the lease's heartbeat. 0 is refused, and so is a heartbeat not shorter than `instance_lease_ms` |
+| `instance_lease_ms` | 30000 (`InstanceLease::DEFAULT_LEASE`) | how long the hub keeps the instance's registration without a heartbeat. The hub reads it; the instance only checks its heartbeat against it. At least 1, and longer than `prune_ms`. Not the `[pool] lease_ms` of the pool's record |
+| `prune_ms` | 10000 (`InstanceLease::DEFAULT_PRUNE`) | how often the hub drops the registrations whose lease has passed. The hub reads it; the instance only checks it. At least 1 |
 
-The `gdl-hub` binary serves on 1337 and 8337, unless `GDL_HUB__PUBLIC_PORT` and `GDL_HUB__CONTROL_PORT` name other ports. [Discovery: rosters and the hub](../concepts/hub.md) describes the lease.
+The `gdl-hub` binary serves on 1337 and 8337, unless `GDL_HUB__PUBLIC_PORT` and `GDL_HUB__CONTROL_PORT` name other ports. It keeps an instance's registration 30 s without a heartbeat and prunes every 10 s, unless `GDL_HUB__INSTANCE_LEASE_MS` and `GDL_HUB__PRUNE_MS` say otherwise, and refuses to start, naming the variable, with a value that is not a whole number, a value of 0, or a lease not longer than the prune period. It reads these four variables as a segment reads them: a name in any case and with space around it, the last of two spellings winning, and a value with space around it. A hub dropping a dead instance sooner is the reason to shorten them: a dead instance stays listed for the lease and up to one prune period. [Discovery: rosters and the hub](../concepts/hub.md) describes the lease.
+
+The hub and its segments read the same `GDL_HUB__` variables, so set the instance lease on both: on the hub, which keeps it, and on every segment of the pool, which refuses to start with a heartbeat that the lease would not outlast (`gdl_model::check_lease`, the rule a pool's `lease_ms` follows against its `heartbeat_ms`). A segment checks only what it is given. A lease set on the hub alone, as when the hub and the segments run with environments of their own, is not checked against the segments' heartbeat, and a lease shorter than their heartbeat drops live instances. Keep `heartbeat_ms` a sixth of the lease or less, as the defaults are. A segment built before these keys refuses them as unknown, so set them only with segments at least as new as the hub. No fleet sets them yet ([The hub's instance lease is not a fleet key](limitations.md#the-hubs-instance-lease-is-not-a-fleet-key)).
 
 ## `[runtime]`
 

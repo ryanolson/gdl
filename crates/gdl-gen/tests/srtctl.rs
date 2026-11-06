@@ -299,6 +299,9 @@ struct Cluster {
     front: Option<u16>,
     /// Each recipe submitted, as it was when submitted.
     recipes: Vec<Value>,
+    /// Variables every process of a pool's job gets after the recipe's own,
+    /// as a pool's environment would add them.
+    env: Vec<(String, String)>,
 }
 
 /// When every pool's job ends, as the fake `squeue` says: its end, and the
@@ -600,11 +603,18 @@ fn hub_control(dir: &Path) -> Option<u16> {
 
 /// Run job `id` of `recipe` as srt-slurm runs it.
 fn launch(cluster: &Shared, id: u64, recipe: &Value) -> Result<(), String> {
-    let (bin, hub_bin, pools, logs) = {
+    let (bin, hub_bin, pools, logs, pool_env) = {
         let mut held = cluster.lock().expect("the cluster");
         held.jobs.get_mut(&id).expect("a job").state = "RUNNING".into();
         let logs = held.logs.join(id.to_string());
-        (held.bin.clone(), held.hub.clone(), held.pools.clone(), logs)
+        let env = held.env.clone();
+        (
+            held.bin.clone(),
+            held.hub.clone(),
+            held.pools.clone(),
+            logs,
+            env,
+        )
     };
     std::fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
     let mounts: BTreeMap<String, PathBuf> = recipe["extra_mount"]
@@ -736,7 +746,8 @@ fn launch(cluster: &Shared, id: u64, recipe: &Value) -> Result<(), String> {
             }
             command
                 .env("GDL_POOL__DIRECTORY", "dir")
-                .env("GDL_POOL__DIR", &pools);
+                .env("GDL_POOL__DIR", &pools)
+                .envs(pool_env.iter().cloned());
             if is_hub {
                 // The ports its record and its address file name: the
                 // fake's nodes share one host.
@@ -1226,6 +1237,7 @@ impl Up {
                 failures: Vec::new(),
                 front: None,
                 recipes: Vec::new(),
+                env: Vec::new(),
             },
         );
         Self {
@@ -1490,6 +1502,124 @@ fn down_withdraws_a_pool_whose_job_is_gone_through_its_parents_hub() {
     );
     assert_eq!(up.fake.listed(), Vec::<String>::new());
     let held = up.fake.cluster.lock().expect("the cluster");
+    assert!(held.failures.is_empty(), "{:?}", held.failures);
+}
+
+/// The hub's instance lease in [`a_pool_stays_up_when_one_of_its_segments_dies`]:
+/// short, so that the hub drops a dead instance in a few seconds, not the
+/// default 30 s and its 10 s prune.
+const LEASE: Duration = Duration::from_millis(3000);
+const PRUNE: Duration = Duration::from_millis(250);
+
+/// One segment instance of a running pool dies, as a node that Slurm
+/// takes out of a job under `--no-kill` takes it: SIGKILL, with no stop
+/// and no leave. The pool's hub drops it once its lease lapses, the pool's
+/// health says `degraded` or `unavailable`, and the hub and the job stay
+/// up. The hub's lease is short ([`LEASE`]), set on every process of the
+/// pool's job, so the wait is bounded by it.
+#[test]
+fn a_pool_stays_up_when_one_of_its_segments_dies() {
+    let up = Up::new();
+    // The hub and its segments read the same variables: the segments
+    // check their heartbeat, a tenth of the lease, against it.
+    up.fake.cluster.lock().expect("the cluster").env = [
+        ("GDL_HUB__INSTANCE_LEASE_MS", LEASE.as_millis()),
+        ("GDL_HUB__PRUNE_MS", PRUNE.as_millis()),
+        ("GDL_HUB__HEARTBEAT_MS", LEASE.as_millis() / 10),
+    ]
+    .map(|(name, millis)| (name.to_string(), millis.to_string()))
+    .into();
+    let (ok, said) = up.deploy();
+    assert!(ok, "{said}\n{}", up.fake.report(&up.fleet_dir));
+    let model = up.fleet_dir.join("model-x-01");
+    until_listed(&model, "engine", 1);
+
+    let killed = {
+        let mut held = up.fake.cluster.lock().expect("the cluster");
+        let job = held.jobs.get_mut(&1003).expect("the model pool's job");
+        let engine = job
+            .steps
+            .iter_mut()
+            .find(|step| step.service == "engine")
+            .expect("its engine");
+        engine.process.0.kill().expect("SIGKILL");
+        let status = engine.process.exits_within(WAIT);
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(9)
+        );
+        Instant::now()
+    };
+
+    // The lease and one prune, with room for a busy host.
+    let bound = LEASE + PRUNE + Duration::from_secs(5);
+    while listed(&model, "engine") != Some(0) {
+        assert!(
+            killed.elapsed() < bound,
+            "the hub lists {:?} engines {bound:?} after one was killed\n{}",
+            listed(&model, "engine"),
+            up.fake.report(&up.fleet_dir)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let address = std::fs::read_to_string(model.join("hub.1003.address")).expect("its address");
+    let public = port_of(
+        address
+            .split_whitespace()
+            .next()
+            .expect("its public address"),
+    );
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let health = get(public, "/v1/ext/gdl-pool/health");
+        let state = health
+            .as_ref()
+            .and_then(|(_, body)| serde_json::from_str::<Value>(body).ok())
+            .and_then(|body| body["state"].as_str().map(str::to_string));
+        if let (Some((503, _)), Some("degraded" | "unavailable")) = (&health, state.as_deref()) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pool's health: {health:?}\n{}",
+            up.fake.report(&up.fleet_dir)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // The job runs on: Slurm lists it, and its hub has not exited.
+    let squeue = Command::new(up.bins.join("squeue"))
+        .args([
+            "--jobs=1003",
+            "--all",
+            "--states=all",
+            "--noheader",
+            "--format=%i|%T|%j|%k",
+        ])
+        .env("GDL_FAKE_SLURM", &up.state)
+        .stdin(Stdio::null())
+        .output()
+        .expect("squeue");
+    let listed = String::from_utf8_lossy(&squeue.stdout);
+    assert!(
+        listed.starts_with("1003|RUNNING|gdl-api-model-x-01|"),
+        "{listed}"
+    );
+    let mut held = up.fake.cluster.lock().expect("the cluster");
+    let hub = held
+        .jobs
+        .get_mut(&1003)
+        .expect("the job")
+        .steps
+        .iter_mut()
+        .find(|step| step.service == "hub")
+        .expect("its hub")
+        .process
+        .0
+        .try_wait()
+        .expect("a state");
+    assert_eq!(hub, None, "the hub exited");
     assert!(held.failures.is_empty(), "{:?}", held.failures);
 }
 

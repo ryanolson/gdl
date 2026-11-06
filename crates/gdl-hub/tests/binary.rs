@@ -93,6 +93,34 @@ fn the_binary_refuses_a_backend_it_cannot_publish_to() {
     }
 }
 
+/// The binary refuses an instance lease it cannot keep before it binds a
+/// port, naming the variable: here one no longer than its prune period.
+#[test]
+fn the_binary_refuses_an_instance_lease_it_cannot_keep() {
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-hub-binary-")
+        .tempdir()
+        .expect("a directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_gdl-hub"))
+        .arg(deployment(&dir))
+        .env("GDL_HUB__PUBLIC_PORT", "0")
+        .env("GDL_HUB__CONTROL_PORT", "0")
+        .env("GDL_HUB__INSTANCE_LEASE_MS", "250")
+        .env("GDL_HUB__PRUNE_MS", "250")
+        .stdin(Stdio::null())
+        .output()
+        .expect("the binary runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(
+            "GDL_HUB__INSTANCE_LEASE_MS: is 250; it must be longer than the prune period, 250 ms"
+        ),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("gdl-hub: serving"), "{stderr}");
+}
+
 /// A hub built without its `dynamodb` feature refuses the `dynamodb`
 /// backend, and the tables step, before it binds a port, and says how to
 /// build one that takes them.

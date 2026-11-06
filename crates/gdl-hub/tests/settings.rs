@@ -1,4 +1,5 @@
-//! The hub binary's settings: a pool's settings from `GDL_POOL__*`, and
+//! The hub binary's settings: its server's from `GDL_HUB__*`, a pool's
+//! settings from `GDL_POOL__*`, and
 //! the hub they make. Every hub here runs in process on OS-assigned ports.
 
 use std::collections::BTreeMap;
@@ -6,7 +7,10 @@ use std::time::Duration;
 
 use figment::Jail;
 use futures::StreamExt;
-use gdl_hub::{PoolTiming, hub_builder, pool_from_env, pool_from_vars};
+use gdl_hub::{
+    PoolTiming, hub_builder, hub_config_from_env, hub_config_from_vars, pool_from_env,
+    pool_from_vars,
+};
 use gdl_model::{
     DeploymentSpec, DirectoryBackend, HopInfo, HubTiming, Manifest, NodeInfo, Placement,
     PoolPolicy, PoolSettings, PropertyInfo, PropertyKey, Role, TypeInfo, WatchCaps,
@@ -921,4 +925,146 @@ async fn every_backend_refuses_a_static_property_its_class_does_not_provide() {
             "{directory:?}: {error}"
         );
     }
+}
+
+/// With none of its variables set, the hub binary keeps an instance's
+/// registration 30 s without a heartbeat and prunes every 10 s, on the
+/// deployment's ports: the hub's lease is six default instance
+/// heartbeats.
+#[test]
+fn with_no_hub_variable_the_hub_keeps_a_30_s_instance_lease() {
+    let config =
+        hub_config_from_vars([("GDL_PROFILE".into(), "release".into())]).expect("the defaults");
+    assert_eq!(config.server.ttl, Duration::from_secs(30));
+    assert_eq!(config.server.prune_interval, Duration::from_secs(10));
+    assert_eq!(config.server.public_port, 1337);
+    assert_eq!(config.server.control_port, 8337);
+    Jail::expect_with(|_| {
+        let read = hub_config_from_env().map_err(|e| e.to_string())?;
+        assert_eq!(read.server.ttl, Duration::from_secs(30));
+        assert_eq!(read.server.prune_interval, Duration::from_secs(10));
+        Ok(())
+    });
+}
+
+/// `GDL_HUB__INSTANCE_LEASE_MS` and `GDL_HUB__PRUNE_MS` set the hub's
+/// instance lease, as the environment gives them.
+#[test]
+fn the_hubs_instance_lease_is_read_from_the_environment() {
+    let given = [
+        ("GDL_HUB__INSTANCE_LEASE_MS", "3000"),
+        ("GDL_HUB__PRUNE_MS", "250"),
+        ("GDL_HUB__PUBLIC_PORT", "0"),
+        ("GDL_HUB__CONTROL_PORT", "0"),
+    ];
+    let config =
+        hub_config_from_vars(given.map(|(n, v)| (n.into(), v.into()))).expect("a short lease");
+    assert_eq!(config.server.ttl, Duration::from_millis(3000));
+    assert_eq!(config.server.prune_interval, Duration::from_millis(250));
+    assert_eq!(
+        (config.server.public_port, config.server.control_port),
+        (0, 0)
+    );
+    Jail::expect_with(|jail| {
+        for (name, value) in given {
+            jail.set_env(name, value);
+        }
+        let read = hub_config_from_env().map_err(|e| e.to_string())?;
+        assert_eq!(read.server.ttl, config.server.ttl);
+        assert_eq!(read.server.prune_interval, config.server.prune_interval);
+        Ok(())
+    });
+}
+
+/// An instance lease the hub cannot keep is refused, naming its variable:
+/// a value that is not a whole number of milliseconds, a lease or prune period of 0, and a
+/// lease not longer than its prune period, with either left at its
+/// default.
+#[test]
+fn an_instance_lease_the_hub_cannot_keep_is_refused_by_name() {
+    for (given, name, says) in [
+        (
+            vec![("GDL_HUB__INSTANCE_LEASE_MS", "3s")],
+            "GDL_HUB__INSTANCE_LEASE_MS",
+            "expected u64",
+        ),
+        (
+            vec![("GDL_HUB__INSTANCE_LEASE_MS", "0")],
+            "GDL_HUB__INSTANCE_LEASE_MS",
+            "at least 1",
+        ),
+        (
+            vec![("GDL_HUB__PRUNE_MS", "0")],
+            "GDL_HUB__PRUNE_MS",
+            "at least 1",
+        ),
+        (
+            vec![
+                ("GDL_HUB__INSTANCE_LEASE_MS", "1000"),
+                ("GDL_HUB__PRUNE_MS", "1000"),
+            ],
+            "GDL_HUB__INSTANCE_LEASE_MS",
+            "longer than the prune period, 1000 ms",
+        ),
+        // The prune period left at its default, 10 s.
+        (
+            vec![("GDL_HUB__INSTANCE_LEASE_MS", "5000")],
+            "GDL_HUB__INSTANCE_LEASE_MS",
+            "longer than the prune period, 10000 ms",
+        ),
+        // The lease left at its default, 30 s.
+        (
+            vec![("GDL_HUB__PRUNE_MS", "30000")],
+            "GDL_HUB__INSTANCE_LEASE_MS",
+            "longer than the prune period, 30000 ms",
+        ),
+    ] {
+        let vars = given.iter().map(|(n, v)| ((*n).into(), (*v).into()));
+        let refused = hub_config_from_vars(vars).expect_err("refused");
+        let refused = refused.to_string();
+        assert!(refused.contains(name), "{given:?}: {refused}");
+        assert!(refused.contains(says), "{given:?}: {refused}");
+    }
+}
+
+/// The hub matches its `GDL_HUB__` variables without regard to case, as a
+/// segment does: a pool that sets them once for both, in any case, gives
+/// both the same lease and ports, and the last of two spellings wins.
+#[test]
+fn the_hubs_variables_are_matched_without_regard_to_case() {
+    let given = [
+        ("GDL_HUB__Instance_Lease_Ms", "3000"),
+        ("gdl_hub__prune_ms", "250"),
+        ("Gdl_Hub__Public_Port", "0"),
+        ("GDL_HUB__CONTROL_PORT", "9000"),
+        ("gdl_hub__control_port", "0"),
+    ];
+    let config =
+        hub_config_from_vars(given.map(|(n, v)| (n.into(), v.into()))).expect("the variables");
+    assert_eq!(config.server.ttl, Duration::from_millis(3000));
+    assert_eq!(config.server.prune_interval, Duration::from_millis(250));
+    assert_eq!(
+        (config.server.public_port, config.server.control_port),
+        (0, 0)
+    );
+}
+
+/// The hub reads a variable as a segment does: a name with space around
+/// it is the same name, the last of two spellings wins, and a value with
+/// space around it is the number it holds. A name the segment reads as
+/// another key is not read by the hub either, so the two never take one
+/// pool's variables as two leases.
+#[test]
+fn the_hub_reads_its_variables_as_a_segment_does() {
+    let given = [
+        ("GDL_HUB__INSTANCE_LEASE_MS", "3000"),
+        ("GDL_HUB__INSTANCE_LEASE_MS ", "60000"),
+        ("GDL_HUB__PRUNE_MS", " 250 "),
+        ("GDL_HUB__HOST", "hub"),
+        ("GDL_HUB__HEARTBEAT_MS", "300"),
+    ];
+    let config =
+        hub_config_from_vars(given.map(|(n, v)| (n.into(), v.into()))).expect("the variables");
+    assert_eq!(config.server.ttl, Duration::from_secs(60));
+    assert_eq!(config.server.prune_interval, Duration::from_millis(250));
 }

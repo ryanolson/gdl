@@ -1,8 +1,11 @@
 //! Run one graph discovery hub: `gdl-hub deployment.json`. A pool's hub
 //! takes its pool's settings from `GDL_POOL__*` variables. The hub listens
 //! on the deployment's ports unless `GDL_HUB__PUBLIC_PORT` and
-//! `GDL_HUB__CONTROL_PORT` name others (0 lets the OS choose), the
-//! variables a segment reads for where its hub is. Once it serves, it
+//! `GDL_HUB__CONTROL_PORT` name others (0 lets the OS choose), and keeps
+//! an instance's registration 30 s without a heartbeat, pruning every 10 s,
+//! unless `GDL_HUB__INSTANCE_LEASE_MS` and `GDL_HUB__PRUNE_MS` say
+//! otherwise: the variables a segment reads as its `[hub]` table
+//! ([`gdl_hub::hub_config_from_env`]). Once it serves, it
 //! prints the addresses it bound on stderr. Log events go to stderr, at
 //! the level `RUST_LOG` sets (`warn` by default).
 //!
@@ -25,20 +28,8 @@
 //! record's heartbeat, and writes `[hub]` with its `host` and
 //! `public_port`, which the segment takes as an override file. A pool it
 //! cannot join writes nothing, and exits non-zero with one line.
-use gdl_model::{DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT};
+use gdl_model::DeploymentSpec;
 use tokio::signal::unix::{SignalKind, signal};
-use velo_hub::HubConfig;
-
-/// The port that variable `name` gives, else `default`.
-fn port(name: &str, default: u16) -> Result<u16, String> {
-    match std::env::var(name) {
-        Ok(value) => value
-            .parse()
-            .map_err(|e| format!("{name}={value:?}: not a port: {e}")),
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(e) => Err(format!("{name}: {e}")),
-    }
-}
 
 /// How long the hub's runtime waits, once the hub has shut down, for
 /// the blocking calls still running, such as a `dir` directory's read of
@@ -75,7 +66,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut stream = std::net::TcpStream::connect_timeout(
             &(
                 std::net::Ipv4Addr::LOCALHOST,
-                port("GDL_HUB__PUBLIC_PORT", HUB_PUBLIC_PORT)?,
+                gdl_hub::hub_config_from_env()?.server.public_port,
             )
                 .into(),
             std::time::Duration::from_secs(1),
@@ -109,9 +100,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Some((leave, wait)) => Some((leave_at(leave, wait)?, leave)),
         None => None,
     };
-    let mut config = HubConfig::default();
-    config.server.public_port = port("GDL_HUB__PUBLIC_PORT", HUB_PUBLIC_PORT)?;
-    config.server.control_port = port("GDL_HUB__CONTROL_PORT", HUB_CONTROL_PORT)?;
+    let config = gdl_hub::hub_config_from_env()?;
     // SIGTERM as well as SIGINT, both taken before the hub serves. Docker
     // stops a container with SIGTERM, and the hub is the container's first
     // process, for which a signal it does not handle does nothing: a hub

@@ -34,7 +34,7 @@ pub fn pool_from_vars(
 ) -> Result<Option<PoolSettings>, PoolError> {
     // One provider to a variable, so that figment's provenance of a value
     // names the variable that gave it, whichever of several set it last.
-    let figment = variables(vars).fold(Figment::new(), Figment::merge);
+    let figment = variables(POOL_PREFIX, vars).fold(Figment::new(), Figment::merge);
     let given = figment
         .extract::<Dict>()
         .map_err(|e| PoolError::new(format!("GDL_POOL__*: {e}")))?;
@@ -64,6 +64,66 @@ pub fn pool_from_vars(
         .map_err(|e| PoolError::new(e.to_string()))?;
     pool.check_hub(&layout).map_err(named)?;
     Ok(Some(pool))
+}
+
+/// The hub binary's server settings, from the environment: its ports,
+/// `GDL_HUB__PUBLIC_PORT` and `GDL_HUB__CONTROL_PORT` (1337 and 8337 by
+/// default, 0 lets the OS choose), and its instance lease,
+/// `GDL_HUB__INSTANCE_LEASE_MS` and `GDL_HUB__PRUNE_MS`
+/// ([`gdl_model::InstanceLease`], 30 s and 10 s by default). A segment
+/// reads the same variables as its `[hub]` table.
+pub fn hub_config_from_env() -> Result<HubConfig, PoolError> {
+    hub_config_from_vars(std::env::vars_os())
+}
+
+/// [`hub_config_from_env`] from `vars`, rather than from the process's
+/// environment. The variables are read as a segment reads its `[hub]`
+/// table from them ([`variables`]), so the hub and its segments take one
+/// variable as one value: a name in any case and with surrounding space,
+/// the last of two spellings winning, and a value as figment parses it.
+/// The segment's own keys, such as `host` and `heartbeat_ms`, are left to
+/// it. A value that does not fit its key, a lease or prune period of 0,
+/// and a lease not longer than the prune period are refused, naming the
+/// variable.
+pub fn hub_config_from_vars(
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<HubConfig, PoolError> {
+    /// The keys of `[hub]` that the hub reads.
+    #[derive(serde::Deserialize)]
+    struct Server {
+        public_port: Option<u16>,
+        control_port: Option<u16>,
+        instance_lease_ms: Option<u64>,
+        prune_ms: Option<u64>,
+    }
+    // One provider to a variable, so that an error names the variable
+    // that gave the value.
+    let figment = variables(HUB_PREFIX, vars).fold(Figment::new(), Figment::merge);
+    let server: Server = figment
+        .extract()
+        .map_err(|e| PoolError::new(format!("{HUB_PREFIX}*: {e}")))?;
+    let millis =
+        |value: Option<u64>, default| value.map_or(default, std::time::Duration::from_millis);
+    let lease = gdl_model::InstanceLease::new(
+        millis(
+            server.instance_lease_ms,
+            gdl_model::InstanceLease::DEFAULT_LEASE,
+        ),
+        millis(server.prune_ms, gdl_model::InstanceLease::DEFAULT_PRUNE),
+    )
+    .map_err(|(key, why)| {
+        let name = figment.find_metadata(key).map_or_else(
+            || format!("{HUB_PREFIX}{}", key.to_ascii_uppercase()),
+            |given| given.name.to_string(),
+        );
+        PoolError::new(format!("{name}: {why}"))
+    })?;
+    let mut config = HubConfig::default();
+    config.server.public_port = server.public_port.unwrap_or(gdl_model::HUB_PUBLIC_PORT);
+    config.server.control_port = server.control_port.unwrap_or(gdl_model::HUB_CONTROL_PORT);
+    config.server.ttl = lease.lease();
+    config.server.prune_interval = lease.prune();
+    Ok(config)
 }
 
 /// The hub of `spec`: [`GraphAdmission`], and with `pool`, the pool's
@@ -233,7 +293,7 @@ pub fn directory_from_vars(
     // value that a generator quoted so that it reads as a string, such as
     // a table named `"123"`.
     let mut given = std::collections::BTreeMap::new();
-    for variable in variables(vars) {
+    for variable in variables(POOL_PREFIX, vars) {
         given.insert(variable.key.clone(), variable);
     }
     let mut take = |key: &str| -> Result<Option<String>, PoolError> {
@@ -272,20 +332,29 @@ pub(crate) fn by_variable(problems: Problems) -> PoolError {
     PoolError::new(Problems(named.collect()).to_string())
 }
 
-/// The `GDL_POOL__` variables of `vars`, one provider to each, in their
+/// The prefix of a pool's variables, which its hub and its segments read.
+pub(crate) const POOL_PREFIX: &str = "GDL_POOL__";
+
+/// The prefix of the hub's server variables, which a segment reads as its
+/// `[hub]` table.
+const HUB_PREFIX: &str = "GDL_HUB__";
+
+/// The variables of `vars` under `prefix`, one provider to each, in their
 /// order, so that a later variable overrides an earlier one as within one
 /// provider: the keys after the prefix, matched without regard to case,
-/// with `__` between nested keys.
+/// with `__` between nested keys. A segment reads its variables the same
+/// way (`gdl-runtime`'s `process/origins.rs`), so a variable that both
+/// read gives both one value.
 pub(crate) fn variables(
+    prefix: &'static str,
     vars: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> impl Iterator<Item = Variable> {
-    const PREFIX: &str = "GDL_POOL__";
-    vars.into_iter().filter_map(|(name, value)| {
+    vars.into_iter().filter_map(move |(name, value)| {
         let name = name.to_string_lossy().trim().to_string();
         let key = name
-            .get(..PREFIX.len())
-            .filter(|prefix| prefix.eq_ignore_ascii_case(PREFIX))
-            .map(|_| name[PREFIX.len()..].replace("__", ".").to_ascii_lowercase())?;
+            .get(..prefix.len())
+            .filter(|given| given.eq_ignore_ascii_case(prefix))
+            .map(|_| name[prefix.len()..].replace("__", ".").to_ascii_lowercase())?;
         (!key.split('.').any(str::is_empty)).then(|| Variable {
             key,
             value: value.to_string_lossy().to_string(),

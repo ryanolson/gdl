@@ -1475,20 +1475,14 @@ pub fn check_hub_timing(timing: &HubTiming) -> Result<(), Problems> {
             message,
         )))
     };
-    let (heartbeat_ms, lease_ms) = (millis(timing.heartbeat), millis(timing.lease));
     if timing.heartbeat < Duration::from_millis(1) {
         return at("heartbeat_ms", "is 0; it is at least 1".into());
     }
     if timing.lease < Duration::from_millis(1) {
         return at("lease_ms", "is 0; it is at least 1".into());
     }
-    if timing.lease <= timing.heartbeat {
-        return at(
-            "lease_ms",
-            format!(
-                "is {lease_ms}; it must be longer than the heartbeat, {heartbeat_ms} ms, or readers let the record lapse between two publishes"
-            ),
-        );
+    if let Err(why) = crate::check_lease(timing.heartbeat, timing.lease) {
+        return at("lease_ms", why);
     }
     if timing.watch_buffer == 0 {
         return at("watch_buffer", "is 0; it is at least 1".into());

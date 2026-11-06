@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use figment::Jail;
 use figment::providers::{Format, Toml};
@@ -467,6 +468,83 @@ fn a_zero_heartbeat_is_refused() {
         panic!("a lease without a cadence")
     };
     assert!(error.to_string().contains("heartbeat_ms"), "{error}");
+}
+
+/// The hub's instance lease is set on a whole pool through the variables
+/// both read, so an instance takes the hub's keys and checks them: a lease
+/// or prune period of 0, a lease not longer than its prune period, and a
+/// heartbeat not shorter than the lease, which the hub would drop between
+/// two heartbeats, are refused, naming the key.
+#[test]
+fn an_instance_lease_the_hub_would_refuse_or_outrun_is_refused() {
+    const HUB: &str = "listen = \"127.0.0.1:0\"\n[hub]\nhost = \"hub\"\n";
+    for (keys, key, says) in [
+        ("instance_lease_ms = 0\n", "instance_lease_ms", "at least 1"),
+        ("prune_ms = 0\n", "prune_ms", "at least 1"),
+        (
+            "instance_lease_ms = 1000\nprune_ms = 1000\n",
+            "instance_lease_ms",
+            "longer than the prune period",
+        ),
+        (
+            "heartbeat_ms = 2000\ninstance_lease_ms = 2000\nprune_ms = 100\n",
+            "instance_lease_ms",
+            "longer than the heartbeat",
+        ),
+        // The heartbeat left at its default, 5 s.
+        (
+            "instance_lease_ms = 3000\nprune_ms = 100\n",
+            "instance_lease_ms",
+            "longer than the heartbeat",
+        ),
+    ] {
+        let Err(error) = load(&[&format!("{HUB}{keys}")]) else {
+            panic!("{keys} is taken")
+        };
+        let error = error.to_string();
+        assert!(error.contains(&format!("`hub.{key}`")), "{keys}: {error}");
+        assert!(error.contains(says), "{keys}: {error}");
+    }
+    // The rule a pool's record lease follows (`gdl-model/tests/settings.rs`).
+    let rule = gdl_model::check_lease(Duration::from_secs(2), Duration::from_secs(2))
+        .expect_err("a lease as long as its heartbeat");
+    let Err(error) = load(&[&format!(
+        "{HUB}heartbeat_ms = 2000\ninstance_lease_ms = 2000\nprune_ms = 100\n"
+    )]) else {
+        panic!("a heartbeat as long as the lease is taken")
+    };
+    assert!(error.to_string().contains(&rule), "{error}");
+    for keys in [
+        "",
+        "heartbeat_ms = 300\ninstance_lease_ms = 3000\nprune_ms = 250\n",
+    ] {
+        load(&[&format!("{HUB}{keys}")]).unwrap_or_else(|e| panic!("{keys}: {e}"));
+    }
+}
+
+/// The variables that set the hub's instance lease join an instance's
+/// hub table, as its heartbeat's does: a pool sets them once for both.
+#[test]
+fn the_hubs_instance_lease_variables_join_the_hub_table() {
+    Jail::expect_with(|jail| {
+        jail.create_file(
+            "config.toml",
+            "listen = \"127.0.0.1:0\"\n[hub]\nhost = \"hub\"\n",
+        )?;
+        jail.set_env("GDL_HUB__INSTANCE_LEASE_MS", "3000");
+        jail.set_env("GDL_HUB__PRUNE_MS", "250");
+        jail.set_env("GDL_HUB__HEARTBEAT_MS", "300");
+        Config::load(["config.toml"]).map_err(|e| e.to_string())?;
+        jail.set_env("GDL_HUB__HEARTBEAT_MS", "3000");
+        let Err(error) = Config::load(["config.toml"]) else {
+            return Err("a heartbeat as long as the lease is taken".into());
+        };
+        assert!(
+            error.to_string().contains("longer than the heartbeat"),
+            "{error}"
+        );
+        Ok(())
+    });
 }
 
 /// A deployment of two segments in two classes: `front`, in `global`,

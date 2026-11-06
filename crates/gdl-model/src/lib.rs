@@ -18,6 +18,7 @@ mod encoding;
 mod fleet;
 mod fresh;
 mod hash;
+mod lease;
 mod leave;
 mod manifest;
 mod metrics;
@@ -46,6 +47,7 @@ pub use fleet::{
     Quantities, Quantity, Resources, SlurmReach, SlurmSite, Toleration,
 };
 pub use fresh::FreshChild;
+pub use lease::{InstanceLease, check_lease};
 pub use leave::LeaveBy;
 pub use manifest::{
     HopInfo, ItemInfo, Manifest, NodeInfo, PropertyInfo, PropertyNeed, TypeInfo, UnaryInfo,

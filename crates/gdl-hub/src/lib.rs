@@ -67,7 +67,8 @@ pub use quorum::Quorum;
 pub use report::{HubDirectory, VerifiedReport};
 pub use resolve::{ResolvedHub, resolve_from_args, resolve_hub};
 pub use setup::{
-    directory_from_vars, hub_builder, hub_builder_with, pool_from_env, pool_from_vars,
+    directory_from_vars, hub_builder, hub_builder_with, hub_config_from_env, hub_config_from_vars,
+    pool_from_env, pool_from_vars,
 };
 
 use gdl_model::{DeploymentSpec, SegmentRegistration};

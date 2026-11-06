@@ -14,7 +14,7 @@ use gdl_model::DirectoryBackend;
 use gdl_pools::{DirDirectory, PoolDirectory, PoolEvent, PoolRecord, PoolState, PoolView};
 
 use crate::PoolError;
-use crate::setup::{by_variable, variables};
+use crate::setup::{POOL_PREFIX, by_variable, variables};
 
 /// The `[hub]` table of a pool's hub, as its record names the hub's public
 /// listener. The record has no control port, so the table names none and
@@ -285,7 +285,7 @@ fn directory_from_vars(
     let mut dir = None;
     let mut prefix = None;
     let mut endpoints = None;
-    for variable in variables(vars.iter().cloned()) {
+    for variable in variables(POOL_PREFIX, vars.iter().cloned()) {
         // Only these keys are decoded: a joining job shares its pool's
         // variables, such as `GDL_POOL__HEARTBEAT_MS`, which are not strings.
         // Each value as the hub reads it, through figment, which decodes a

@@ -741,6 +741,12 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** replace a dead instance with a joiner: `cargo gdl join` ([Grow and shrink a running pool](../guides/slurm.md#grow-and-shrink-a-running-pool)). Run `cargo gdl deploy` again for a pool whose job ended.
 - **Lifts:** srt-slurm services that restart, and a hub that keeps its registrations across a restart.
 
+### The hub's instance lease is not a fleet key
+- **What:** no fleet sets `GDL_HUB__INSTANCE_LEASE_MS` and `GDL_HUB__PRUNE_MS`, so a deployed pool's hub keeps a dead instance listed for up to 40 s, the default 30 s lease and one 10 s prune. `cargo gdl k8s` refuses a cluster `env` key under `GDL_HUB__`, and a Slurm site has no `env` ([Segment settings](configuration.md#hub)).
+- **Why:** both the hub and every segment of the pool must get the same values, and the renders write `GDL_HUB__` variables themselves.
+- **Workaround:** set both variables on the hub and on every segment of a pool you run yourself, such as one in a Compose file you write.
+- **Lifts:** a pool key that the renders write to the hub and the segments alike.
+
 ### A running pool whose hub has not started cannot be stopped
 - **What:** `cargo gdl down`, a deploy's prune, and `--replace` refuse a pool whose job runs but whose hub has not written `hub.<job id>.address`, and cancel nothing.
 - **Why:** without the hub's address, nothing can drain the pool, and a pool cancelled undrained stays held by its parents until its lease lapses.

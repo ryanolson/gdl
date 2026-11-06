@@ -52,6 +52,8 @@ An instance keeps its registration alive with a heartbeat every `[hub] heartbeat
 - after 5 heartbeat periods with no answer, or
 - at once, when the hub says that it holds no registration for the instance.
 
+The hub drops a registration whose lease has passed: 30 s with no heartbeat, found by a prune every 10 s, so a crashed instance stays listed for up to 40 s. `GDL_HUB__INSTANCE_LEASE_MS` and `GDL_HUB__PRUNE_MS` shorten both, for a pool that must see a dead instance go sooner. The segments read the same variables as `[hub] instance_lease_ms` and `prune_ms`, and refuse a heartbeat that the lease would not outlast, by the rule a pool's record lease follows against its heartbeat. So set them on the hub and its segments alike ([Segment settings](../operations/configuration.md#hub)). The lease is velo-hub's store TTL, rather than a timer of gdl's own, so the hub's admission and listing see a registration go exactly when velo-hub drops it.
+
 A lost lease cancels the instance's context. The instance drains and exits with the lease's error ([Segment lifecycle](lifecycle.md)). The hub keeps registrations in memory, so a hub that restarts holds none. Every segment then loses its lease at its next heartbeat, and the deployment must start the segments again.
 
 ### Following membership

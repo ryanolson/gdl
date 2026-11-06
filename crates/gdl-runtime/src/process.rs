@@ -48,7 +48,8 @@ use system::{Health, Phase, SystemSettings};
 /// roster = "/run/roster"  # a directory shared by every instance, fresh for each deployment
 /// # [hub]                 # or the discovery hub; exactly one of the two. An unspecified listen
 /// # host = "hub"          # address then advertises what HOSTNAME resolves to. `public_port`,
-///                         # `control_port`, and `heartbeat_ms` (5000) are optional
+///                         # `control_port`, `heartbeat_ms` (5000), and the hub's own
+///                         # `instance_lease_ms` (30000) and `prune_ms` (10000) are optional
 /// rendezvous_ms = 30000   # optional: how long to wait for the other instances
 /// hub_wait_ms = 300000    # optional, with a hub: how long the start waits for the hub to answer
 /// [instances]             # optional, with a roster: instances per segment, 1 by default
@@ -174,7 +175,11 @@ fn default_hub_wait_ms() -> u64 {
 /// `control_port` say otherwise, and a heartbeat every `heartbeat_ms`. The
 /// heartbeat is a sixth of the hub's default lease, so that one slow
 /// answer does not cost it; the lease is lost after five missed
-/// heartbeats. One table, so that a value set in the environment
+/// heartbeats. `instance_lease_ms` and `prune_ms` are the hub's own lease
+/// ([`gdl_model::InstanceLease`]), which the `gdl-hub` binary reads from the
+/// same variables: an instance only checks that its heartbeat is shorter
+/// than the lease, so that a lease set on a whole pool cannot drop its live
+/// instances. One table, so that a value set in the environment
 /// (`GDL_HUB__HEARTBEAT_MS`) joins the file's rather than replacing it.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -189,6 +194,30 @@ struct HubAddress {
     control_port: u16,
     #[serde(default = "default_heartbeat_ms")]
     heartbeat_ms: u64,
+    #[serde(default = "default_instance_lease_ms")]
+    instance_lease_ms: u64,
+    #[serde(default = "default_prune_ms")]
+    prune_ms: u64,
+}
+
+impl HubAddress {
+    /// Refuse a heartbeat of 0, an instance lease the hub would refuse,
+    /// and a heartbeat not shorter than the lease, by the rule a pool's
+    /// record lease follows ([`gdl_model::check_lease`]).
+    fn check(&self) -> Result<()> {
+        if self.heartbeat_ms == 0 {
+            return Err(placement(
+                "`hub.heartbeat_ms` is 0; the lease needs a cadence",
+            ));
+        }
+        let lease = gdl_model::InstanceLease::new(
+            Duration::from_millis(self.instance_lease_ms),
+            Duration::from_millis(self.prune_ms),
+        )
+        .map_err(|(key, why)| placement(format!("`hub.{key}` {why}")))?;
+        gdl_model::check_lease(Duration::from_millis(self.heartbeat_ms), lease.lease())
+            .map_err(|why| placement(format!("`hub.instance_lease_ms` {why}")))
+    }
 }
 
 fn default_public_port() -> u16 {
@@ -197,6 +226,14 @@ fn default_public_port() -> u16 {
 
 fn default_control_port() -> u16 {
     gdl_model::HUB_CONTROL_PORT
+}
+
+fn default_instance_lease_ms() -> u64 {
+    gdl_model::InstanceLease::DEFAULT_LEASE.as_millis() as u64
+}
+
+fn default_prune_ms() -> u64 {
+    gdl_model::InstanceLease::DEFAULT_PRUNE.as_millis() as u64
 }
 
 fn default_heartbeat_ms() -> u64 {
@@ -295,10 +332,8 @@ impl<H: Hosted> ProcessConfig<H> {
         };
         config.discovery()?;
         config.system.validate()?;
-        if config.hub.as_ref().is_some_and(|hub| hub.heartbeat_ms == 0) {
-            return Err(placement(
-                "`hub.heartbeat_ms` is 0; the lease needs a cadence",
-            ));
+        if let Some(hub) = &config.hub {
+            hub.check()?;
         }
         Ok(config)
     }
@@ -507,6 +542,7 @@ impl<H> ProcessConfig<H> {
                     public_port,
                     control_port,
                     heartbeat_ms,
+                    ..
                 } = hub;
                 // A hub that is not up yet is waited for, not ready
                 // meanwhile: on Kubernetes every pod starts at once, and

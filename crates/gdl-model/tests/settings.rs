@@ -1310,3 +1310,62 @@ fn a_pools_hub_leaves_by_a_time_only_when_it_drains_on_stop() {
         assert!(problem.message.contains(says), "{bad}: {problem}");
     }
 }
+
+/// A lease kept by a heartbeat follows one rule wherever it is kept: a
+/// pool's record lease as long as its heartbeat is refused with the reason
+/// [`gdl_model::check_lease`] gives, the reason an instance's `[hub]` table
+/// gives for its heartbeat against the hub's instance lease
+/// (`gdl-runtime/tests/process.rs`).
+#[test]
+fn a_lease_as_long_as_its_heartbeat_is_refused_by_one_rule() {
+    let rule = gdl_model::check_lease(Duration::from_secs(5), Duration::from_secs(5))
+        .expect_err("a lease as long as its heartbeat");
+    assert!(
+        rule.contains("longer than the heartbeat, 5000 ms"),
+        "{rule}"
+    );
+    let value: toml::Value = toml::from_str(
+        "name = 'g'\nclass = 'global'\nregion = 'r'\nheartbeat_ms = 5000\nlease_ms = 5000\n",
+    )
+    .expect("toml");
+    let problems = PoolSettings::read(value).expect_err("refused");
+    assert_eq!(problems.0[0].message, rule, "{problems}");
+    gdl_model::check_lease(Duration::from_secs(5), Duration::from_millis(5001))
+        .expect("a lease longer than its heartbeat");
+}
+
+/// The hub's instance lease: 30 s, pruned every 10 s, unless set; a lease
+/// or prune period under 1 ms, and a lease not longer than its prune
+/// period, are refused, naming the key.
+#[test]
+fn an_instance_lease_is_longer_than_its_prune_period() {
+    use gdl_model::InstanceLease;
+    let lease = InstanceLease::default();
+    assert_eq!(lease.lease(), Duration::from_secs(30));
+    assert_eq!(lease.prune(), Duration::from_secs(10));
+    for (lease, prune, key, says) in [
+        (0, 10, "instance_lease_ms", "at least 1"),
+        (30, 0, "prune_ms", "at least 1"),
+        (
+            250,
+            250,
+            "instance_lease_ms",
+            "longer than the prune period, 250 ms",
+        ),
+        (
+            100,
+            250,
+            "instance_lease_ms",
+            "longer than the prune period, 250 ms",
+        ),
+    ] {
+        let (named, why) =
+            InstanceLease::new(Duration::from_millis(lease), Duration::from_millis(prune))
+                .expect_err("refused");
+        assert_eq!(named, key, "{lease} {prune}: {why}");
+        assert!(why.contains(says), "{lease} {prune}: {why}");
+    }
+    let short = InstanceLease::new(Duration::from_millis(251), Duration::from_millis(250))
+        .expect("a lease longer than its prune period");
+    assert_eq!(short.lease(), Duration::from_millis(251));
+}
