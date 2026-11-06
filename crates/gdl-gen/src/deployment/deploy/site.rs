@@ -2,7 +2,8 @@
 //! and of a pool's hub there. The driver (`super`) owns the order of the
 //! steps, the stop of pools children first, each drain and the wait for
 //! its withdrawal, and the wait for health. A site owns how each step is
-//! done where it runs: Kubernetes (`super::kubernetes`) is the one site.
+//! done where it runs: Kubernetes (`super::kubernetes`), and Slurm
+//! (`super::slurm`).
 //! See `docs/src/development/architecture.md`.
 
 use std::path::Path;
@@ -28,7 +29,7 @@ pub(super) trait Site {
 
     /// The fleet's files, from what `input` gives, each image named by its
     /// digest there.
-    fn render(&self, input: &RenderInput<'_>) -> Result<Files, Error>;
+    fn render(&mut self, input: &RenderInput<'_>) -> Result<Files, Error>;
 
     /// Apply `files`, the render, to every place, and write them to `out`
     /// when given, as they were applied.
@@ -49,7 +50,16 @@ pub(super) trait Site {
 
     /// Refuse to remove `pool` of `place`, whose hub is gone, unless it is
     /// known to have withdrawn its record.
-    fn hubless(&mut self, place: &str, pool: &Stopping) -> Result<(), Error>;
+    fn refuse_unwithdrawn(&mut self, place: &str, pool: &Stopping) -> Result<(), Error>;
+
+    /// Stop what waits to join `pools` of `place`, before they drain: once
+    /// a pool stops, it has no hub to join.
+    fn stop_joining(
+        &mut self,
+        place: &str,
+        pools: &[&str],
+        say: &mut dyn FnMut(&str),
+    ) -> Result<(), Error>;
 
     /// Remove `which` of what [`Site::live`] found in `place`, of the
     /// pools the driver stops: after their drains, segments before hubs.
@@ -106,6 +116,10 @@ pub(super) trait HubRoutes {
     /// `GET /v1/ext/gdl-pool/withdrawn` on `pool`'s hub.
     fn withdrawn(&mut self, pool: &str, budget: Duration) -> Result<Answer, Error>;
 
+    /// `GET /v1/ext/gdl-pool/instances` on `pool`'s hub's control port: its
+    /// members.
+    fn instances(&mut self, pool: &str, budget: Duration) -> Result<Answer, Error>;
+
     /// `GET /v1/ext/gdl-pool/report/{class}/{pool}` on `parent`'s hub: the
     /// record of `pool` that a relay parent holds.
     fn report(
@@ -133,6 +147,10 @@ pub(super) enum Answer {
 /// Which pools of a place [`Site::live`] reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Scope {
+    /// What the apply about to run replaces, and cannot change where it
+    /// runs, every pool's parent noted: refused, before anything changes,
+    /// when the apply cannot run.
+    Replaced,
     /// What the last apply no longer renders, every pool's parent noted.
     Prune,
     /// Every pool of the fleet, every pool's parent noted.
@@ -180,17 +198,40 @@ pub(super) struct Driven {
 pub(super) struct Stopping {
     pub(super) pool: String,
     pub(super) class: String,
-    /// Its parent pool, whose hub holds its record under the relay
-    /// directory: none for a shared pool under the DynamoDB directory.
-    pub(super) home: Option<String>,
     /// The longest stop grace of its segments, in seconds.
     pub(super) grace: u64,
     /// Whether its hub is there to drain it. A pool whose hub is gone
     /// cannot drain: only its parent can show that it withdrew.
     pub(super) hub: bool,
-    /// Whether it publishes to the DynamoDB directory, where its parent's
-    /// hub holds no record of it to show that it withdrew.
-    pub(super) dynamodb: bool,
+    /// Where its withdrawal is seen.
+    pub(super) seen: Withdrawal,
+}
+
+/// Where a drained pool's withdrawal is seen: the directory it publishes
+/// to decides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Withdrawal {
+    /// Under the relay directory, its parent's hub holds its record, and
+    /// stops holding it once the pool withdraws. `home` is that parent,
+    /// when the pool names one: a pool with `parents` alone names none.
+    Relay { home: Option<String> },
+    /// Under a shared directory, DynamoDB or etcd, no parent's hub holds a
+    /// record of it: only its own hub says that it withdrew. `directory`
+    /// names it, for a message.
+    Shared { directory: &'static str },
+}
+
+impl Withdrawal {
+    /// How a pool whose `GDL_POOL__DIRECTORY` is `value` withdraws: under
+    /// a shared directory, `None` for the relay.
+    pub(super) fn shared(value: &str) -> Option<Self> {
+        let directory = match value {
+            "dynamodb" => "DynamoDB",
+            "etcd" => "etcd",
+            _ => return None,
+        };
+        Some(Self::Shared { directory })
+    }
 }
 
 /// Whether a pool is ready.
@@ -204,9 +245,14 @@ pub(super) enum Readiness {
 impl Stopping {
     /// Its parent, whose hub holds its record under the relay directory: a
     /// pool with `parents` alone is refused, since under the relay only
-    /// one parent's hub holds a pool's record.
+    /// one parent's hub holds a pool's record. Only a pool under the relay
+    /// is asked.
     pub(super) fn relay_home(&self) -> Result<&str, Error> {
-        self.home.as_deref().ok_or_else(|| {
+        let home = match &self.seen {
+            Withdrawal::Relay { home } => home.as_deref(),
+            Withdrawal::Shared { .. } => None,
+        };
+        home.ok_or_else(|| {
             Error::new(format!(
                 "pool `{}` names no `home`, and under the relay directory only its one parent's hub can show that it withdrew, so it is not deleted",
                 self.pool

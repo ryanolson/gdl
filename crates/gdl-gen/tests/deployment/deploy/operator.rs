@@ -42,9 +42,11 @@ fn deploy_allowing(
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
         allow_pool_restart: allow,
+        images: None,
+        replace: false,
     };
     let mut said = Vec::new();
-    gdl_gen::deploy(&how, &mut docker, kube, &mut |step| {
+    gdl_gen::deploy(&how, &mut docker, kube, &mut NoSlurm, &mut |step| {
         said.push(step.to_string())
     })?;
     Ok(said)
@@ -627,7 +629,13 @@ fn down_leaves_a_gdl_pool_recreated_by_another_fleet_after_the_list() {
         kube,
         replaced: false,
     };
-    let result = gdl_gen::down(&files.fleet, &waits(), &mut raced, &mut |_| {});
+    let result = gdl_gen::down(
+        &files.fleet,
+        &waits(),
+        &mut raced,
+        &mut NoSlurm,
+        &mut |_| {},
+    );
     assert!(raced.replaced, "the pool was recreated after the list");
     let key = ("GdlPool".to_string(), "model-x-us".to_string());
     let replacement = raced.kube.objects["kind-use1"].get(&key);
@@ -715,10 +723,18 @@ fn assert_parent_survives_child_conflict(prune: bool) {
             waits: waits(),
             sources: gdl_gen::Sources::Fetched,
             allow_pool_restart: false,
+            images: None,
+            replace: false,
         };
-        gdl_gen::deploy(&how, &mut docker, &mut raced, &mut |_| {})
+        gdl_gen::deploy(&how, &mut docker, &mut raced, &mut NoSlurm, &mut |_| {})
     } else {
-        gdl_gen::down(&files.fleet, &waits(), &mut raced, &mut |_| {})
+        gdl_gen::down(
+            &files.fleet,
+            &waits(),
+            &mut raced,
+            &mut NoSlurm,
+            &mut |_| {},
+        )
     };
     assert!(raced.replaced, "replace the child after it is listed");
     let error = result

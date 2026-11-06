@@ -1,12 +1,15 @@
 //! `cargo gdl deploy` and `cargo gdl down`: a fleet applied to its
-//! clusters, and taken off them. See `docs/src/guides/kubernetes.md`.
+//! clusters, and taken off them. See `docs/src/guides/kubernetes.md` and
+//! `docs/src/guides/slurm.md`.
 //!
 //! This module is the driver: it runs the steps in order and stops at the
 //! first failure, stops pools children first across the fleet, drains each
 //! pool it removes and waits for its withdrawal, and waits for each pool's
-//! health. A site does each step where the pools run ([`site::Site`]); the
+//! health. A site does each step where the pools run ([`site::Site`]): the
 //! Kubernetes site, through `kubectl` and the kube contexts the user
-//! already has, is the one there is ([`kubernetes`]).
+//! already has ([`kubernetes`]); and the Slurm site, through srt-slurm and
+//! Slurm's own commands on a login node ([`slurm`]). A fleet runs on one
+//! kind of site.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -18,14 +21,20 @@ use serde_json::Value;
 use super::images::{Digests, Docker, images};
 use crate::{Error, Sources, Spec};
 
+mod command;
 mod kubernetes;
 mod order;
 mod site;
+mod slurm;
 
 use kubernetes::Kubernetes;
 pub use kubernetes::{Kube, Kubectl, Reply};
 use order::Order;
-use site::{Answer, Driven, Readiness, RenderInput, Running, Scope, Site, Stopping, Which};
+use site::{
+    Answer, Driven, Readiness, RenderInput, Running, Scope, Site, Stopping, Which, Withdrawal,
+};
+use slurm::SlurmPlace;
+pub use slurm::{Slurm, SlurmCli, SlurmCommand};
 
 /// What `deploy` deploys, and where it builds.
 #[derive(Debug, Clone)]
@@ -48,8 +57,18 @@ pub struct Deploy {
     /// Whether a change that replaces a pool's hub, which drains the pool,
     /// may be applied where the gdl operator runs the pools: it sets each
     /// `GdlPool`'s `allowPoolRestart`. Without it, the operator holds such
-    /// a change, and the deploy stops naming the pool and why.
+    /// a change, and the deploy stops naming the pool and why. Kubernetes
+    /// only.
     pub allow_pool_restart: bool,
+    /// The digests file `cargo gdl images --push --out` wrote: the images
+    /// are not built, and each is named by its digest there. Required for
+    /// a fleet on Slurm, whose login node has no Docker; refused for one on
+    /// Kubernetes, which builds its own.
+    pub images: Option<PathBuf>,
+    /// Whether a pool whose job runs another recipe than the render is
+    /// replaced: drained, cancelled, and submitted again. Without it, the
+    /// deploy refuses such a pool before it changes anything. Slurm only.
+    pub replace: bool,
 }
 
 /// How long `deploy` and `down` wait for what they wait on, and how often
@@ -79,8 +98,10 @@ impl Default for Waits {
     }
 }
 
-/// Deploy the fleet of `how` with `docker` and `kube`, saying each step to
-/// `say`. The steps run in order, and the first that fails stops it:
+/// Deploy the fleet of `how` with `docker` and `kube`, or, for a fleet on
+/// Slurm, with `slurm` ([`deploy_slurm`] lists its steps), saying each step
+/// to `say`. On Kubernetes, the steps run in order, and the first that
+/// fails stops it:
 ///
 /// 1. check the spec and the fleet, as `cargo gdl check --fleet` does, and
 ///    that each cluster's context may create Deployments in its namespace;
@@ -118,6 +139,7 @@ pub fn deploy(
     how: &Deploy,
     docker: &mut dyn Docker,
     kube: &mut dyn Kube,
+    slurm: &mut dyn Slurm,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Error> {
     let problems = crate::check_files(&how.spec, Some(&how.fleet), &how.target);
@@ -128,31 +150,121 @@ pub fn deploy(
     let dgds = super::Dgds::read(&fleet, &how.fleet)
         .map_err(|problems| Error::from(problems.in_file(how.fleet.display())))?;
     let spec = Spec::load(&how.spec).map_err(|e| Error::from(e.in_file(how.spec.display())))?;
-    let mut site = Kubernetes::new(kube, &fleet, how.waits, how.allow_pool_restart)?;
-    let site: &mut dyn Site = &mut site;
-    site.check(&fleet)?;
-    say("check: the spec, the fleet, and each cluster's context");
-    for warning in super::tunables_warnings(&fleet, &dgds) {
-        say(&warning);
+    match Kind::of(&fleet)? {
+        Kind::Kubernetes => {
+            for (given, flag) in [
+                (how.images.is_some(), "--images"),
+                (how.replace, "--replace"),
+            ] {
+                if given {
+                    return Err(Error::new(format!(
+                        "`{flag}` is for a fleet on Slurm: a fleet on Kubernetes builds its own images, and applies each change in place"
+                    )));
+                }
+            }
+            let mut site = Kubernetes::new(kube, &fleet, how.waits, how.allow_pool_restart)?;
+            site.check(&fleet)?;
+            say("check: the spec, the fleet, and each cluster's context");
+            for warning in super::tunables_warnings(&fleet, &dgds) {
+                say(&warning);
+            }
+            let built = images(&spec, &fleet, &dgds, &how.target, true, how.sources, docker)?;
+            say(&format!("images: {} in their registries", built.len()));
+            drive(
+                how,
+                &mut site,
+                &spec,
+                &fleet,
+                &dgds,
+                &Digests::of(&built),
+                say,
+            )
+        }
+        Kind::Slurm => deploy_slurm(how, slurm, &spec, &fleet, &dgds, say),
     }
+}
 
-    let built = images(&spec, &fleet, &dgds, &how.target, true, how.sources, docker)?;
-    say(&format!("images: {} in their registries", built.len()));
+/// Deploy `fleet`, on a Slurm site, as `how` says, with `slurm`. The steps
+/// run in order, and the first that fails stops it:
+///
+/// 1. check the spec and the fleet, as `cargo gdl check --fleet` does; that
+///    `squeue` answers, and that srt-slurm's checkout and the run
+///    directory are directories here;
+/// 2. read each image's digest from `--images`: a login node has no
+///    Docker, and nothing is built;
+/// 3. render the recipes ([`crate::slurm_files`]), and reconcile them with
+///    the fleet's jobs that `squeue` lists: a pool, or the directory, whose
+///    job runs the rendered recipe is kept; one with no job is submitted.
+///    Refused, before anything changes, for two jobs of one pool, for a
+///    directory job of another recipe, and for a pool's job of another
+///    recipe without `--replace`, which drains that pool and cancels its
+///    job, as `down` does;
+/// 4. write the recipes into `<run_dir>/<fleet>`, and to `out` when given;
+/// 5. submit the directory's job when it has none, and wait until the
+///    fleet's pointer names the file of the directory's job: never a file
+///    that an earlier job left;
+/// 6. submit each pool that has no job, with `srtctl apply`;
+/// 7. prune: stop each pool that the fleet no longer runs, as `down` does;
+/// 8. wait until each pool's health answers 200, at the address its hub
+///    wrote; a job that ends meanwhile stops the deploy at once, naming
+///    its id, how Slurm says it ended, and its logs.
+fn deploy_slurm(
+    how: &Deploy,
+    slurm: &mut dyn Slurm,
+    spec: &Spec,
+    fleet: &Fleet,
+    dgds: &super::Dgds,
+    say: &mut dyn FnMut(&str),
+) -> Result<(), Error> {
+    if how.allow_pool_restart {
+        return Err(Error::new(
+            "`--allow-pool-restart` is for a cluster the gdl operator runs: on Slurm, `--replace` replaces a pool whose recipe changed",
+        ));
+    }
+    let Some(file) = &how.images else {
+        return Err(Error::new(
+            "a fleet on Slurm needs `--images`, the digests file `cargo gdl images --push --out` writes on a machine with Docker: a login node has none, and each job pulls its images by digest",
+        ));
+    };
+    let mut site = SlurmPlace::new(slurm, fleet, how.waits, how.replace)?;
+    site.check(fleet)?;
+    say("check: the spec, the fleet, and the Slurm site");
+    let text = std::fs::read_to_string(file)
+        .map_err(|e| Error::new(format!("{}: {e}", file.display())))?;
+    let digests =
+        Digests::from_json(&text).map_err(|e| Error::new(format!("{}: {e}", file.display())))?;
+    say(&format!("images: the digests in {}", file.display()));
+    drive(how, &mut site, spec, fleet, dgds, &digests, say)
+}
 
-    let digests = Digests::of(&built);
+/// The steps of a deploy after its images: render, stop what the apply
+/// replaces, apply, prune, and wait for health.
+fn drive(
+    how: &Deploy,
+    site: &mut dyn Site,
+    spec: &Spec,
+    fleet: &Fleet,
+    dgds: &super::Dgds,
+    digests: &Digests,
+    say: &mut dyn FnMut(&str),
+) -> Result<(), Error> {
     let files = site.render(&RenderInput {
-        spec: &spec,
-        fleet: &fleet,
-        dgds: &dgds,
+        spec,
+        fleet,
+        dgds,
         target: &how.target,
-        digests: &digests,
+        digests,
         sources: how.sources,
     })?;
-    site.apply(&fleet, files, how.out.as_deref(), say)?;
+    // What the apply cannot change where it runs is stopped first, children
+    // first, once the site has refused what it cannot apply.
+    let (order, running) = live(site, fleet, Scope::Replaced)?;
+    stop_in_order(site, &order, &running, &BTreeSet::new(), &how.waits, say)?;
+    site.apply(fleet, files, how.out.as_deref(), say)?;
 
     // Every pool this run renders, in any cluster.
     let retained: BTreeSet<String> = fleet.pools().map(|pool| pool.name).collect();
-    let (order, running) = live(site, &fleet, Scope::Prune)?;
+    let (order, running) = live(site, fleet, Scope::Prune)?;
     stop_in_order(site, &order, &running, &retained, &how.waits, say)?;
     for (place, _) in &running {
         site.finish(place, Scope::Prune, say)?;
@@ -179,18 +291,36 @@ pub fn deploy(
 /// remove both labels from the namespace, which stays, with any Secret in
 /// it. The rest holds the DynamoDB directory's Local and tables Job, which
 /// the hubs of every cluster use: so it goes only once no hub runs in any.
+///
+/// On Slurm, `down` stops each pool's job children first in the same way:
+/// it cancels the jobs that wait to join the pool, drains a pool that has
+/// a parent and waits for its withdrawal, lets the instances of a pool
+/// with none leave on `SIGTERM` until its hub lists none, and cancels the
+/// pool's job and those that joined it. The directory's job goes last.
+/// The fleet's directory on the shared file system stays.
 pub fn down(
     fleet: &Path,
     waits: &Waits,
     kube: &mut dyn Kube,
+    slurm: &mut dyn Slurm,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Error> {
     let fleet = read_fleet(fleet)?;
     fleet
         .check(None)
         .map_err(|errors| Error::from(gdl_model::Problems::from(errors)))?;
-    let mut site = Kubernetes::new(kube, &fleet, *waits, false)?;
-    let site: &mut dyn Site = &mut site;
+    let mut kubernetes;
+    let mut slurm_site;
+    let site: &mut dyn Site = match Kind::of(&fleet)? {
+        Kind::Kubernetes => {
+            kubernetes = Kubernetes::new(kube, &fleet, *waits, false)?;
+            &mut kubernetes
+        }
+        Kind::Slurm => {
+            slurm_site = SlurmPlace::new(slurm, &fleet, *waits, false)?;
+            &mut slurm_site
+        }
+    };
     site.reach()?;
     // Every pool of the fleet stops, children first across the fleet,
     // whatever kind of cluster each runs in.
@@ -303,25 +433,29 @@ fn stop(
         .filter_map(|pool| pool.drain.as_ref())
         .partition(|pool| pool.hub);
     for pool in &hubless {
-        site.hubless(place, pool)?;
+        site.refuse_unwithdrawn(place, pool)?;
     }
+    let names: Vec<&str> = pools.iter().map(|pool| pool.pool.as_str()).collect();
+    site.stop_joining(place, &names, say)?;
     for pool in &draining {
         site.hub(place).drain(&pool.pool, waits.objects)?;
         say(&format!("drain: pool `{}` is draining", pool.pool));
     }
     for pool in &draining {
-        // Under the DynamoDB directory no parent's hub holds the pool's
-        // record, so only the pool's own hub can say it is withdrawn.
-        match pool.dynamodb {
-            true => withdrawn_by_its_hub(site, place, pool, waits)?,
-            false => withdrawn(site, place, pool, waits)?,
+        // Under a shared directory no parent's hub holds the pool's record,
+        // so only the pool's own hub can say it is withdrawn.
+        match pool.seen {
+            Withdrawal::Shared { directory } => {
+                withdrawn_by_its_hub(site, place, pool, directory, waits)?
+            }
+            Withdrawal::Relay { .. } => withdrawn(site, place, pool, waits)?,
         }
         say(&format!("drain: pool `{}` has withdrawn", pool.pool));
     }
     site.remove(place, which)
 }
 
-/// Wait until the hub of `pool`, a pool under the DynamoDB directory, says
+/// Wait until the hub of `pool`, a pool under the shared `directory`, says
 /// that its drained record is withdrawn (`GET /v1/ext/gdl-pool/withdrawn`):
 /// the directory has stored the withdrawal. Its health says so too, but
 /// answers 503 for a drained pool, and Kubernetes' service proxy hides the
@@ -331,6 +465,7 @@ fn withdrawn_by_its_hub(
     site: &mut dyn Site,
     place: &str,
     pool: &Stopping,
+    directory: &str,
     waits: &Waits,
 ) -> Result<(), Error> {
     let bound = Duration::from_secs(pool.grace) + waits.drain;
@@ -352,7 +487,7 @@ fn withdrawn_by_its_hub(
                 }
             };
             return Err(Error::new(format!(
-                "pool `{}` did not say within {} s that its record is withdrawn from the DynamoDB directory, so it is not deleted: {last}",
+                "pool `{}` did not say within {} s that its record is withdrawn from the {directory} directory, so it is not deleted: {last}",
                 pool.pool,
                 bound.as_secs()
             )));
@@ -446,6 +581,36 @@ fn healthy(site: &mut dyn Site, pools: &[(String, String)], waits: &Waits) -> Re
             return Err(Error::new(message));
         }
         std::thread::sleep(waits.interval);
+    }
+}
+
+/// The kind of site a fleet runs on: every cluster of a fleet is of one
+/// kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Kubernetes,
+    Slurm,
+}
+
+impl Kind {
+    /// The kind of `fleet`'s clusters, refused for a fleet with both.
+    fn of(fleet: &Fleet) -> Result<Self, Error> {
+        let (mut slurm, mut kubernetes) = (Vec::new(), Vec::new());
+        for (name, cluster) in fleet.clusters() {
+            match cluster.slurm() {
+                Some(_) => slurm.push(name),
+                None => kubernetes.push(name),
+            }
+        }
+        match (slurm.is_empty(), kubernetes.is_empty()) {
+            (true, _) => Ok(Self::Kubernetes),
+            (false, true) => Ok(Self::Slurm),
+            (false, false) => Err(Error::new(format!(
+                "the fleet has Kubernetes clusters (`{}`) and Slurm sites (`{}`): `cargo gdl deploy` and `cargo gdl down` run a fleet on one kind of site. Split it into a fleet for each",
+                kubernetes.join("`, `"),
+                slurm.join("`, `")
+            ))),
+        }
     }
 }
 

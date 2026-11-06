@@ -1,6 +1,6 @@
 # Deploy a fleet on Slurm
 
-A Slurm site runs each pool of a fleet as one job, which [srt-slurm](https://github.com/NVIDIA/srt-slurm) submits and runs. `cargo gdl slurm` writes the srt-slurm recipes of a fleet's Slurm sites, and the settings each job reads. It needs no Docker, no srt-slurm, and no cluster. No command submits the jobs yet: apply the recipes with `srtctl` by hand ([Limitations](../operations/limitations.md#no-command-runs-a-slurm-site-yet)).
+A Slurm site runs each pool of a fleet as one job, which [srt-slurm](https://github.com/NVIDIA/srt-slurm) submits and runs. `cargo gdl slurm` writes the srt-slurm recipes of a fleet's Slurm sites, and the settings each job reads. It needs no Docker, no srt-slurm, and no cluster. `cargo gdl deploy`, run on a login node of the site, writes the recipes there, submits the jobs, and waits for each pool's health; `cargo gdl down` stops the pools again.
 
 The recipes are written for srt-slurm at commit `acfb4dcc`.
 
@@ -70,11 +70,73 @@ slurm/lab/
 
 Each recipe is one JSON object, which YAML reads as it is. Each job is named `gdl-<fleet>-<pool>`, `gdl-<fleet>-<pool>-join-<segment>`, or `gdl-<fleet>-directory`, and its sbatch comment says what it is: `gdl:<fleet>:<pool>:pool:<hash>`, `gdl:<fleet>:<pool>:join:<hash>`, or `gdl:<fleet>:-:directory:<hash>`. The hash is the first 16 hex digits of a sha256 of the recipe and the settings it mounts, so the same render gives the same hash. A job's name alone does not tell its kind: a pool may be named `x-join-engine`.
 
+## Deploy the fleet
+
+Run `cargo gdl deploy` on a login node of the site, with the digests file from the machine that built the images:
+
+```bash
+cargo gdl deploy --spec gdl.toml --fleet fleet.toml --images images.json
+```
+
+It needs `srtctl`, `squeue`, `scancel`, `sacct`, and `curl` on the `PATH`, and the site's `srtctl` checkout and `run_dir` on this machine. It builds nothing, and reads no credential: `srtctl` runs in its checkout and reads the account and partition from that checkout's `srtslurm.yaml`, and Slurm uses your own session. A fleet runs on one kind of site: `deploy` refuses a fleet with both Slurm sites and Kubernetes clusters, and refuses `--allow-pool-restart`, which is for the gdl operator. `--replace` needs Slurm 23.11.6 or later, as `down` does ([Take the fleet down](#take-the-fleet-down)).
+
+The steps run in order, and the first that fails stops the deploy:
+
+1. Check the spec and the fleet, that `squeue` answers, and that the checkout and the run directory are directories on this machine.
+2. Render the recipes, as `cargo gdl slurm` does, and list the fleet's jobs with `squeue --me --all --states=all`: by default `squeue` leaves out a suspended job, and a job in a hidden partition, which still hold their nodes and their hubs. Each job's comment, `gdl:<fleet>:<pool>:<kind>:<hash>`, says what it is, so no state file is kept.
+3. Reconcile the render with the jobs. A pool, or the directory, whose job runs the same recipe (the same hash) keeps its job. One with no job is submitted. Before anything changes, the deploy refuses two jobs for one pool, whether the fleet still runs it or not, since a second hub of a pool takes the pool's record from the first; a directory job of another recipe, and any pool's job, running or queued, when the directory has no job, since every process reads the store's address once, when it starts (take the fleet down, then deploy it); a job that is ending (`COMPLETING`), whose processes may still run (deploy again once Slurm no longer lists it); and a pool whose job runs another recipe, unless `--replace` is given. With `--replace`, the pool stops as `down` stops it, and its new recipe is submitted.
+4. Write the recipes into `<run_dir>/<fleet>/`. A file that has not changed is not written again.
+5. Submit the directory's job, with `srtctl apply --json`, when it has none, and wait until the fleet's pointer, `directory.endpoint`, names this job's file. A file left by an earlier directory job is never read.
+6. Submit each pool's job that has none.
+7. Stop each pool that the fleet no longer runs, as `down` stops it.
+8. Wait until each pool's hub answers 200 on `/v1/ext/gdl-pool/health`. Each read lists the fleet's jobs once and watches every job the deploy waits on, the directory's and those of pools already ready too: one that ends or is ending (`COMPLETING`) meanwhile stops the deploy at once, with the job's id, the state `sacct` gives, and where its logs are.
+
+```mermaid
+sequenceDiagram
+    participant U as cargo gdl deploy (login node)
+    participant S as srtctl / Slurm
+    participant D as directory job
+    participant H as pool job: hub
+    U->>S: squeue --me: the fleet's jobs, by comment
+    U->>S: srtctl apply -f directory.yaml --json
+    S->>D: the directory's store (DynamoDB Local or etcd)
+    D-->>U: directory.endpoint names directory.<job id>.endpoint
+    U->>S: srtctl apply -f <pool>/pool.yaml --json (each pool with no job)
+    S->>H: the hub on the head node, then the segments
+    H-->>U: hub.<job id>.address in the pool's directory
+    U->>H: GET /v1/ext/gdl-pool/health until 200
+```
+
+A second deploy of an unchanged fleet submits nothing. After a deploy that stopped part way, run it again: it keeps what it submitted, and submits only what is missing.
+
+Each pool's hub writes `<public address> <control address>` to `hub.<job id>.address` in its pool's directory before it starts. `deploy` and `down` call the hub's routes at those addresses with `curl`. Where the login node cannot reach the compute nodes, set `reach = "srun"` on the site: each call then runs as a step of the pool's job, `srun --jobid=<job> --overlap --nodes=1 --ntasks=1 --quiet curl ...`, and needs `curl` on the compute nodes.
+
+Every command has a time limit: 300 s for each `srtctl`, `squeue`, `scancel`, and `sacct`, and what is left of its wait for a hub's route. The wait for the directory's pointer and the wait for health are each 600 s. A job that waits in Slurm's queue for longer stops the deploy: run it again once the job runs, and it keeps the job.
+
+## Take the fleet down
+
+```bash
+cargo gdl down --fleet fleet.toml
+```
+
+`down` stops the fleet's pools children first, one level at a time, across the fleet:
+
+1. It cancels each job that waits to join the pool (`PENDING`), with `scancel --state=PENDING --ctld`, so that the controller applies the filter as it cancels: the pool will have no hub to join. A joiner that starts meanwhile is left to the pool's drain, and cancelled with the pool.
+2. A pool with a parent drains: `POST /v1/ext/gdl-pool/drain` on its hub, then a wait until its hub's `/v1/ext/gdl-pool/withdrawn` says that the directory holds its withdrawal. Then `scancel` cancels its job, and the jobs that joined it.
+3. A pool with no parent, such as a global pool, cannot drain: its hub refuses a drain. `scancel --signal=TERM` goes to each of its segments' steps, not its hub's, and to each job that joined it, once, so that each instance retires and leaves: a second `SIGTERM` would stop an instance at once and cut its drain. Once its hub lists no instance on `/v1/ext/gdl-pool/instances`, `scancel` cancels its job.
+4. A pool's job that still waits in the queue has no hub and no record, and one that is ending (`COMPLETING`) is being stopped: each is cancelled at once. A waiting job is cancelled only while it still waits: one that starts after it was listed is left running, undrained, and `down` stops; run it again to drain it.
+
+The directory's job goes last, once no hub uses it. Each cancel waits, up to 300 s, until `squeue` no longer lists the job, `COMPLETING` included. A job that ended before its `scancel` or its `SIGTERM` reached it is passed over. The fleet's directory on the shared file system stays. `down` refuses a pool with two jobs, and a pool whose job runs but whose hub has not written its address yet, which cannot drain; it cancels nothing then.
+
+A deploy's prune and `--replace` stop a pool the same way.
+
+`down` and `--replace` need Slurm 23.11.6 or later. Before they change anything, they read `scancel --version`, and refuse an older Slurm, or a version they cannot read, in one line that names what they read and the version they need. Before 23.11.6, `scancel --ctld --state=PENDING` filters a listing of its own and then cancels by id, so a pool's job that starts in between would be cancelled while it runs, undrained. A deploy without `--replace` reads the version only when its prune cancels a job that waits in the queue ([Limitations](../operations/limitations.md#down-and---replace-need-slurm-23116-or-later)).
+
 ## A pool's job
 
 A pool's recipe has no frontend (`frontend.type: none`) and these services, which srt-slurm starts in order:
 
-- `hub`, on the head node: `critical` and `terminal`, so the job ends when the hub exits. It is ready when its own `/v1/health` answers 200 on port 1337. It publishes `{node_ip}:1337` as its pool's hub, and drains its pool on the first `SIGTERM` (`GDL_POOL__DRAIN_ON_STOP=true`, for the pool's `stop_wait_ms`).
+- `hub`, on the head node: `critical` and `terminal`, so the job ends when the hub exits. It is ready when its own `/v1/health` answers 200 on port 1337. It publishes `{node_ip}:1337` as its pool's hub, and drains its pool on the first `SIGTERM` (`GDL_POOL__DRAIN_ON_STOP=true`, for the pool's `stop_wait_ms`). Before it starts, it writes `{node_ip}:1337 {node_ip}:8337` to `hub.<job id>.address` in the pool's directory, where `cargo gdl deploy` and `down` read where to reach it; a hub that cannot write the file does not start. The job's teardown removes the file.
 - one service per segment of the pool's class, in name order, on nodes of its own: one instance per node, as many as the pool's `ready` count. Each finds its hub at `{head_ip}` and gives velo `{node_ip}:0`, a port the OS chooses. A segment with `ready` 0 has no service.
 - `spare`, when the pool has `slurm.spare_nodes`: a placeholder that holds those nodes for segments that join inside the job.
 
@@ -117,6 +179,8 @@ The directory's job takes no `signal`. Each pool withdraws its record from the d
 `resolve` waits once it has written the file. srt-slurm probes the file, then asks whether the process still runs: a `resolve` that exited between the two would fail the job. `resolve` is not `critical`: the job's `TERM` before its time limit ends its wait, and srt-slurm would take a critical service's end on a signal as a failure, and cut the segment's drain short. A `resolve` that fails before it writes the file still fails the job, through its probe.
 
 ## Apply the recipes by hand
+
+`cargo gdl deploy` does these steps, and more; by hand, they show what a job runs.
 
 1. Copy `slurm/<site>/` to `<run_dir>/<fleet>/` on the cluster.
 2. On the login node, submit the directory's job, and wait for its endpoint file:

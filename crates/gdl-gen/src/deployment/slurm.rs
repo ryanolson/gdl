@@ -17,6 +17,8 @@ use crate::{Error, Files, Spec};
 
 mod recipe;
 
+pub(crate) use recipe::HUB_ADDRESS;
+
 /// What `cargo gdl slurm` renders a fleet's Slurm sites from, beside the
 /// spec and the fleet.
 pub struct SlurmRender<'a> {

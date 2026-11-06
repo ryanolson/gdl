@@ -2,7 +2,7 @@
 //! writes with its tag, takes only its own keys, and the check refuses
 //! what a Slurm site cannot run.
 
-use gdl_model::{Cluster, Fleet, PoolSlurm, SlurmSite};
+use gdl_model::{Cluster, Fleet, PoolSlurm, SlurmReach, SlurmSite};
 use serde_json::json;
 
 use super::{fleet, laid, problems};
@@ -31,6 +31,7 @@ network_interface = "ib0"
 signal_lead_s = 1200
 no_kill = false
 time_limit = "08:00:00"
+reach = "srun"
 
 [pool.global]
 class = "global"
@@ -76,6 +77,7 @@ fn a_slurm_site_reads_every_key() {
             signal_lead_s: 1200,
             no_kill: false,
             time_limit: Some("08:00:00".into()),
+            reach: SlurmReach::Srun,
         }
     );
     assert_eq!(
@@ -113,6 +115,7 @@ fn a_slurm_site_takes_its_defaults() {
         (&None, &None, &None)
     );
     assert_eq!(site.time_limit, None);
+    assert_eq!(site.reach, SlurmReach::Direct);
     assert_eq!(SlurmSite::DEFAULT_BASE_IMAGE, "debian:bookworm-slim");
 }
 
@@ -149,7 +152,8 @@ fn a_slurm_site_writes_its_kind_first_and_reads_back() {
                 "network_interface": "ib0",
                 "signal_lead_s": 1200,
                 "no_kill": false,
-                "time_limit": "08:00:00"
+                "time_limit": "08:00:00",
+                "reach": "srun"
             }
         })
     );
@@ -165,7 +169,7 @@ fn a_slurm_site_writes_its_kind_first_and_reads_back() {
     );
     // Defaults are not written.
     let small = toml::to_string(&fleet(&on_site(SITE, ""))).expect("toml");
-    for key in ["signal_lead_s", "no_kill", "spare_nodes"] {
+    for key in ["signal_lead_s", "no_kill", "spare_nodes", "reach"] {
         assert!(!small.contains(key), "{key} in:\n{small}");
     }
 }
@@ -480,4 +484,28 @@ fn a_time_limit_is_at_most_a_year() {
             "{problems:?}"
         );
     }
+}
+
+/// How `cargo gdl` reaches a pool's hub on a Slurm site: directly, or
+/// through `srun` inside the pool's job. Another value is refused by its
+/// key.
+#[test]
+fn a_slurm_site_reaches_its_hubs_directly_or_through_srun() {
+    for (value, reach) in [("direct", SlurmReach::Direct), ("srun", SlurmReach::Srun)] {
+        let fleet = fleet(&on_site(&format!("{SITE}reach = \"{value}\"\n"), ""));
+        fleet.check(Some(&laid())).expect("a sound fleet");
+        let site = fleet
+            .cluster("lab")
+            .and_then(Cluster::slurm)
+            .expect("a site");
+        assert_eq!(site.reach, reach);
+    }
+    let problems =
+        Fleet::from_toml(&on_site(&format!("{SITE}reach = \"ssh\"\n"), "")).expect_err("refused");
+    assert_eq!(
+        problems.0[0].table.as_deref(),
+        Some("cluster.lab"),
+        "{problems:?}"
+    );
+    assert_eq!(problems.0[0].key.as_deref(), Some("reach"), "{problems:?}");
 }

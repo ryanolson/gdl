@@ -61,8 +61,10 @@ fn deploy_prunes_a_cluster_with_no_remaining_pools() {
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
         allow_pool_restart: false,
+        images: None,
+        replace: false,
     };
-    let result = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {});
+    let result = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut NoSlurm, &mut |_| {});
     assert!(
         result.is_ok(),
         "the emptied cluster was not pruned: {result:?}"

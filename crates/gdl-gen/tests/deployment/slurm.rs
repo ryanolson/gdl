@@ -545,6 +545,78 @@ fn a_jobs_processes_read_the_directorys_address_when_they_start() {
     assert_eq!(files, again);
 }
 
+/// A pool's hub writes its addresses, as srt-slurm fills in its node's,
+/// to `hub.<job id>.address` in the pool's directory before it starts:
+/// `cargo gdl deploy` and `down` read the file on the login node to reach
+/// the hub. The job's teardown removes it. A hub that cannot write it does
+/// not start, and says why in one line.
+#[test]
+fn a_pools_hub_writes_where_the_login_node_reaches_it() {
+    let mirror = Mirror::new();
+    let files = render(&mirror, &spec(&mirror), &fleet(&fleet_text())).expect("the recipes");
+    let bin = tempfile::Builder::new()
+        .prefix("gdl-slurm-hub-address-")
+        .tempdir()
+        .expect("scratch");
+    for pool in ["global-us", "model-x-01", "model-x-02"] {
+        let recipe = recipe(&files, &format!("lab/{pool}/pool.yaml"));
+        // srt-slurm fills in the node's address before bash reads it.
+        let own = service(&recipe, "hub")["preamble"]
+            .as_str()
+            .expect("a preamble")
+            .replace("{node_ip}", "10.0.0.9");
+        let (held, preamble) = mounted(&own, Some("http://10.0.0.7:8000"));
+        let strict = format!("set -euo pipefail && {preamble}");
+        exports(&strict, &[("SLURM_JOB_ID", "42")], bin.path());
+        let file = held.path().join("gdl/hub.42.address");
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the hub's address"),
+            "10.0.0.9:1337 10.0.0.9:8337\n",
+            "{pool}"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(held.path().join("gdl"))
+            .expect("the pool's directory")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        assert_eq!(leftovers, ["hub.42.address"], "{pool}");
+
+        // The teardown removes this job's file alone.
+        std::fs::write(held.path().join("gdl/hub.41.address"), "x").expect("another job's");
+        let teardown = words(&recipe["host_setup"]["teardown"])
+            .join(" && ")
+            .replace(
+                &format!("'/shared/gdl-runs/api/{pool}'"),
+                &format!("'{}'", held.path().join("gdl").display()),
+            );
+        exports(&teardown, &[("SLURM_JOB_ID", "42")], bin.path());
+        assert!(!file.exists(), "{pool}: {teardown}");
+        assert!(held.path().join("gdl/hub.41.address").exists(), "{pool}");
+
+        // A hub that cannot write the file does not start.
+        let (held, preamble) = mounted(&own, Some("http://10.0.0.7:8000"));
+        std::fs::remove_dir(held.path().join("gdl")).expect("no pool directory");
+        let output = std::process::Command::new("bash")
+            .args(["-c", &format!("{preamble} && echo started")])
+            .env("SLURM_JOB_ID", "42")
+            .output()
+            .expect("bash");
+        let said = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{pool}: {said}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("started"));
+        assert!(
+            said.lines()
+                .last()
+                .is_some_and(|line| line.contains("hub.42.address")),
+            "{said}"
+        );
+    }
+    // No other job writes one.
+    for path in ["lab/model-x-01/join-engine.yaml", "lab/directory.yaml"] {
+        let recipe = recipe(&files, path);
+        assert!(!recipe.to_string().contains(".address"), "{path}");
+    }
+}
+
 /// A segment joins a running pool as a job of its own: `resolve` reads
 /// where the pool's hub is from the directory when the job starts, and the
 /// segment takes that file over its settings, so that it names no hub of

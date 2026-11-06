@@ -235,8 +235,10 @@ fn an_unanswered_namespace_question_applies_nothing() {
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
         allow_pool_restart: false,
+        images: None,
+        replace: false,
     };
-    let error = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {})
+    let error = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut NoSlurm, &mut |_| {})
         .expect_err("an unanswered question")
         .to_string();
     assert!(error.contains("is forbidden"), "{error}");
@@ -319,8 +321,10 @@ fn a_namespace_created_after_the_lookup_is_not_applied() {
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
         allow_pool_restart: false,
+        images: None,
+        replace: false,
     };
-    let result = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {});
+    let result = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut NoSlurm, &mut |_| {});
     assert!(kube.created, "the namespace creation raced the lookup");
     assert!(
         !kube.applied_existing,
@@ -379,8 +383,10 @@ fn a_failed_namespace_create_stops_the_deploy() {
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
         allow_pool_restart: false,
+        images: None,
+        replace: false,
     };
-    let error = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {})
+    let error = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut NoSlurm, &mut |_| {})
         .expect_err("a refused create")
         .to_string();
     assert!(

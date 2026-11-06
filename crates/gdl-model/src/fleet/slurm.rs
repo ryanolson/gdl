@@ -67,6 +67,29 @@ pub struct SlurmSite {
     /// unsaid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_limit: Option<String>,
+    /// How `cargo gdl deploy` and `down`, on the login node, reach each
+    /// pool's hub: [`SlurmReach::Direct`] unless the login node cannot
+    /// reach the compute nodes' ports.
+    #[serde(default, skip_serializing_if = "SlurmReach::is_default")]
+    pub reach: SlurmReach,
+}
+
+/// How the login node reaches a hub on a Slurm site's compute nodes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SlurmReach {
+    /// Over the network, at the hub's address.
+    #[default]
+    Direct,
+    /// With `curl` on the hub's node, run as a step of the pool's job:
+    /// `srun --jobid <job> --overlap`.
+    Srun,
+}
+
+impl SlurmReach {
+    fn is_default(&self) -> bool {
+        *self == Self::Direct
+    }
 }
 
 impl SlurmSite {

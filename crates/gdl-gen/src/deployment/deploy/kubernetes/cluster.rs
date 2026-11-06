@@ -23,13 +23,11 @@ impl Clusters {
         })?;
         let mut clusters = Vec::new();
         for (cluster, settings) in fleet.clusters() {
+            // The driver gives Kubernetes only a fleet whose clusters are
+            // all Kubernetes clusters.
             let Some(settings) = settings.kubernetes() else {
                 return Err(Error::new(format!(
-                    "[cluster.{cluster}]: {}",
-                    crate::deployment::k8s::slurm_refused(
-                        cluster,
-                        "`cargo gdl deploy` and `cargo gdl down` run"
-                    ),
+                    "[cluster.{cluster}]: a Slurm site, which the Kubernetes site does not run"
                 )));
             };
             clusters.push(Cluster {

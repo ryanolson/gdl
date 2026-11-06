@@ -705,14 +705,44 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** drop the table for that image. Or move the build image's flags into its own `RUSTC_WRAPPER` or `RUSTC_WORKSPACE_WRAPPER`, which the build trusts, as it trusts `RUSTC` and the image's Cargo configuration.
 - **Lifts:** a way to read rustc's flags as rustc does, before the build.
 
-### No command runs a Slurm site yet
-- **What:** `cargo gdl slurm` writes a Slurm site's recipes, and `cargo gdl images` builds its images, but nothing submits, watches, or stops its jobs. `cargo gdl k8s`, `deploy`, and `down` refuse a fleet with a Slurm site, and name the site, before they run kubectl or Docker. Compose reads only a site's region.
-- **Why:** the recipes come first, so that what a job runs is pinned and checked by srt-slurm before the commands that submit and stop jobs are built on them.
-- **Workaround:** apply the recipes with `srtctl apply` by hand ([Deploy a fleet on Slurm](../guides/slurm.md#apply-the-recipes-by-hand)), or run the fleet's pools on Kubernetes clusters.
-- **Lifts:** a Slurm driver for `deploy` and `down`.
+### A fleet runs on one kind of site
+- **What:** `cargo gdl deploy` and `down` refuse a fleet with both Kubernetes clusters and Slurm sites, naming both, before they run a command. `cargo gdl k8s` refuses a fleet with a Slurm site. Compose reads only a site's region.
+- **Why:** a Slurm pool finds the others through a store, DynamoDB Local or etcd, in a job on its own site, which a Kubernetes cluster's pools would reach only with routed TCP between the sites, and no render names it there.
+- **Workaround:** a fleet file for each kind of site.
+- **Lifts:** a pool directory that both kinds of site reach, such as DynamoDB on AWS or an etcd outside both, and routes between the sites.
+
+### `down` and `--replace` need Slurm 23.11.6 or later
+- **What:** on a Slurm site, `cargo gdl down`, and `cargo gdl deploy --replace`, read `scancel --version` before they change anything, and refuse a Slurm older than 23.11.6, or a version they cannot read, naming what they read. A deploy without `--replace` refuses the same way when its prune would cancel a job that waits in the queue.
+- **Why:** they cancel a job only while it waits, with `scancel --ctld --state=PENDING`. From 23.11.6, Slurm's controller applies the filter as it cancels. Before it, `scancel` filters a listing of its own and then cancels by id, so a pool's job that starts in between would be cancelled while it runs, cutting its requests with no drain.
+- **Workaround:** on an older Slurm, stop the fleet's jobs by hand: drain each pool with a parent (`POST /v1/ext/gdl-pool/drain` on its hub's control port) and wait for `/v1/ext/gdl-pool/withdrawn`, then `scancel` its job; cancel the directory's job last.
+- **Lifts:** a cancel that does not depend on the version, such as holding a waiting job (`scontrol hold`) before cancelling it.
+
+### A Slurm deploy sees only your own jobs
+- **What:** `cargo gdl deploy` and `down` list a fleet's jobs with `squeue --me`. A job of the same fleet that another user submitted is not listed: a deploy submits the pool again, and `down` leaves the job running.
+- **Why:** a fleet's name is not unique across a cluster's users, and `scancel` cancels only your own jobs.
+- **Workaround:** deploy, and take down, a fleet as one user.
+- **Lifts:** a fleet's jobs listed by a name that is unique on the cluster, with the rights to cancel them.
+
+### A Slurm deploy waits for queued jobs only within its waits
+- **What:** `cargo gdl deploy` waits up to 600 s for the directory's job to point the fleet at its store, and up to 600 s for each pool's health. A job still in Slurm's queue then stops the deploy.
+- **Why:** each wait is bounded, so that a deploy never hangs; the bounds are not set from the command line.
+- **Workaround:** run the deploy again once the jobs run: it keeps each job it finds.
+- **Lifts:** a command-line wait for the queue.
+
+### A pool whose job ended without a drain keeps its record until its lease lapses
+- **What:** a pool's job that ended on its own, because its hub's node failed or the job was cancelled by hand, is not listed by `squeue`, so `deploy` and `down` do not see it. Its record stays in the directory until its lease lapses, and its parent offers it nothing meanwhile.
+- **Why:** with no job, no hub runs to withdraw the record, and only a parent's hub can withdraw it for the pool.
+- **Workaround:** withdraw it on a parent's hub (`POST /v1/ext/gdl-pool/children/<class>/<pool>/withdraw` on its control port).
+- **Lifts:** `deploy` and `down` that withdraw the record of a pool whose job is gone through a parent's hub.
+
+### A running pool whose hub has not started cannot be stopped
+- **What:** `cargo gdl down`, a deploy's prune, and `--replace` refuse a pool whose job runs but whose hub has not written `hub.<job id>.address`, and cancel nothing.
+- **Why:** without the hub's address, nothing can drain the pool, and a pool cancelled undrained stays held by its parents until its lease lapses.
+- **Workaround:** wait until its hub starts, then run the command again; or cancel the job with `scancel` once it has drained.
+- **Lifts:** a stop that waits, bounded, for the hub to start.
 
 ### A Slurm site's pools need a directory job of the fleet's own
-- **What:** `cargo gdl slurm` refuses a fleet with a pool on a Slurm site unless its `[directory]` names a store that the site runs (`[directory] cluster`): DynamoDB with `local = true`, or etcd. The store runs in a job of its own and lasts as long as that job: a DynamoDB Local keeps the directory in memory, and srt-slurm starts etcd's data directory empty on each job. Each process reads the store's address when it starts: after a new directory job, every pool must be stopped and submitted again.
+- **What:** `cargo gdl slurm` refuses a fleet with a pool on a Slurm site unless its `[directory]` names a store that the site runs (`[directory] cluster`): DynamoDB with `local = true`, or etcd. The store runs in a job of its own and lasts as long as that job: a DynamoDB Local keeps the directory in memory, and srt-slurm starts etcd's data directory empty on each job. Each process reads the store's address when it starts: after a new directory job, every pool must be stopped and submitted again. So `cargo gdl deploy` refuses a directory job of another recipe, and any pool's job when the directory has no job: take the fleet down with `cargo gdl down`, then deploy it.
 - **Why:** under the relay, a child's hub needs its parent's hub's address, which a job learns only once it runs. A Slurm job has no AWS role to reach DynamoDB on AWS with. A job reads the store's address from its own site's `run_dir`.
 - **Workaround:** none on Slurm. Run the directory's job on a partition with a longer time limit than its pools'.
 - **Lifts:** a fleet `[directory]` that names an etcd outside the fleet's jobs; or AWS credentials on the cluster's shared file system.

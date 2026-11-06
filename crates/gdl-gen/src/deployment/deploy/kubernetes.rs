@@ -154,7 +154,7 @@ impl Site for Kubernetes<'_> {
 
     /// The objects, as [`k8s::k8s_files`] renders them; with
     /// `allowPoolRestart` on each `GdlPool` when the deploy allows it.
-    fn render(&self, input: &RenderInput<'_>) -> Result<Files, Error> {
+    fn render(&mut self, input: &RenderInput<'_>) -> Result<Files, Error> {
         let mut files = k8s::k8s_files(
             input.spec,
             input.fleet,
@@ -190,11 +190,15 @@ impl Site for Kubernetes<'_> {
     }
 
     /// The fleet's objects that the cluster holds for this cluster, and
-    /// its `GdlPool`s: for [`Scope::Prune`], those the apply did not
-    /// render, refused when this deploy applied one of them in another
-    /// cluster; for [`Scope::Pools`], those of a pool; for [`Scope::Rest`],
-    /// every object, and no `GdlPool`.
+    /// its `GdlPool`s: for [`Scope::Replaced`], none, since an apply
+    /// changes each object in place; for [`Scope::Prune`], those the apply
+    /// did not render, refused when this deploy applied one of them in
+    /// another cluster; for [`Scope::Pools`], those of a pool; for
+    /// [`Scope::Rest`], every object, and no `GdlPool`.
     fn live(&mut self, place: &str, scope: Scope) -> Result<Running, Error> {
+        if scope == Scope::Replaced {
+            return Ok(Running::default());
+        }
         let cluster = self.clusters.get(place);
         let live = cluster.live(self.kube, self.waits.objects)?;
         if scope == Scope::Rest {
@@ -268,9 +272,20 @@ impl Site for Kubernetes<'_> {
         })
     }
 
-    fn hubless(&mut self, place: &str, pool: &Stopping) -> Result<(), Error> {
+    fn refuse_unwithdrawn(&mut self, place: &str, pool: &Stopping) -> Result<(), Error> {
         let at = self.clusters.get(place).at();
         proxy::withdrawn_without_hub(self.kube, at, pool, &self.waits)
+    }
+
+    /// Nothing waits to join a pool's hub on Kubernetes: a pod that starts
+    /// later finds its hub's Service.
+    fn stop_joining(
+        &mut self,
+        _place: &str,
+        _pools: &[&str],
+        _say: &mut dyn FnMut(&str),
+    ) -> Result<(), Error> {
+        Ok(())
     }
 
     /// Delete the objects of `which`, segments' Deployments first and
@@ -387,7 +402,7 @@ impl Site for Kubernetes<'_> {
                 "prune: deleted {count} object(s) in cluster `{}`",
                 cluster.name
             )),
-            Scope::Prune | Scope::Pools => {}
+            Scope::Replaced | Scope::Prune | Scope::Pools => {}
             Scope::Rest => {
                 run(
                     self.kube,

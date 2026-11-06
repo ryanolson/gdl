@@ -39,7 +39,7 @@ fn down_from_render(cluster_label: bool) {
             }
         }
     }
-    let result = gdl_gen::down(&fleet, &waits(), &mut kube, &mut |_| {});
+    let result = gdl_gen::down(&fleet, &waits(), &mut kube, &mut NoSlurm, &mut |_| {});
     let remaining: Vec<_> = kube.objects["kind-use1"].keys().collect();
     assert!(
         result.is_err() || remaining.is_empty(),
@@ -88,7 +88,7 @@ fn down_names_objects_without_a_cluster_and_deletes_nothing() {
         left("Deployment", "global-eu", "global-eu", "hub", None),
     );
     unlabel(&mut kube, "kind-euw1", "global-eu");
-    let error = gdl_gen::down(&fleet, &waits(), &mut kube, &mut |_| {})
+    let error = gdl_gen::down(&fleet, &waits(), &mut kube, &mut NoSlurm, &mut |_| {})
         .expect_err("an object of no known cluster")
         .to_string();
     for part in [

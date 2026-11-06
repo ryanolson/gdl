@@ -201,9 +201,17 @@ fn context_aliases_keep_a_pod_monitor_for_each_cluster() {
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
         allow_pool_restart: false,
+        images: None,
+        replace: false,
     };
-    gdl_gen::deploy(&how, &mut docker(&log), &mut kube, &mut |_| {})
-        .expect("aliases permit a deploy");
+    gdl_gen::deploy(
+        &how,
+        &mut docker(&log),
+        &mut kube,
+        &mut NoSlurm,
+        &mut |_| {},
+    )
+    .expect("aliases permit a deploy");
     for name in ["global-eu", "global-us", "model-x-eu", "model-x-us"] {
         assert!(
             kube.0.objects["shared-cluster"].contains_key(&("Deployment".into(), name.into())),
@@ -260,8 +268,16 @@ fn deploy_stops_when_operator_discovery_is_incomplete() {
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
         allow_pool_restart: false,
+        images: None,
+        replace: false,
     };
-    let result = gdl_gen::deploy(&how, &mut docker(&log), &mut kube, &mut |_| {});
+    let result = gdl_gen::deploy(
+        &how,
+        &mut docker(&log),
+        &mut kube,
+        &mut NoSlurm,
+        &mut |_| {},
+    );
     assert!(
         result.is_err() && !steps(&log).iter().any(|step| step == "docker"),
         "failed operator discovery must stop before image builds: {result:?}, {:?}",
@@ -275,7 +291,7 @@ fn down_stops_when_operator_discovery_is_incomplete() {
     let files = files(&mirror, &fleet_asking(false));
     let log = Log::default();
     let mut kube = PartialOperator(Kube::new(&log));
-    let result = gdl_gen::down(&files.fleet, &waits(), &mut kube, &mut |_| {});
+    let result = gdl_gen::down(&files.fleet, &waits(), &mut kube, &mut NoSlurm, &mut |_| {});
     assert!(
         result.is_err() && commands(&log).iter().all(|args| args[2] == "api-resources"),
         "failed operator discovery must stop before listing or deleting: {result:?}, {:?}",
@@ -350,8 +366,17 @@ fn assert_monitor_group(prune: bool) {
             waits: waits(),
             sources: gdl_gen::Sources::Fetched,
             allow_pool_restart: false,
+            images: None,
+            replace: false,
         };
-        gdl_gen::deploy(&how, &mut docker(&log), &mut kube, &mut |_| {}).expect("deploy");
+        gdl_gen::deploy(
+            &how,
+            &mut docker(&log),
+            &mut kube,
+            &mut NoSlurm,
+            &mut |_| {},
+        )
+        .expect("deploy");
     } else {
         // `down` labels each cluster's namespace, which must exist.
         for context in ["kind-euw1", "kind-use1"] {
@@ -362,7 +387,7 @@ fn assert_monitor_group(prune: bool) {
             });
             kube.inner.holds(context, namespace);
         }
-        gdl_gen::down(&files.fleet, &waits(), &mut kube, &mut |_| {}).expect("down");
+        gdl_gen::down(&files.fleet, &waits(), &mut kube, &mut NoSlurm, &mut |_| {}).expect("down");
     }
     assert!(
         kube.foreign.is_some(),

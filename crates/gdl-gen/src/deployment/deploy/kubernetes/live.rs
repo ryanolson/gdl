@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use super::super::order::{Note, Parentage};
-use super::super::site::{Driven, Stopping};
+use super::super::site::{Driven, Stopping, Withdrawal};
 use crate::Error;
 
 /// One object of the fleet in a cluster.
@@ -38,8 +38,9 @@ pub(super) struct Live {
     pub(super) grace: Option<u64>,
     /// For a pool's Deployment, whether its pool publishes to a directory
     /// that every hub reads, where no parent's hub holds its record:
-    /// DynamoDB or etcd (`GDL_POOL__DIRECTORY=dynamodb` or `etcd`).
-    pub(super) dynamodb: bool,
+    /// DynamoDB or etcd (`GDL_POOL__DIRECTORY=dynamodb` or `etcd`): how it
+    /// withdraws there.
+    pub(super) shared: Option<Withdrawal>,
     /// Whether a `GdlPool` controls it: the gdl operator made it, and
     /// only the operator changes or deletes it.
     pub(super) operated: bool,
@@ -94,10 +95,9 @@ impl Live {
         let home = variable("GDL_POOL__HOME");
         let parents = variable("GDL_POOL__PARENTS");
         // Under etcd, as under DynamoDB, no parent's hub holds the record.
-        let dynamodb = matches!(
-            variable("GDL_POOL__DIRECTORY").as_deref(),
-            Some("dynamodb" | "etcd")
-        );
+        let shared = variable("GDL_POOL__DIRECTORY")
+            .as_deref()
+            .and_then(Withdrawal::shared);
         Ok(Self {
             pool: whole("gdl.dev/pool"),
             class: whole("gdl.dev/class"),
@@ -105,7 +105,7 @@ impl Live {
             home: (kind == "Deployment").then_some(home).flatten(),
             parents: (kind == "Deployment").then_some(parents).flatten(),
             grace: pod["terminationGracePeriodSeconds"].as_u64(),
-            dynamodb: kind == "Deployment" && dynamodb,
+            shared: shared.filter(|_| kind == "Deployment"),
             operated,
             kind,
             name,
@@ -170,7 +170,9 @@ pub(super) fn notes(objects: &[Live]) -> impl Iterator<Item = Note> + '_ {
 /// its segments'. A pool with no parent, such as a global pool, cannot
 /// drain: its hub refuses it.
 pub(super) fn driven(objects: &[Live]) -> Vec<Driven> {
-    let mut pools: BTreeMap<String, Option<Stopping>> = objects
+    // Each pool's stop, and the shared directory any of its Deployments
+    // publishes to.
+    let mut pools: BTreeMap<String, Option<(Stopping, Option<Withdrawal>)>> = objects
         .iter()
         .filter_map(|object| object.pool.clone())
         .map(|pool| (pool, None))
@@ -182,23 +184,37 @@ pub(super) fn driven(objects: &[Live]) -> Vec<Driven> {
         if deployment.home.is_none() && deployment.parents.is_none() {
             continue;
         }
-        let stopping = pools
+        let (stopping, shared) = pools
             .get_mut(pool)
             .expect("each pool of the objects")
-            .get_or_insert_with(|| Stopping {
-                pool: pool.clone(),
-                class: class.clone(),
-                home: deployment.home.clone(),
-                grace: 0,
-                hub: false,
-                dynamodb: false,
+            .get_or_insert_with(|| {
+                let stopping = Stopping {
+                    pool: pool.clone(),
+                    class: class.clone(),
+                    grace: 0,
+                    hub: false,
+                    seen: Withdrawal::Relay {
+                        home: deployment.home.clone(),
+                    },
+                };
+                (stopping, None)
             });
         stopping.grace = stopping.grace.max(deployment.grace.unwrap_or_default());
         stopping.hub |= deployment.is_hub();
-        stopping.dynamodb |= deployment.dynamodb;
+        if shared.is_none() {
+            shared.clone_from(&deployment.shared);
+        }
     }
     pools
         .into_iter()
-        .map(|(pool, drain)| Driven { pool, drain })
+        .map(|(pool, drain)| Driven {
+            pool,
+            drain: drain.map(|(mut stopping, shared)| {
+                if let Some(shared) = shared {
+                    stopping.seen = shared;
+                }
+                stopping
+            }),
+        })
         .collect()
 }

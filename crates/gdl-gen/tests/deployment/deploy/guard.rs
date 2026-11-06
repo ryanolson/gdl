@@ -41,8 +41,10 @@ fn aliases_prune_removed_objects_and_keep_applied_objects() {
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
         allow_pool_restart: false,
+        images: None,
+        replace: false,
     };
-    gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {})
+    gdl_gen::deploy(&how, &mut docker, &mut kube, &mut NoSlurm, &mut |_| {})
         .expect("aliases permit a legitimate prune");
     assert_eq!(
         deletes(&log, "shared-cluster"),

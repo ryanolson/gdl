@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use super::super::site::{Answer, HubRoutes, Stopping};
+use super::super::site::{Answer, HubRoutes, Stopping, Withdrawal};
 use super::kube::{At, CONTROL, Kube, PUBLIC, bounded};
 use super::{Waits, run};
 use crate::Error;
@@ -12,6 +12,7 @@ use crate::Error;
 const HEALTH: &str = "/v1/ext/gdl-pool/health";
 const DRAIN: &str = "/v1/ext/gdl-pool/drain";
 const WITHDRAWN: &str = "/v1/ext/gdl-pool/withdrawn";
+const INSTANCES: &str = "/v1/ext/gdl-pool/instances";
 
 /// The hubs of one cluster's namespace, through its kube context.
 pub(super) struct Proxy<'a> {
@@ -38,6 +39,15 @@ impl HubRoutes for Proxy<'_> {
 
     fn withdrawn(&mut self, pool: &str, budget: Duration) -> Result<Answer, Error> {
         let args = bounded(self.at.get(pool, PUBLIC, WITHDRAWN), budget);
+        let reply = self.kube.run(&args, None)?;
+        Ok(match reply.success {
+            true => Answer::Body(reply.stdout),
+            false => Answer::Failed(reply.stderr),
+        })
+    }
+
+    fn instances(&mut self, pool: &str, budget: Duration) -> Result<Answer, Error> {
+        let args = bounded(self.at.get(pool, CONTROL, INSTANCES), budget);
         let reply = self.kube.run(&args, None)?;
         Ok(match reply.success {
             true => Answer::Body(reply.stdout),
@@ -82,11 +92,11 @@ pub(super) fn withdrawn_without_hub(
     pool: &Stopping,
     waits: &Waits,
 ) -> Result<(), Error> {
-    // Under the DynamoDB directory no parent's hub holds the record, so
+    // Under a shared directory no parent's hub holds the record, so
     // nothing here can show that the pool withdrew.
-    if pool.dynamodb {
+    if let Withdrawal::Shared { directory } = pool.seen {
         return Err(Error::new(format!(
-            "pool `{}` is not known to have withdrawn from the DynamoDB directory, so nothing is deleted: its hub's Deployment is gone, so it can neither drain nor say that its record is withdrawn, and no parent's hub holds its record. Withdraw it on a parent's hub (`POST /v1/ext/gdl-pool/children/{}/{}/withdraw` on the control port), which answers 204 once the directory has stored it; then delete its objects (`kubectl --context {} --namespace {} delete deployments,services,configmaps -l gdl.dev/pool={}`) and deploy again",
+            "pool `{}` is not known to have withdrawn from the {directory} directory, so nothing is deleted: its hub's Deployment is gone, so it can neither drain nor say that its record is withdrawn, and no parent's hub holds its record. Withdraw it on a parent's hub (`POST /v1/ext/gdl-pool/children/{}/{}/withdraw` on the control port), which answers 204 once the directory has stored it; then delete its objects (`kubectl --context {} --namespace {} delete deployments,services,configmaps -l gdl.dev/pool={}`) and deploy again",
             pool.pool, pool.class, pool.pool, at.context, at.namespace, pool.pool
         )));
     }

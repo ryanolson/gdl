@@ -342,12 +342,62 @@ fn a_changed_etcd_is_reached_at_its_new_pods_ip() {
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
         allow_pool_restart: false,
+        images: None,
+        replace: false,
     };
-    gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {}).expect("redeploy");
+    gdl_gen::deploy(&how, &mut docker, &mut kube, &mut NoSlurm, &mut |_| {}).expect("redeploy");
     assert!(kube.changed, "the resources change must replace etcd's pod");
     let remote = pools_applied(&log, "kind-euw1");
     assert!(
         remote.contains("http://10.1.2.4:2379") && !remote.contains("http://10.1.2.3:2379"),
         "remote hubs were given the preceding etcd pod's address"
     );
+}
+
+/// An etcd pool whose hub never says withdrawn stops the deploy at its
+/// bound, and the message names etcd, the pool's directory, not another.
+#[test]
+fn an_etcd_pool_that_never_says_withdrawn_names_etcd() {
+    let mirror = Mirror::new();
+    let files = files(&mirror, &fleet_text());
+    let log = Log::default();
+    let (mut docker, mut kube) = fakes(&log);
+    kube.held = Some(0);
+    kube.withdrawn = None;
+    kube.holds("kind-use1", left_etcd("model-x-old", "model-x-old", "hub"));
+    kube.holds(
+        "kind-use1",
+        left_etcd("model-x-old-engine", "model-x-old", "engine"),
+    );
+    let error = deploy(&mirror, &files, &mut docker, &mut kube)
+        .expect_err("a pool that never says withdrawn")
+        .to_string();
+    assert!(
+        error.contains("`model-x-old`") && error.contains("withdrawn from the etcd directory"),
+        "{error}"
+    );
+    assert!(!error.contains("DynamoDB"), "{error}");
+}
+
+/// An etcd pool whose hub's Deployment is gone is refused before anything
+/// changes, and the refusal names etcd, the pool's directory.
+#[test]
+fn an_etcd_pool_without_its_hub_names_etcd() {
+    let mirror = Mirror::new();
+    let files = files(&mirror, &fleet_text());
+    let log = Log::default();
+    let (mut docker, mut kube) = fakes(&log);
+    kube.held = Some(0);
+    kube.holds(
+        "kind-use1",
+        left_etcd("model-x-old-engine", "model-x-old", "engine"),
+    );
+    let error = deploy(&mirror, &files, &mut docker, &mut kube)
+        .expect_err("a pool without its hub")
+        .to_string();
+    assert!(
+        error.contains("`model-x-old`") && error.contains("withdrawn from the etcd directory"),
+        "{error}"
+    );
+    assert!(!error.contains("DynamoDB"), "{error}");
 }

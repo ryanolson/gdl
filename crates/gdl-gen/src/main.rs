@@ -13,7 +13,7 @@
 //! cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--images <images.json>] [--local] [--target-dir <dir>]
 //! cargo gdl slurm --spec <gdl.toml> --fleet <fleet.toml> --images <images.json> --out <directory> [--tag <tag>] [--local] [--target-dir <dir>]
 //! cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--local] [--target-dir <dir>]
-//! cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--local] [--allow-pool-restart] [--target-dir <dir>]
+//! cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--local] [--allow-pool-restart] [--images <images.json>] [--replace] [--target-dir <dir>]
 //! cargo gdl down --fleet <fleet.toml> [--spec <gdl.toml>] [--target-dir <dir>]
 //! cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]
 //! ```
@@ -90,6 +90,15 @@
 //! parent, deletes every object labelled with the fleet, children's pools
 //! first across the fleet, and removes the label from each namespace,
 //! which it keeps; with `--spec`, it first runs the same check as `check`.
+//! A fleet on a Slurm site deploys from the site's login node, with
+//! `srtctl`, `squeue`, `scancel`, `sacct`, and `curl` on the `PATH`:
+//! `deploy` takes each image's digest from `--images` and builds nothing,
+//! writes the recipes into the site's `run_dir`, submits the directory's
+//! job and then each pool's that has no job, keeps each job whose recipe
+//! is unchanged, refuses a changed one unless `--replace`, which drains it
+//! and submits it again, and waits for each pool's health. `down` cancels
+//! each pool's job children first, after a drain, and the directory's job
+//! last.
 //! `export` writes the generated crates as a `.tar.gz` with
 //! `build-all.sh`, to build each segment on its own. Programs are built in `--target-dir`, else `$CARGO_TARGET_DIR`,
 //! else `target` beside the spec or the crate.
@@ -111,7 +120,7 @@ const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <d
        cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--images <images.json>] [--local] [--target-dir <dir>]
        cargo gdl slurm --spec <gdl.toml> --fleet <fleet.toml> --images <images.json> --out <directory> [--tag <tag>] [--local] [--target-dir <dir>]
        cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--local] [--target-dir <dir>]
-       cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--local] [--allow-pool-restart] [--target-dir <dir>]
+       cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--local] [--allow-pool-restart] [--images <images.json>] [--replace] [--target-dir <dir>]
        cargo gdl down --fleet <fleet.toml> [--spec <gdl.toml>] [--target-dir <dir>]
        cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]";
 
@@ -149,6 +158,8 @@ enum Command {
         out: Option<PathBuf>,
         local: bool,
         allow_pool_restart: bool,
+        images: Option<PathBuf>,
+        replace: bool,
     },
     Down {
         fleet: PathBuf,
@@ -204,6 +215,7 @@ fn args() -> Result<Args, String> {
     let mut push = false;
     let mut release = false;
     let mut allow_pool_restart = false;
+    let mut replace = false;
     let mut prepare_into = None;
     while let Some(arg) = args.next() {
         let mut value = || {
@@ -232,6 +244,7 @@ fn args() -> Result<Args, String> {
             Some("--probe") => probe = true,
             Some("--local") => local = true,
             Some("--allow-pool-restart") => allow_pool_restart = true,
+            Some("--replace") => replace = true,
             Some("--release") => release = true,
             Some("--prepare-into") => prepare_into = Some(value()?),
             Some(other) if !other.starts_with("--") && krate.is_none() => {
@@ -307,6 +320,8 @@ fn args() -> Result<Args, String> {
             out: out.take(),
             local: std::mem::take(&mut local),
             allow_pool_restart: std::mem::take(&mut allow_pool_restart),
+            images: images.take(),
+            replace: std::mem::take(&mut replace),
         },
         "down" => Command::Down {
             fleet: fleet.take().ok_or_else(|| USAGE.to_string())?,
@@ -353,6 +368,7 @@ fn args() -> Result<Args, String> {
         || push
         || local
         || release
+        || replace
     {
         return Err(USAGE.to_string());
     }
@@ -603,6 +619,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             out,
             local,
             allow_pool_restart,
+            images,
+            replace,
         } => {
             let file = args.spec.as_ref().ok_or(USAGE)?;
             let how = gdl_gen::Deploy {
@@ -613,11 +631,17 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 waits: gdl_gen::Waits::default(),
                 sources: sources(*local),
                 allow_pool_restart: *allow_pool_restart,
+                images: images.clone(),
+                replace: *replace,
             };
             let mut say = |step: &str| eprintln!("cargo gdl: {step}");
-            if let Err(error) =
-                gdl_gen::deploy(&how, &mut gdl_gen::Buildx, &mut gdl_gen::Kubectl, &mut say)
-            {
+            if let Err(error) = gdl_gen::deploy(
+                &how,
+                &mut gdl_gen::Buildx,
+                &mut gdl_gen::Kubectl,
+                &mut gdl_gen::SlurmCli,
+                &mut say,
+            ) {
                 eprintln!("{error}");
                 eprintln!("cargo gdl: deploy stopped");
                 return Ok(ExitCode::FAILURE);
@@ -635,6 +659,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 fleet,
                 &gdl_gen::Waits::default(),
                 &mut gdl_gen::Kubectl,
+                &mut gdl_gen::SlurmCli,
                 &mut say,
             )?;
         }

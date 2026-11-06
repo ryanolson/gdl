@@ -751,6 +751,15 @@ fn files(mirror: &Mirror, fleet: &str) -> Files {
     }
 }
 
+/// The Slurm a fleet on Kubernetes is given: it runs no Slurm command.
+struct NoSlurm;
+
+impl gdl_gen::Slurm for NoSlurm {
+    fn run(&mut self, command: &gdl_gen::SlurmCommand) -> Result<gdl_gen::Reply, gdl_gen::Error> {
+        panic!("a fleet on Kubernetes ran a Slurm command: {command:?}")
+    }
+}
+
 /// Waits that never sleep long: the fakes answer at once.
 fn waits() -> gdl_gen::Waits {
     gdl_gen::Waits {
@@ -775,15 +784,19 @@ fn deploy(
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
         allow_pool_restart: false,
+        images: None,
+        replace: false,
     };
     let mut said = Vec::new();
-    gdl_gen::deploy(&how, docker, kube, &mut |step| said.push(step.to_string()))?;
+    gdl_gen::deploy(&how, docker, kube, &mut NoSlurm, &mut |step| {
+        said.push(step.to_string())
+    })?;
     Ok(said)
 }
 
 fn down(files: &Files, kube: &mut Kube) -> Result<Vec<String>, gdl_gen::Error> {
     let mut said = Vec::new();
-    gdl_gen::down(&files.fleet, &waits(), kube, &mut |step| {
+    gdl_gen::down(&files.fleet, &waits(), kube, &mut NoSlurm, &mut |step| {
         said.push(step.to_string())
     })?;
     Ok(said)

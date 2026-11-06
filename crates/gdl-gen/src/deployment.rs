@@ -411,7 +411,9 @@ pub(crate) mod slurm;
 mod tree;
 mod variables;
 
-pub use deploy::{Deploy, Kube, Kubectl, Reply, Waits, deploy, down};
+pub use deploy::{
+    Deploy, Kube, Kubectl, Reply, Slurm, SlurmCli, SlurmCommand, Waits, deploy, down,
+};
 pub use dgd::Dgds;
 pub use dgd::tunables_warnings;
 pub use images::{Buildx, Built, Digests, Docker, Outcome, images};

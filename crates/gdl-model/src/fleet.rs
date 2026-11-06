@@ -18,7 +18,7 @@ pub use errors::{FleetError, FleetErrors, FleetTable};
 pub use placement::{
     ClusterResources, HUB, PoolResources, Quantities, Quantity, Resources, Toleration,
 };
-pub use slurm::{PoolSlurm, SlurmSite};
+pub use slurm::{PoolSlurm, SlurmReach, SlurmSite};
 
 use cluster::{Header, check_clusters};
 use slurm::check_time_limit;
@@ -47,7 +47,7 @@ use slurm::check_time_limit;
 /// [cluster.use1.resources.segment.e] # a segment's own, or `hub`, over the default
 /// limits = { memory = "4Gi" }
 ///
-/// [cluster.lab]                      # optional: a Slurm site ([`SlurmSite`]); no command runs one yet
+/// [cluster.lab]                      # optional: a Slurm site ([`SlurmSite`]); `cargo gdl deploy` runs it from a login node
 /// kind = "slurm"
 /// region = "slurm-lab"
 /// srtctl = "/shared/srt-slurm"       # the srt-slurm checkout on the login node

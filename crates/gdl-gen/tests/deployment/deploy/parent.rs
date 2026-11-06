@@ -40,7 +40,7 @@ fn missing_parent_does_not_prove_a_drain_finished() {
             Some("global-us"),
         ),
     );
-    let result = gdl_gen::down(&fleet, &waits(), &mut kube, &mut |_| {});
+    let result = gdl_gen::down(&fleet, &waits(), &mut kube, &mut NoSlurm, &mut |_| {});
     let deleted = deletes(&log, "kind-use1");
     assert!(
         result.is_err() && deleted.is_empty(),
@@ -87,7 +87,7 @@ fn a_parent_that_does_not_answer_does_not_prove_a_drain_finished() {
             Some("global-us"),
         ),
     );
-    let error = gdl_gen::down(&fleet, &waits(), &mut kube, &mut |_| {})
+    let error = gdl_gen::down(&fleet, &waits(), &mut kube, &mut NoSlurm, &mut |_| {})
         .expect_err("an unproven drain")
         .to_string();
     assert!(

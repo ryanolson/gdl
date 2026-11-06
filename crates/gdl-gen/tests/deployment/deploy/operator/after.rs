@@ -71,10 +71,18 @@ fn assert_parent_survives_replacement_after_delete(prune: bool) {
             waits: waits(),
             sources: gdl_gen::Sources::Fetched,
             allow_pool_restart: false,
+            images: None,
+            replace: false,
         };
-        gdl_gen::deploy(&how, &mut docker, &mut raced, &mut |_| {})
+        gdl_gen::deploy(&how, &mut docker, &mut raced, &mut NoSlurm, &mut |_| {})
     } else {
-        gdl_gen::down(&files.fleet, &waits(), &mut raced, &mut |_| {})
+        gdl_gen::down(
+            &files.fleet,
+            &waits(),
+            &mut raced,
+            &mut NoSlurm,
+            &mut |_| {},
+        )
     };
     assert!(
         raced.replaced,

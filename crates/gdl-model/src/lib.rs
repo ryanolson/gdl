@@ -42,7 +42,7 @@ pub use encoding::Encoding;
 pub use fleet::{
     Cluster, ClusterResources, Fleet, FleetBackend, FleetDirectory, FleetError, FleetErrors,
     FleetMetrics, FleetTable, HUB, KubernetesCluster, PoolDgd, PoolResources, PoolSlurm,
-    Quantities, Quantity, Resources, SlurmSite, Toleration,
+    Quantities, Quantity, Resources, SlurmReach, SlurmSite, Toleration,
 };
 pub use leave::LeaveBy;
 pub use manifest::{

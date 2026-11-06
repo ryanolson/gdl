@@ -14,6 +14,7 @@ fn drain_deadline_bounds_a_stalled_kubectl() {
             Path::new(&fleet),
             &bounds,
             &mut gdl_gen::Kubectl,
+            &mut NoSlurm,
             &mut |_| {},
         );
         if std::env::var("GDL_REVIEW_STALL").as_deref() == Ok("1") {

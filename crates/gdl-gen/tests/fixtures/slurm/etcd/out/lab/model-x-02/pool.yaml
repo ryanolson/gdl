@@ -12,7 +12,8 @@
     ],
     "nodes": "all",
     "teardown": [
-      "rm -f '/shared/gdl-runs/api/model-x-02'/job.$SLURM_JOB_ID.end"
+      "rm -f '/shared/gdl-runs/api/model-x-02'/job.$SLURM_JOB_ID.end",
+      "rm -f '/shared/gdl-runs/api/model-x-02'/hub.$SLURM_JOB_ID.address"
     ]
   },
   "model": {
@@ -28,7 +29,7 @@
   },
   "resources": {},
   "sbatch_directives": {
-    "comment": "gdl:api:model-x-02:pool:d5a2edad546c86b0",
+    "comment": "gdl:api:model-x-02:pool:c7eefa6bf7b96f7d",
     "exclusive": "",
     "no-kill": "",
     "no-requeue": "",
@@ -58,7 +59,7 @@
       "placement": {
         "node": "head"
       },
-      "preamble": "a=$(cat /fleet/directory.endpoint 2>/dev/null || true); case \"$a\" in http://?*:[0-9]*) export GDL_POOL__ENDPOINTS=\"[\\\"$a\\\"]\" ;; *) echo \"gdl: /shared/gdl-runs/api/directory.endpoint names no etcd: submit the fleet's directory job, and wait for it to write the file\" >&2; exit 1 ;; esac; end=$(cat /gdl/job.$SLURM_JOB_ID.end 2>/dev/null || true); case \"$end\" in ''|*[!0-9]*) ;; *) export GDL_POOL__LEAVE_BY=\"$end\"000 ;; esac",
+      "preamble": "a=$(cat /fleet/directory.endpoint 2>/dev/null || true); case \"$a\" in http://?*:[0-9]*) export GDL_POOL__ENDPOINTS=\"[\\\"$a\\\"]\" ;; *) echo \"gdl: /shared/gdl-runs/api/directory.endpoint names no etcd: submit the fleet's directory job, and wait for it to write the file\" >&2; exit 1 ;; esac; { printf '%s %s\\n' '{node_ip}:1337' '{node_ip}:8337' > /gdl/hub.$SLURM_JOB_ID.address.tmp && mv /gdl/hub.$SLURM_JOB_ID.address.tmp /gdl/hub.$SLURM_JOB_ID.address; } || { echo \"gdl: the hub cannot write /shared/gdl-runs/api/model-x-02/hub.$SLURM_JOB_ID.address, which tells cargo gdl where it is\" >&2; exit 1; }; end=$(cat /gdl/job.$SLURM_JOB_ID.end 2>/dev/null || true); case \"$end\" in ''|*[!0-9]*) ;; *) export GDL_POOL__LEAVE_BY=\"$end\"000 ;; esac",
       "readiness": {
         "http": {
           "path": "/v1/health",

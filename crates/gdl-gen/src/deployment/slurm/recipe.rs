@@ -348,8 +348,9 @@ impl Render<'_> {
             "command": [BINARY, format!("{SETTINGS}/deployment.json")],
             "env": hub_env,
             "preamble": format!(
-                "{}; {}",
+                "{}; {}; {}",
                 read_address(&self.fleet_dir(site), self.store),
+                hub_address(&format!("{}/{}", self.fleet_dir(site), pool.name)),
                 leave_by("GDL_POOL__LEAVE_BY")
             ),
             "readiness": {
@@ -426,7 +427,12 @@ impl Render<'_> {
             self.mounts(site, pool),
             directives,
         );
-        job["host_setup"] = job_end(&format!("{}/{}", self.fleet_dir(site), pool.name));
+        let pool_dir = format!("{}/{}", self.fleet_dir(site), pool.name);
+        job["host_setup"] = job_end(&pool_dir);
+        job["host_setup"]["teardown"]
+            .as_array_mut()
+            .expect("job_end writes a teardown")
+            .push(format!("rm -f {}/{HUB_ADDRESS}", sh_quote(&pool_dir)).into());
         let fleet_name = self.fleet_name;
         // Each job's hash covers the settings it reads: a pool's, all of
         // them; a join job's, its segment's alone.
@@ -823,6 +829,23 @@ fn job_end(dir: &str) -> Value {
 /// quotes, each of its own written `'\''`.
 fn sh_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// The file a pool's hub writes its addresses to, in its pool's
+/// directory, for `cargo gdl deploy` and `down` on the login node: one per
+/// job, since an old job's file may outlive it when its teardown does not
+/// run.
+pub(crate) const HUB_ADDRESS: &str = "hub.$SLURM_JOB_ID.address";
+
+/// The part of a hub's preamble that writes [`HUB_ADDRESS`] in the pool's
+/// directory, `dir` on the shared file system: its public and its control
+/// address, on its node's address, which srt-slurm fills in. A hub that
+/// cannot write it does not start: nothing could reach it.
+fn hub_address(dir: &str) -> String {
+    let file = format!("{SETTINGS}/{HUB_ADDRESS}");
+    format!(
+        "{{ printf '%s %s\\n' '{{node_ip}}:{HUB_PUBLIC_PORT}' '{{node_ip}}:{HUB_CONTROL_PORT}' > {file}.tmp && mv {file}.tmp {file}; }} || {{ echo \"gdl: the hub cannot write {dir}/{HUB_ADDRESS}, which tells cargo gdl where it is\" >&2; exit 1; }}"
+    )
 }
 
 /// The preamble of a gdl process in a job: `variable`, its leave time,

@@ -89,12 +89,12 @@ pub(super) fn kube_of<'a>(
     Some((name, cluster.kubernetes()?))
 }
 
-/// Why `command` refuses Slurm site `name`: it renders or runs Kubernetes
-/// clusters only. `cargo gdl slurm` renders a Slurm site's recipes, and no
-/// command runs one yet.
+/// Why `command` refuses Slurm site `name`: it renders Kubernetes clusters
+/// only. `cargo gdl slurm` renders a Slurm site's recipes, and `cargo gdl
+/// deploy` runs a fleet whose clusters are all Slurm sites.
 pub(super) fn slurm_refused(name: &str, command: &str) -> String {
     format!(
-        "`{name}` is a Slurm site: {command} only Kubernetes clusters. `cargo gdl slurm` renders a Slurm site's recipes, and no command runs one yet. Run the fleet's pools on Kubernetes clusters, or leave the site out of the fleet"
+        "`{name}` is a Slurm site: {command} only Kubernetes clusters. `cargo gdl slurm` renders a Slurm site's recipes, and `cargo gdl deploy` runs a fleet whose clusters are all Slurm sites. Run the fleet's pools on Kubernetes clusters, or leave the site out of the fleet"
     )
 }
 

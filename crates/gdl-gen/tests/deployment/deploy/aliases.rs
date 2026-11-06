@@ -32,8 +32,10 @@ fn prune_keeps_rendered_pools_through_context_aliases() {
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
         allow_pool_restart: false,
+        images: None,
+        replace: false,
     };
-    let result = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {});
+    let result = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut NoSlurm, &mut |_| {});
     let deleted = deletes(&log, "shared-cluster");
     assert!(
         deleted.is_empty(),
@@ -83,8 +85,10 @@ fn prune_refuses_an_object_this_deploy_applied() {
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
         allow_pool_restart: false,
+        images: None,
+        replace: false,
     };
-    let error = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {})
+    let error = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut NoSlurm, &mut |_| {})
         .expect_err("a prune of an applied object")
         .to_string();
     assert!(
