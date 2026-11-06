@@ -4,7 +4,9 @@
 //! child's last record, so that a late record of the old epoch cannot undo
 //! it. Under `memory` (as `dir`: a directory the hubs share) the parent
 //! writes through the directory; under `relay` it writes into the records
-//! its children report to it.
+//! its children report to it. A child whose record is fresh, heard by the
+//! parent within its lease, may still have a hub: the parent refuses to
+//! command it, with `409` and how long until the lease passes.
 //!
 //! Every hub runs in this process on OS-assigned ports; every wait is
 //! bounded and for something observed.
@@ -15,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use common::{GLOBAL, Records, WAIT, address, config, global_default, hub_of, spec, timing};
 use futures::StreamExt;
-use gdl_hub::{GraphAdmission, HubDirectory, PoolReadiness, PoolTiming};
+use gdl_hub::{Commanded, GraphAdmission, HubDirectory, PoolReadiness, PoolTiming};
 use gdl_model::PoolSettings;
 use gdl_pools::{
     DirectoryError, MemoryDirectory, PoolDirectory, PoolEvent, PoolRecord, PoolView, Presence,
@@ -58,6 +60,51 @@ async fn command(hub: &Hub, path: &str) -> u16 {
     response.status().as_u16()
 }
 
+/// Give the command at `path` on `hub`'s control listener: the status,
+/// the `Retry-After` header, if any, and the body.
+async fn answer(hub: &Hub, path: &str) -> (u16, Option<String>, String) {
+    let url = format!(
+        "http://127.0.0.1:{}/v1/ext/gdl-pool{path}",
+        hub.control_addr().port()
+    );
+    let response = tokio::time::timeout(WAIT, reqwest::Client::new().post(&url).send())
+        .await
+        .expect("the hub answers in time")
+        .expect("the hub answers");
+    let status = response.status().as_u16();
+    let retry = response
+        .headers()
+        .get("retry-after")
+        .map(|value| value.to_str().expect("an ASCII header").to_string());
+    let body = response.text().await.expect("a body");
+    (status, retry, body)
+}
+
+/// Give the command at `path` as a caller does once a child's hub is gone:
+/// a `409` for a fresh record says how long until its lease passes on the
+/// parent's clock, so wait that long and ask once more. The lease passing
+/// is the event waited for; the hub names when it comes. The final status.
+async fn after_lease(hub: &Hub, path: &str) -> u16 {
+    let (status, _, body) = answer(hub, path).await;
+    if status != 409 {
+        return status;
+    }
+    let fresh: gdl_model::FreshChild = serde_json::from_str(&body).expect("a fresh child's 409");
+    tokio::time::sleep(fresh.wait()).await;
+    command(hub, path).await
+}
+
+/// The child's timing: a short lease, renewed every heartbeat, so that a
+/// child whose hub is gone lapses at its parent in well under a second,
+/// and one whose hub runs is heard several times within each lease.
+fn short() -> PoolTiming {
+    PoolTiming {
+        heartbeat: Duration::from_millis(100),
+        lease: Duration::from_millis(600),
+        ..timing()
+    }
+}
+
 fn withdraw(pool: &str) -> String {
     gdl_watch::child_withdraw_path("model_x", pool)
 }
@@ -87,7 +134,7 @@ async fn view(directory: &impl PoolDirectory, now: Instant) -> PoolView {
 /// A child's hub that published its record and stopped: its last record.
 async fn gone_child(directory: &MemoryDirectory) -> PoolRecord {
     let mut records = Records::of(directory, "model_x", CHILD);
-    let (hub, _child) = hub_of(child(None), directory.clone(), timing()).await;
+    let (hub, _child) = hub_of(child(None), directory.clone(), short()).await;
     let last = records.next().await;
     hub.shutdown().await.expect("the child's hub stops");
     last
@@ -103,7 +150,7 @@ async fn a_parent_withdraws_a_child_whose_hub_is_gone() {
     let last = gone_child(&directory).await;
     assert_eq!(last.properties.len(), 1, "{last:?}");
 
-    assert_eq!(command(&parent, &withdraw(CHILD)).await, 204);
+    assert_eq!(after_lease(&parent, &withdraw(CHILD)).await, 204);
     let now = Instant::now();
     let seen = view(&directory, now).await;
     assert!(seen.get(CHILD, now).is_none(), "withdrawn");
@@ -137,7 +184,7 @@ async fn a_parent_says_a_child_whose_hub_is_gone_was_scaled_to_zero() {
     let (parent, _readiness) = hub_of(global_default(), directory.clone(), timing()).await;
     let last = gone_child(&directory).await;
 
-    assert_eq!(command(&parent, &scale_to_zero(CHILD)).await, 204);
+    assert_eq!(after_lease(&parent, &scale_to_zero(CHILD)).await, 204);
     let late = PoolRecord {
         seq: last.seq + 100,
         ..last.clone()
@@ -188,7 +235,7 @@ async fn a_parent_commands_only_its_own_children() {
     let held = view(&directory, now).await;
     assert_eq!(held.get(&other.name, now), Some(&other), "untouched");
     assert_eq!(
-        command(&parent, &withdraw(CHILD)).await,
+        after_lease(&parent, &withdraw(CHILD)).await,
         204,
         "its own child is found"
     );
@@ -227,12 +274,74 @@ directory = 'memory'
         404,
         "a child whose home is the first global"
     );
-    assert_eq!(command(&parent, &withdraw(&shared.name)).await, 204);
+    assert_eq!(after_lease(&parent, &withdraw(&shared.name)).await, 204);
     let now = Instant::now();
     let seen = view(&directory, now).await;
     assert!(seen.get(&shared.name, now).is_none(), "withdrawn");
     assert!(seen.get(CHILD, now).is_some(), "untouched");
     parent.shutdown().await.expect("the parent's hub stops");
+}
+
+/// A child whose hub still runs is fresh: the parent refuses to withdraw
+/// it or scale it to 0, with `409`, `Retry-After`, and how long until its
+/// lease passes, and writes nothing. Once its hub stops and its lease
+/// passes on the parent's clock, the same child is withdrawn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parent_refuses_to_command_a_child_it_still_hears() {
+    let directory = MemoryDirectory::new();
+    let (parent, _readiness) = hub_of(global_default(), directory.clone(), timing()).await;
+    let mut records = Records::of(&directory, "model_x", CHILD);
+    let (hub, _child) = hub_of(child(None), directory.clone(), short()).await;
+    let first = records.next().await;
+
+    for path in [withdraw(CHILD), scale_to_zero(CHILD)] {
+        refused_as_fresh(&parent, &path, &short()).await;
+    }
+    let now = Instant::now();
+    let held = view(&directory, now)
+        .await
+        .get(CHILD, now)
+        .cloned()
+        .expect("the child's record is still held");
+    assert_eq!(held.presence, Presence::Serving, "not scaled to 0");
+    assert_eq!(held.epoch, first.epoch, "no command was written past it");
+
+    hub.shutdown().await.expect("the child's hub stops");
+    assert_eq!(after_lease(&parent, &withdraw(CHILD)).await, 204);
+    let now = Instant::now();
+    assert!(
+        view(&directory, now).await.get(CHILD, now).is_none(),
+        "withdrawn"
+    );
+    parent.shutdown().await.expect("the parent's hub stops");
+}
+
+/// The command at `path` on `parent` is refused as for a fresh child: `409`,
+/// a `Retry-After` of whole seconds no more than the lease rounded up, and
+/// a body that names the pool and says how long until its lease passes.
+async fn refused_as_fresh(parent: &Hub, path: &str, child: &PoolTiming) {
+    let (status, retry, body) = answer(parent, path).await;
+    assert_eq!(status, 409, "{path}: {body}");
+    let fresh: gdl_model::FreshChild = serde_json::from_str(&body).expect(&body);
+    assert_eq!(
+        u128::from(fresh.lease_ms),
+        child.lease.as_millis(),
+        "{body}"
+    );
+    assert!(fresh.retry_after_ms <= fresh.lease_ms, "{body}");
+    assert!(fresh.error.contains(CHILD), "{body}");
+    let retry: u64 = retry
+        .expect("a Retry-After header")
+        .parse()
+        .expect("seconds");
+    assert!(
+        (1..=child.lease.as_secs().max(1) + 1).contains(&retry),
+        "{retry} s"
+    );
+    assert!(
+        retry * 1000 >= fresh.retry_after_ms,
+        "rounded up: {retry} s, {body}"
+    );
 }
 
 /// A pool's hub under the `relay` backend, its own name resolved once it
@@ -301,7 +410,7 @@ async fn gone_relay_child() -> (RelayPool, PoolRecord) {
     let parent = relay_pool(relay_global(), timing()).await;
     let watcher = PoolWatcher::new().expect("a client");
     let at = address(&parent.hub);
-    let child = relay_pool(child(Some(&at)), timing()).await;
+    let child = relay_pool(child(Some(&at)), short()).await;
     let reported = tokio::time::timeout(WAIT, async {
         loop {
             if let Ok(Some(gdl_pools::LastWrite::Record(record))) =
@@ -334,7 +443,7 @@ async fn under_relay_a_parent_withdraws_a_gone_child() {
     let at = address(&parent.hub);
     let watcher = PoolWatcher::new().expect("a client");
 
-    assert_eq!(command(&parent.hub, &withdraw(CHILD)).await, 204);
+    assert_eq!(after_lease(&parent.hub, &withdraw(CHILD)).await, 204);
     // No record, only the tombstone, which keeps the record's list version.
     match watcher.held(&at, "model_x", CHILD).await {
         Ok(Some(gdl_pools::LastWrite::Withdrawn(withdrawal))) => {
@@ -370,7 +479,7 @@ async fn under_relay_a_parent_scales_a_gone_child_to_zero() {
     let at = address(&parent.hub);
     let watcher = PoolWatcher::new().expect("a client");
 
-    assert_eq!(command(&parent.hub, &scale_to_zero(CHILD)).await, 204);
+    assert_eq!(after_lease(&parent.hub, &scale_to_zero(CHILD)).await, 204);
     let late = Report::Record(PoolRecord {
         seq: last.seq + 100,
         ..last.clone()
@@ -383,6 +492,55 @@ async fn under_relay_a_parent_scales_a_gone_child_to_zero() {
         .expect("a pool scaled to 0 never lapses");
     assert_eq!(scaled.presence, Presence::ScaledToZero);
     assert!(scaled.version() > last.version());
+    parent.hub.shutdown().await.expect("the parent's hub stops");
+}
+
+/// Under `relay`, a child that still reports is fresh: the parent refuses
+/// to withdraw it or scale it to 0, and still holds its record as the
+/// child wrote it. Once its hub stops and its lease passes, it is
+/// withdrawn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn under_relay_a_parent_refuses_to_command_a_child_that_reports() {
+    let parent = relay_pool(relay_global(), timing()).await;
+    let watcher = PoolWatcher::new().expect("a client");
+    let at = address(&parent.hub);
+    let child = relay_pool(child(Some(&at)), short()).await;
+    let reported = tokio::time::timeout(WAIT, async {
+        loop {
+            if let Ok(Some(gdl_pools::LastWrite::Record(record))) =
+                watcher.held(&at, "model_x", CHILD).await
+            {
+                return *record;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the child reports in time");
+
+    for path in [withdraw(CHILD), scale_to_zero(CHILD)] {
+        refused_as_fresh(&parent.hub, &path, &short()).await;
+    }
+    match watcher.held(&at, "model_x", CHILD).await {
+        Ok(Some(gdl_pools::LastWrite::Record(record))) => {
+            assert_eq!(
+                record.epoch, reported.epoch,
+                "no command was written past it"
+            );
+            assert_eq!(record.presence, Presence::Serving);
+        }
+        other => panic!("the child's record: {other:?}"),
+    }
+
+    child.hub.shutdown().await.expect("the child's hub stops");
+    assert_eq!(after_lease(&parent.hub, &withdraw(CHILD)).await, 204);
+    assert!(
+        matches!(
+            watcher.held(&at, "model_x", CHILD).await,
+            Ok(Some(gdl_pools::LastWrite::Withdrawn(_)))
+        ),
+        "withdrawn"
+    );
     parent.hub.shutdown().await.expect("the parent's hub stops");
 }
 
@@ -417,7 +575,7 @@ async fn a_followed_child_withdrawn_by_the_operator_reads_as_withdrawn() {
     let (child, _readiness) = common::serve_pool(
         common::model(CHILD, "us-east-1", "model-x-02-hub:1337"),
         &directory,
-        timing(),
+        short(),
     )
     .await;
     let (instances, _) = common::meet_the_quorum(&child).await;
@@ -432,7 +590,7 @@ async fn a_followed_child_withdrawn_by_the_operator_reads_as_withdrawn() {
     drop(instances);
     child.shutdown().await.expect("the child's hub stops");
 
-    assert_eq!(command(&parent, &withdraw(CHILD)).await, 204);
+    assert_eq!(after_lease(&parent, &withdraw(CHILD)).await, 204);
     let withdrawn = tokio::time::timeout(WAIT, async {
         while let Some(event) = relay.next().await {
             if matches!(&event, gdl_watch::FollowEvent::Withdrawn { pool, .. } if pool == CHILD) {
@@ -513,15 +671,36 @@ async fn a_hub_none_of_whose_writes_was_answered_moves_past_a_command() {
             attempts,
         };
         let (parent, parent_pool) = hub_of(global_default(), records.clone(), timing()).await;
-        let (hub, readiness) = hub_of(child(None), directory.clone(), timing()).await;
+        // A heartbeat far longer than the lease: the hub writes nothing
+        // while its first write waits, and is silent to its parent.
+        let silent = PoolTiming {
+            lease: short().lease,
+            ..timing()
+        };
+        let (hub, readiness) = hub_of(child(None), directory.clone(), silent).await;
         tokio::time::timeout(WAIT, directory.arrived.notified())
             .await
             .expect("the child's first record is stored, with no answer yet");
-        let command = parent_pool
-            .command_child("model_x", CHILD, operator)
-            .await
-            .expect("the operator's command is stored")
-            .expect("the parent found its child");
+        // The child's hub waits on its first write and sends no
+        // heartbeat: its lease passes on the parent's clock, and the
+        // parent then takes the command, as for a hub that is gone. A hub
+        // that is still heard is refused the command, so the exception
+        // needs a hub silent for a whole lease that then writes again.
+        let command = tokio::time::timeout(WAIT, async {
+            loop {
+                match parent_pool
+                    .command_child("model_x", CHILD, operator)
+                    .await
+                    .expect("the operator's command is stored")
+                {
+                    Commanded::Written(version) => return version,
+                    Commanded::Fresh(fresh) => tokio::time::sleep(fresh.wait()).await,
+                    Commanded::Unknown => panic!("the parent found its child"),
+                }
+            }
+        })
+        .await
+        .expect("the child's lease passes in time");
 
         directory.release.notify_one();
         let retrying = tokio::spawn(async move { readiness.set_presence(Presence::Serving).await });

@@ -16,6 +16,7 @@ mod deployment;
 mod diagram;
 mod encoding;
 mod fleet;
+mod fresh;
 mod hash;
 mod leave;
 mod manifest;
@@ -44,6 +45,7 @@ pub use fleet::{
     FleetMetrics, FleetTable, HUB, KubernetesCluster, PoolDgd, PoolResources, PoolSlurm,
     Quantities, Quantity, Resources, SlurmReach, SlurmSite, Toleration,
 };
+pub use fresh::FreshChild;
 pub use leave::LeaveBy;
 pub use manifest::{
     HopInfo, ItemInfo, Manifest, NodeInfo, PropertyInfo, PropertyNeed, TypeInfo, UnaryInfo,

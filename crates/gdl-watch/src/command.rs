@@ -31,13 +31,24 @@ pub const LIFT_ROUTE: &str = "/properties/lift";
 /// `409 Conflict` when the directory refused it, and
 /// `503 Service Unavailable` when the directory could not be read or
 /// written.
+///
+/// Refused, and nothing written, while the child's record is fresh: it
+/// is `serving`, and the parent's hub heard a new version of it within
+/// its lease, on the hub's own clock. A fresh child may still have a
+/// hub, which a withdrawal past its epoch would cut off for good. The
+/// answer is `409 Conflict` with a `Retry-After` header, in whole
+/// seconds rounded up, and a [`gdl_model::FreshChild`] body. A caller
+/// waits [`gdl_model::FreshChild::wait`] and asks once more: a child whose hub has just
+/// died is then withdrawn, and one that is still heard is refused again.
+/// No flag overrides the check: a live pool leaves through its own drain.
 pub const CHILD_WITHDRAW_ROUTE: &str = "/children/{class}/{pool}/withdraw";
 
 /// The route by which an operator says that a child pool whose hub is
 /// gone was scaled to 0 on purpose, on the parent's hub: `POST`, with no
 /// body. The parent writes the child's last record again, scaled to 0,
 /// at an epoch past it ([`gdl_pools::PoolCommand::ScaleToZero`]).
-/// Answered as [`CHILD_WITHDRAW_ROUTE`] is.
+/// Answered as [`CHILD_WITHDRAW_ROUTE`] is, and refused the same way while
+/// the child's record is fresh.
 pub const CHILD_SCALE_TO_ZERO_ROUTE: &str = "/children/{class}/{pool}/scale-to-zero";
 
 /// [`CHILD_WITHDRAW_ROUTE`]'s path for the child `pool` of `class`.

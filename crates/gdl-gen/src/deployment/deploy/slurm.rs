@@ -33,7 +33,7 @@ mod jobs;
 
 use cli::{Lines, submitted};
 pub use cli::{Slurm, SlurmCli, SlurmCommand};
-use hubs::{Address, Hubs};
+use hubs::{Address, Hubs, Withdrawn};
 use jobs::{Job, Kind, Ran};
 
 /// The pointer the directory's job writes in the fleet's directory: a link
@@ -400,10 +400,7 @@ impl<'s> SlurmPlace<'s> {
             // jobs publishes a record of its own, which the withdrawal,
             // written past the last record, would withdraw.
             if *name == pool.pool {
-                return Err(Error::new(format!(
-                    "pool `{}` has job {} ({}), which was not listed when this run began, so its record is not withdrawn. Nothing above it stops: run this again",
-                    pool.pool, job.id, job.state
-                )));
+                return Err(submitted_again(&pool.pool, &job));
             }
             if job.state != "RUNNING" || hubs.contains_key(name) {
                 continue;
@@ -434,12 +431,49 @@ impl<'s> SlurmPlace<'s> {
             return Ok(());
         }
         for home in asked {
-            let answer = Hubs {
-                slurm: &mut *self.slurm,
-                reach: self.home.reach,
-                hubs: &hubs,
+            let (reach, budget) = (self.home.reach, self.waits.objects);
+            let withdraw = |slurm: &mut dyn Slurm| {
+                Hubs {
+                    slurm,
+                    reach,
+                    hubs: &hubs,
+                }
+                .withdraw(&home, &pool.class, &pool.pool, budget)
+            };
+            let mut answer = withdraw(&mut *self.slurm)?;
+            // The parent still hears the pool's hub: a hub that has just
+            // died stops being heard within one lease, so wait for it to
+            // pass and ask once more. A hub heard again is live, maybe
+            // under another user's job that `squeue --me` does not list.
+            if let Withdrawn::Fresh(fresh) = &answer {
+                say(&format!(
+                    "withdraw: parent `{home}`'s hub still hears pool `{}`; waiting {} ms for its lease to pass",
+                    pool.pool,
+                    fresh.wait().as_millis()
+                ));
+                self.slurm.wait(fresh.wait());
+                // The wait is long: a job submitted for the pool meanwhile,
+                // whose hub has not published yet, would lose its record to
+                // a withdrawal past the old one's.
+                let listed = self.list()?;
+                if let Some(job) = listed
+                    .iter()
+                    .find(|job| matches!(&job.kind, Kind::Pool(name) if *name == pool.pool))
+                {
+                    return Err(submitted_again(&pool.pool, job));
+                }
+                answer = withdraw(&mut *self.slurm)?;
             }
-            .withdraw(&home, &pool.class, &pool.pool, self.waits.objects)?;
+            let answer = match answer {
+                Withdrawn::Answer(answer) => answer,
+                Withdrawn::Fresh(fresh) => {
+                    return Err(Error::new(format!(
+                        "pool `{}` has no job of yours, but parent `{home}`'s hub still hears it, so its record is not withdrawn ({}). Its job may be another user's, or it is still running: stop it through its own drain or job, then run this again. Nothing above it stops",
+                        pool.pool,
+                        fresh.error.trim()
+                    )));
+                }
+            };
             match answer {
                 Answer::Body(_) => {
                     let done = match &pool.seen {
@@ -1343,5 +1377,15 @@ fn slurm_version(said: &str) -> Option<(u32, u32, u32)> {
         number(parts.next()?)?,
         number(parts.next()?)?,
         number(parts.next()?)?,
+    ))
+}
+
+/// The refusal to withdraw `pool`, whose job `job` was not listed when the
+/// run began: the job publishes a record of its own, which a withdrawal
+/// written past the last record would withdraw.
+fn submitted_again(pool: &str, job: &Job) -> Error {
+    Error::new(format!(
+        "pool `{pool}` has job {} ({}), which was not listed when this run began, so its record is not withdrawn. Nothing above it stops: run this again",
+        job.id, job.state
     ))
 }

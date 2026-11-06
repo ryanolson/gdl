@@ -35,6 +35,7 @@ use gdl_watch::{LoadReport, PoolWatchError, PoolWatcher, Unoffered};
 /// in the moment between the write and the hub learning it was stored.
 const SETTLE: Duration = Duration::from_secs(5);
 
+mod command;
 mod count;
 mod drain;
 mod feed;
@@ -54,6 +55,7 @@ mod timing;
 #[cfg(test)]
 mod tests;
 
+pub use command::Commanded;
 pub use feed::PoolWatch;
 pub use health::{PoolHealth, RequiredHealth, SegmentHealth, Waiting};
 pub use stop::{PoolStop, Stopped};
@@ -697,70 +699,6 @@ impl<D: PoolDirectory> PoolReadiness<D> {
         }
     }
 
-    /// Give an operator's `command` for the child `pool` of `class` whose
-    /// hub is gone, as `POST children/{class}/{pool}/withdraw` and
-    /// `POST children/{class}/{pool}/scale-to-zero` on the control listener
-    /// do: read the child's last record, and write the command at an epoch
-    /// past it ([`gdl_pools::PoolCommand`]). The version written, or
-    /// `None` when the hub's directory holds no record of a child of this
-    /// pool by that name, of a class this pool sends to. A shared pool is
-    /// a child of every pool of its parents' class, so the hub of any of
-    /// them takes the command.
-    ///
-    /// Under the `relay` backend the hub holds its children's records
-    /// itself, and writes the command into them as
-    /// it writes a child's report; under any other backend it reads and
-    /// writes the directory it watches. The directory refuses the write as
-    /// it refuses any other, and an error is the directory's.
-    pub async fn command_child(
-        &self,
-        class: &str,
-        pool: &str,
-        command: gdl_pools::PoolCommand,
-    ) -> Result<Option<gdl_pools::Version>, gdl_pools::DirectoryError> {
-        if !self.sends.iter().any(|sent| sent == class) {
-            return Ok(None);
-        }
-        let last = match &self.reports {
-            Some(reports) => reports.held(class, pool),
-            None => {
-                let read = gdl_pools::last_record(&*self.directory, class, pool);
-                tokio::time::timeout(SETTLE, read)
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(gdl_pools::DirectoryError::Unavailable(format!(
-                            "the pool's records were not read within {SETTLE:?}"
-                        )))
-                    })?
-            }
-        };
-        let child = |last: &PoolRecord| {
-            last.parent
-                .as_ref()
-                .is_some_and(|parent| parent.includes(&self.record.name, &self.record.class))
-                && (last.contract, last.placement) == (self.record.contract, self.record.placement)
-        };
-        let Some(last) = last.filter(child) else {
-            return Ok(None);
-        };
-        let write = command.write(&last, std::time::SystemTime::now());
-        let version = write.version();
-        match (&self.reports, write) {
-            (Some(reports), gdl_pools::CommandWrite::Record(record)) => {
-                Arc::clone(reports)
-                    .take(gdl_watch::Report::Record(*record), None)
-                    .await?;
-            }
-            (Some(reports), gdl_pools::CommandWrite::Withdrawal(withdrawal)) => {
-                Arc::clone(reports)
-                    .take(gdl_watch::Report::Withdrawal(withdrawal), None)
-                    .await?;
-            }
-            (None, write) => write.to(&*self.directory).await?,
-        }
-        Ok(Some(version))
-    }
-
     /// How many watches of what the hub follows are open, as it changes.
     pub fn follows_watchers(&self) -> watch::Receiver<usize> {
         self.relay.watchers()
@@ -1286,7 +1224,7 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
                 post(
                     move |Path((class, pool)): Path<(String, String)>| async move {
                         let command = gdl_pools::PoolCommand::Withdraw;
-                        command_child(&withdrawing, &class, &pool, command).await
+                        command::answer(&withdrawing, &class, &pool, command).await
                     },
                 ),
             )
@@ -1295,7 +1233,7 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
                 post(
                     move |Path((class, pool)): Path<(String, String)>| async move {
                         let command = gdl_pools::PoolCommand::ScaleToZero;
-                        command_child(&zeroing, &class, &pool, command).await
+                        command::answer(&zeroing, &class, &pool, command).await
                     },
                 ),
             )
@@ -1423,30 +1361,6 @@ struct ReportQuery {
 #[derive(Deserialize)]
 struct RelayQuery {
     instance: Option<velo_hub::velo::InstanceId>,
-}
-
-/// Give `command` for the child `name` of `class` on `pool`'s hub, and
-/// answer: a child the hub holds no record of is not found (404), a write
-/// the directory refused conflicts (409), and a directory that cannot be
-/// read or written is unavailable (503).
-async fn command_child<D: PoolDirectory>(
-    pool: &PoolReadiness<D>,
-    class: &str,
-    name: &str,
-    command: gdl_pools::PoolCommand,
-) -> Response {
-    match pool.command_child(class, name, command).await {
-        Ok(Some(_)) => StatusCode::NO_CONTENT.into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            format!("this pool holds no record of a child pool `{name}` of class `{class}`"),
-        )
-            .into_response(),
-        Err(error @ gdl_pools::DirectoryError::Unavailable(_)) => {
-            (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response()
-        }
-        Err(error) => (StatusCode::CONFLICT, error.to_string()).into_response(),
-    }
 }
 
 /// Revoke the property `body` names on `pool`, or lift its revocation,

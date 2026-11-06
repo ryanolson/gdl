@@ -19,6 +19,12 @@ pub trait Slurm {
     /// that ran and failed, or ran past its budget, is a [`Reply`] that did
     /// not succeed.
     fn run(&mut self, command: &SlurmCommand) -> Result<Reply, Error>;
+
+    /// Wait `how_long` before the next command: a hub said when to ask
+    /// again. A test's fake records the wait instead, so no time passes.
+    fn wait(&mut self, how_long: Duration) {
+        std::thread::sleep(how_long);
+    }
 }
 
 /// One command a Slurm site runs.

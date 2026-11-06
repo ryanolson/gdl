@@ -730,16 +730,49 @@ async fn a_revoked_property_leaves_the_pools_listing() {
     model_hub.shutdown().await.expect("the hub stops");
 }
 
+/// `POST` the withdrawal of the child `pool` on `hub`'s control listener
+/// as a caller does once the child's hub is gone: a `409` for a fresh
+/// record says how long until its lease passes on the parent's clock, so
+/// wait that long and ask once more. The final status.
+async fn withdraw_after_lease(hub: &velo_hub::Hub, pool: &str) -> u16 {
+    let url = format!(
+        "http://127.0.0.1:{}/v1/ext/gdl-pool{}",
+        hub.control_addr().port(),
+        gdl_watch::child_withdraw_path("model_x", pool)
+    );
+    let response = tokio::time::timeout(WAIT, reqwest::Client::new().post(&url).send())
+        .await
+        .expect("the hub answers in time")
+        .expect("the hub answers");
+    if response.status().as_u16() != 409 {
+        return response.status().as_u16();
+    }
+    let fresh: gdl_model::FreshChild = response.json().await.expect("a fresh child's 409");
+    tokio::time::sleep(fresh.wait()).await;
+    tokio::time::timeout(WAIT, reqwest::Client::new().post(&url).send())
+        .await
+        .expect("the hub answers in time")
+        .expect("the hub answers")
+        .status()
+        .as_u16()
+}
+
 /// An operator's withdrawal of a child whose hub is gone, given on its
 /// parent's hub, unlists the child: its properties leave the index, as after
-/// the child's own drain.
+/// the child's own drain. The child's lease is short, so that it lapses at
+/// its parent soon after its hub stops.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_operators_withdrawal_unlists_the_pool() {
     let directory = Resolving::new();
+    let short = gdl_hub::PoolTiming {
+        heartbeat: Duration::from_millis(100),
+        lease: Duration::from_millis(600),
+        ..timing()
+    };
     let (model_hub, _model) = serve_pool(
         model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
-        timing(),
+        short,
     )
     .await;
     let (global_hub, global) = serve_pool(global_default(), &directory, timing()).await;
@@ -750,15 +783,7 @@ async fn an_operators_withdrawal_unlists_the_pool() {
     }
     model_hub.shutdown().await.expect("the child's hub stops");
 
-    assert_eq!(
-        control(
-            &global_hub,
-            &gdl_watch::child_withdraw_path("model_x", POOL),
-            None
-        )
-        .await,
-        204
-    );
+    assert_eq!(withdraw_after_lease(&global_hub, POOL).await, 204);
     let unlisted = tokio::time::timeout(WAIT, async {
         loop {
             if let FollowEvent::Listed {

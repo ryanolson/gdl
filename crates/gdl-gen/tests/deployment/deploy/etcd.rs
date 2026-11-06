@@ -399,5 +399,11 @@ fn an_etcd_pool_without_its_hub_names_etcd() {
         error.contains("`model-x-old`") && error.contains("withdrawn from the etcd directory"),
         "{error}"
     );
+    assert!(
+        error.contains(
+            "a 409 says its parent still hears it: wait `Retry-After` seconds and try once more"
+        ),
+        "{error}"
+    );
     assert!(!error.contains("DynamoDB"), "{error}");
 }

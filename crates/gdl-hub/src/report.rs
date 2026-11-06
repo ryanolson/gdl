@@ -272,6 +272,40 @@ impl Reports {
         })
     }
 
+    /// Give an operator's command for the child `pool` of `class` in its
+    /// turn among the reports: `decide` reads the record held for the
+    /// child, at a moment when no report of it can be stored, and says
+    /// what to write, or why nothing is written (`Err`). What it says is
+    /// verified and written before the next report's turn, so no heartbeat
+    /// of the child lands between the decision and the write. The version
+    /// written.
+    pub(crate) async fn command<T: Send + 'static>(
+        self: Arc<Self>,
+        class: &str,
+        pool: &str,
+        decide: impl FnOnce(Option<PoolRecord>) -> Result<Report, T> + Send + 'static,
+    ) -> Result<Result<Version, T>, DirectoryError> {
+        let (class, pool) = (class.to_owned(), pool.to_owned());
+        let turn = Arc::clone(&self.order).lock_owned().await;
+        tokio::spawn(async move {
+            let _turn = turn;
+            let report = match decide(self.held(&class, &pool)) {
+                Ok(report) => report,
+                Err(refused) => return Ok(Err(refused)),
+            };
+            let version = match &report {
+                Report::Record(record) => record.version(),
+                Report::Withdrawal(withdrawal) => withdrawal.version(),
+            };
+            if let Some(verified) = self.verify(report)? {
+                self.write(verified, None).await?;
+            }
+            Ok(Ok(version))
+        })
+        .await
+        .map_err(|error| DirectoryError::Unavailable(error.to_string()))?
+    }
+
     /// Whether `report` may be written: a record of the right shape whose
     /// `home` is this pool, whose hashes are this pool's, since a parent
     /// and its children share one layout, and that is newer than what is

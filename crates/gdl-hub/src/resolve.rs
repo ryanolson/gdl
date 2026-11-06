@@ -138,7 +138,7 @@ pub async fn resolve_hub<D: PoolDirectory>(
                 // already queued when the resolver runs again after the
                 // deadline would win: the clock decides.
                 match next {
-                    Ok(next) if Instant::now() < deadline => next,
+                    Ok(next) if gdl_pools::lease_holds(seen, lease, Instant::now()) => next,
                     _ => {
                         return Err(named(format!(
                             "no heartbeat within its lease, {} ms: its hub is gone",

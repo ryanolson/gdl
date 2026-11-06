@@ -1081,9 +1081,19 @@ fn a_fleet_deploys_on_a_slurm_site_and_comes_down_children_first() {
 
 /// The child pool's job is lost with its node: its hub and segment are
 /// killed, and Slurm no longer lists the job, while its record is still in
-/// the directory. `down` withdraws the record once, on the global pool's
-/// real hub, which writes the withdrawal in the directory and answers 204;
-/// then the global pool and the directory's job go as before.
+/// the directory. `down` withdraws it on the global pool's real hub, which
+/// writes the withdrawal in the directory and answers 204; then the global
+/// pool and the directory's job go as before.
+///
+/// The hub may still hear the child when `down` asks: the hubs run the
+/// default lease, 30 s, with a heartbeat every 10 s, and no fleet key
+/// shortens them. Then it refuses the first withdrawal with `409`, and
+/// `down` waits out the lease and asks once more. On a slow host the lease
+/// may have passed before `down` asks, and the first withdrawal is
+/// stored. Either path must end withdrawn, before the global pool stops;
+/// the refusal itself is proven on a clock the tests control
+/// (`gdl-hub/tests/operator.rs`, `deployment/deploy/slurm/gone.rs`).
+/// Slow by design: the wait for the lease is real time.
 #[test]
 fn down_withdraws_a_pool_whose_job_is_gone_through_its_parents_hub() {
     let up = Up::new();
@@ -1110,15 +1120,27 @@ fn down_withdraws_a_pool_whose_job_is_gone_through_its_parents_hub() {
         "{}",
         calls[withdraw]
     );
-    assert_eq!(
-        calls[from..]
-            .iter()
-            .filter(|call| call.ends_with("/withdraw"))
-            .count(),
-        1,
-        "{calls:#?}"
-    );
-    let terminate = find(&calls, withdraw + 1, "scancel --signal=TERM");
+    let withdrawals = calls[from..]
+        .iter()
+        .filter(|call| call.ends_with("/withdraw"))
+        .count();
+    let waited =
+        said.contains("withdraw: parent `global-us`'s hub still hears pool `model-x-01`; waiting");
+    // Refused while the lease was fresh, then asked once more; or asked
+    // once, after the lease had passed.
+    let stored = if waited {
+        assert_eq!(withdrawals, 2, "{said}\n{calls:#?}");
+        let retried = find(&calls, withdraw + 1, "curl ");
+        assert!(
+            calls[retried].ends_with("/model-x-01/withdraw"),
+            "{calls:#?}"
+        );
+        retried
+    } else {
+        assert_eq!(withdrawals, 1, "{said}\n{calls:#?}");
+        withdraw
+    };
+    let terminate = find(&calls, stored + 1, "scancel --signal=TERM");
     assert_eq!(calls[terminate], "scancel --signal=TERM 1002.1");
     find(&calls, terminate + 1, "scancel 1002");
     assert!(

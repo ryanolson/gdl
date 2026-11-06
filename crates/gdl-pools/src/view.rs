@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use crate::{PoolEvent, PoolRecord, Version, Withdrawal};
@@ -14,8 +14,8 @@ use crate::{PoolEvent, PoolRecord, Version, Withdrawal};
 /// - A withdrawal removes the record and keeps its version, so a late copy
 ///   cannot bring the record back, also across a [`PoolEvent::Resnapshot`].
 /// - A record is expired once the reader's clock shows its `seq`
-///   unchanged for longer than its lease, measured from when this view saw
-///   the `seq` change, never from a time in the record. Only a record
+///   unchanged for its whole lease, measured from when this view saw the
+///   `seq` change, never from a time in the record ([`lease_holds`]). Only a record
 ///   that is `serving` has a lease ([`PoolRecord::leased`]): one scaled to
 ///   0 sends no heartbeat, and never expires. An expired record
 ///   is not offered, and a late copy of the same version does not make it
@@ -160,6 +160,17 @@ impl PoolView {
 
 impl Seen {
     fn fresh(&self, now: Instant) -> bool {
-        !self.record.leased() || now.saturating_duration_since(self.changed) <= self.record.lease
+        !self.record.leased() || lease_holds(self.changed, self.record.lease, now)
     }
+}
+
+/// Whether a lease still holds at `now`, on a reader's own clock, that
+/// began at `heard`, when the reader first saw the record's version: it
+/// holds strictly before `heard + lease`, and has passed from that instant
+/// on. Every reader of a lease reads this one rule: a [`PoolView`], a
+/// parent hub's follow and its check before an operator's command, and the
+/// resolver of a pool's hub. So a caller that waits one whole lease from
+/// what a reader said always finds it passed.
+pub fn lease_holds(heard: Instant, lease: Duration, now: Instant) -> bool {
+    now.saturating_duration_since(heard) < lease
 }

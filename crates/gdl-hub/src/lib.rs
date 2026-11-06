@@ -60,8 +60,8 @@ pub use dynamodb::ensure_tables_from_vars;
 pub use follow::FollowsWatch;
 pub use keyed::KeyedRecords;
 pub use pool::{
-    PoolError, PoolHealth, PoolReadiness, PoolStop, PoolTiming, PoolWatch, RefusedWatches,
-    RequiredHealth, SegmentHealth, Stopped, Waiting,
+    Commanded, PoolError, PoolHealth, PoolReadiness, PoolStop, PoolTiming, PoolWatch,
+    RefusedWatches, RequiredHealth, SegmentHealth, Stopped, Waiting,
 };
 pub use quorum::Quorum;
 pub use report::{HubDirectory, VerifiedReport};

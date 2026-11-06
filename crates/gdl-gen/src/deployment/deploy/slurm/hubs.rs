@@ -93,6 +93,37 @@ enum Listener {
     Control,
 }
 
+/// What a call of a hub's route came to, before it is read as an
+/// [`Answer`].
+enum Sent {
+    /// The hub answered with this status and body.
+    Status(u16, String),
+    /// No hub of that name runs: why.
+    NoHub(String),
+    /// The call did not reach the hub, or printed no status: why.
+    Failed(String),
+}
+
+impl Sent {
+    fn answer(self) -> Answer {
+        match self {
+            Self::Status(200..=299, body) => Answer::Body(body),
+            Self::Status(404, _) => Answer::NotFound,
+            Self::Status(status, body) => Answer::Failed(format!("HTTP {status}: {}", body.trim())),
+            Self::NoHub(why) => Answer::NoHub(why),
+            Self::Failed(why) => Answer::Failed(why),
+        }
+    }
+}
+
+/// A parent's hub's answer to a child's withdrawal.
+pub(super) enum Withdrawn {
+    /// The child's record is fresh on the hub's clock: nothing was written.
+    Fresh(gdl_model::FreshChild),
+    /// Any other answer.
+    Answer(Answer),
+}
+
 impl Hubs<'_> {
     /// Call `route` on the hub of `pool`, with `post` for a POST, within
     /// `budget`.
@@ -104,8 +135,19 @@ impl Hubs<'_> {
         post: bool,
         budget: Duration,
     ) -> Result<Answer, Error> {
+        self.send(pool, on, route, post, budget).map(Sent::answer)
+    }
+
+    fn send(
+        &mut self,
+        pool: &str,
+        on: Listener,
+        route: &str,
+        post: bool,
+        budget: Duration,
+    ) -> Result<Sent, Error> {
         let Some(hub) = self.hubs.get(pool) else {
-            return Ok(Answer::NoHub(format!(
+            return Ok(Sent::NoHub(format!(
                 "pool `{pool}` has no running job whose hub wrote where it listens"
             )));
         };
@@ -159,7 +201,7 @@ impl Hubs<'_> {
         };
         let reply = self.slurm.run(&line)?;
         if !reply.success {
-            return Ok(Answer::Failed(reply.stderr));
+            return Ok(Sent::Failed(reply.stderr));
         }
         // `--write-out` puts the status on a line of its own, after the body.
         let (body, status) = reply
@@ -167,10 +209,8 @@ impl Hubs<'_> {
             .rsplit_once('\n')
             .unwrap_or(("", reply.stdout.as_str()));
         Ok(match status.trim().parse::<u16>() {
-            Ok(200..=299) => Answer::Body(body.to_string()),
-            Ok(404) => Answer::NotFound,
-            Ok(status) => Answer::Failed(format!("HTTP {status}: {}", body.trim())),
-            Err(_) => Answer::Failed(format!("`curl` printed no status: {}", reply.stdout)),
+            Ok(status) => Sent::Status(status, body.to_string()),
+            Err(_) => Sent::Failed(format!("`curl` printed no status: {}", reply.stdout)),
         })
     }
 }
@@ -179,16 +219,25 @@ impl Hubs<'_> {
     /// `POST /v1/ext/gdl-pool/children/{class}/{pool}/withdraw` on
     /// `parent`'s hub's control port: it writes the withdrawal of `pool`,
     /// whose hub is gone, past its last record. 2xx once stored; 404 when
-    /// the parent holds no record of it.
+    /// the parent holds no record of it; a `409` with a
+    /// [`gdl_model::FreshChild`] body while the parent still hears it.
     pub(super) fn withdraw(
         &mut self,
         parent: &str,
         class: &str,
         pool: &str,
         budget: Duration,
-    ) -> Result<Answer, Error> {
+    ) -> Result<Withdrawn, Error> {
         let route = format!("/children/{class}/{pool}/withdraw");
-        self.call(parent, Listener::Control, &route, true, budget)
+        Ok(
+            match self.send(parent, Listener::Control, &route, true, budget)? {
+                Sent::Status(409, body) => match serde_json::from_str(&body) {
+                    Ok(fresh) => Withdrawn::Fresh(fresh),
+                    Err(_) => Withdrawn::Answer(Sent::Status(409, body).answer()),
+                },
+                sent => Withdrawn::Answer(sent.answer()),
+            },
+        )
     }
 }
 

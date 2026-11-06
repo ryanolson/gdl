@@ -64,6 +64,7 @@ use changes::Changes;
 use listed::Listings;
 
 use super::avoid::Avoiding;
+use super::heard::Heard;
 use super::offer::{Choosers, Offer};
 use super::release::{Release, Told};
 use crate::PoolHealth;
@@ -95,6 +96,10 @@ pub(crate) struct Relay {
     /// Woken when a chooser may stop being waited for at a new time: its
     /// last watch of the relay closed, or it declared.
     expiry: Arc<Notify>,
+    /// When the follower first heard each listed pool's newest record,
+    /// for an operator's command on a child: kept apart from the listings'
+    /// lock, which every chooser's watch takes.
+    heard: Arc<Heard>,
 }
 
 impl Relay {
@@ -132,7 +137,13 @@ impl Relay {
             one: Watchers::new(),
             following: watch::Sender::new(BTreeMap::new()),
             expiry: Arc::new(Notify::new()),
+            heard: Arc::default(),
         }
+    }
+
+    /// When the follower first heard each listed pool's newest record.
+    pub(crate) fn heard(&self) -> &Arc<Heard> {
+        &self.heard
     }
 
     fn lock(&self) -> MutexGuard<'_, Shared> {

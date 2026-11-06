@@ -37,11 +37,15 @@ use gdl_watch::{Backoff, PoolWatcher, WatchEnd};
 use crate::PoolTiming;
 
 mod avoid;
+mod heard;
 mod link;
 mod offer;
 mod relay;
 mod release;
+#[cfg(test)]
+mod tests;
 
+pub(crate) use heard::{Fresh, Heard};
 pub(crate) use offer::Choosers;
 pub use relay::FollowsWatch;
 pub(crate) use relay::{Relay, Retirement, expire};
@@ -237,6 +241,11 @@ impl<D: PoolDirectory> Follows<'_, D> {
             && self.view.withdrawn(&withdrawal.pool) == Some(withdrawal.version())
         {
             self.unlease(&withdrawal.pool);
+            self.follower.relay.heard().forget(
+                &withdrawal.class,
+                &withdrawal.pool,
+                withdrawal.version(),
+            );
             self.follower.relay.withdrawn(&withdrawal);
         }
     }
@@ -257,10 +266,9 @@ impl<D: PoolDirectory> Follows<'_, D> {
             relay.unlist(&self.follower.class, pool);
             return;
         }
-        let lapses = record
-            .leased()
-            .then(|| changed + record.lease)
-            .filter(|&at| at >= now);
+        relay.heard().heard(record, changed);
+        let lapses = (record.leased() && gdl_pools::lease_holds(changed, record.lease, now))
+            .then(|| changed + record.lease);
         relay.record(
             record,
             (record.leased() && lapses.is_none()).then_some(changed),
@@ -285,8 +293,11 @@ impl<D: PoolDirectory> Follows<'_, D> {
 
     /// The leases that passed by `now`: their pools are listed missing.
     fn lapse(&mut self, now: Instant) {
-        while let Some((at, _)) = self.lapses.first()
-            && *at <= now
+        // Each lapse is at the end of its lease, `written + lease`, so the
+        // lease is read back from the two.
+        while let Some((at, pool)) = self.lapses.first()
+            && let Some(&(_, written)) = self.leases.get(pool)
+            && !gdl_pools::lease_holds(written, at.saturating_duration_since(written), now)
         {
             let (_, pool) = self.lapses.pop_first().expect("one was just found");
             let (_, written) = self.leases.remove(&pool).expect("each lapse has its lease");

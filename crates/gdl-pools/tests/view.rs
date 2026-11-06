@@ -129,6 +129,27 @@ fn a_record_expires_on_the_readers_clock() {
     assert_eq!(seen(&view, "m1", at(71)), None);
 }
 
+/// A lease holds strictly before the instant it ends: one nanosecond
+/// before, the record is offered; at that instant, it has lapsed. Every
+/// reader of a lease reads this one rule ([`gdl_pools::lease_holds`]).
+#[test]
+fn a_record_lapses_at_exactly_the_end_of_its_lease() {
+    let t0 = Instant::now();
+    let mut view = PoolView::new();
+    view.apply(put("m1", 1, 1), t0);
+    let end = t0 + LEASE;
+    assert_eq!(names(&view, end - Duration::from_nanos(1)), ["m1"]);
+    assert!(view.get("m1", end - Duration::from_nanos(1)).is_some());
+    assert!(names(&view, end).is_empty());
+    assert!(view.get("m1", end).is_none());
+    assert!(gdl_pools::lease_holds(
+        t0,
+        LEASE,
+        end - Duration::from_nanos(1)
+    ));
+    assert!(!gdl_pools::lease_holds(t0, LEASE, end));
+}
+
 /// Each record's own lease, not a reader's default.
 #[test]
 fn a_record_expires_after_its_own_lease() {
@@ -231,6 +252,10 @@ fn a_record_scaled_to_zero_does_not_expire() {
     assert_eq!(seen(&view, "m1", later), Some((1, 1)));
     assert_eq!(names(&view, later), ["m1"]);
     view.apply(put("m1", 1, 2), later);
-    assert_eq!(seen(&view, "m1", later + LEASE), Some((1, 2)));
-    assert_eq!(seen(&view, "m1", later + LEASE * 2), None);
+    let end = later + LEASE;
+    assert_eq!(
+        seen(&view, "m1", end - Duration::from_nanos(1)),
+        Some((1, 2))
+    );
+    assert_eq!(seen(&view, "m1", end), None);
 }

@@ -244,6 +244,11 @@ struct Fake {
     withdrawals: Vec<String>,
     /// What a parent's hub answers a withdrawal instead, when set.
     withdraw_answer: Option<(u16, &'static str)>,
+    /// What a parent's hub answers the next withdrawals, in order, before
+    /// `withdraw_answer` or the default.
+    withdraw_answers: std::collections::VecDeque<(u16, String)>,
+    /// Each wait the driver asked for, in order: none of them passes.
+    waits: Vec<Duration>,
     /// The job whose hub alone holds a child's record, when set: any other
     /// parent's hub answers that it holds none.
     holder: Option<u64>,
@@ -263,6 +268,8 @@ impl Fake {
             withdrawn_after: 1,
             withdrawals: Vec::new(),
             withdraw_answer: None,
+            withdraw_answers: std::collections::VecDeque::new(),
+            waits: Vec::new(),
             holder: None,
             version: "slurm 24.05.4\n",
         }
@@ -477,13 +484,15 @@ impl Fake {
             assert_eq!((port, post), ("8337", true), "{url}");
             let held = !self.withdrawals.contains(&child)
                 && self.holder.is_none_or(|holder| holder == number(id));
-            let (status, body) = match (self.withdraw_answer, held) {
-                (Some((status, body)), _) => (status, body.to_string()),
-                (None, true) => {
+            let queued = self.withdraw_answers.pop_front();
+            let (status, body) = match (queued, self.withdraw_answer, held) {
+                (Some(answer), _, _) => answer,
+                (None, Some((status, body)), _) => (status, body.to_string()),
+                (None, None, true) => {
                     self.withdrawals.push(child);
                     (204, String::new())
                 }
-                (None, false) => (404, "no record".to_string()),
+                (None, None, false) => (404, "no record".to_string()),
             };
             return gdl_gen::Reply::ok(format!("{body}\n{status}"));
         }
@@ -547,6 +556,10 @@ impl Fake {
 }
 
 impl gdl_gen::Slurm for Fake {
+    fn wait(&mut self, how_long: Duration) {
+        self.waits.push(how_long);
+    }
+
     fn run(&mut self, command: &gdl_gen::SlurmCommand) -> Result<gdl_gen::Reply, gdl_gen::Error> {
         self.calls.borrow_mut().push(command.clone());
         assert!(command.budget > Duration::ZERO, "{command:?}");

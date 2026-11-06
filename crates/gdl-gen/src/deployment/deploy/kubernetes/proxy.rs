@@ -96,7 +96,7 @@ pub(super) fn withdrawn_without_hub(
     // nothing here can show that the pool withdrew.
     if let Withdrawal::Shared { directory } = pool.seen {
         return Err(Error::new(format!(
-            "pool `{}` is not known to have withdrawn from the {directory} directory, so nothing is deleted: its hub's Deployment is gone, so it can neither drain nor say that its record is withdrawn, and no parent's hub holds its record. Withdraw it on a parent's hub (`POST /v1/ext/gdl-pool/children/{}/{}/withdraw` on the control port), which answers 204 once the directory has stored it; then delete its objects (`kubectl --context {} --namespace {} delete deployments,services,configmaps -l gdl.dev/pool={}`) and deploy again",
+            "pool `{}` is not known to have withdrawn from the {directory} directory, so nothing is deleted: its hub's Deployment is gone, so it can neither drain nor say that its record is withdrawn, and no parent's hub holds its record. Withdraw it on a parent's hub (`POST /v1/ext/gdl-pool/children/{}/{}/withdraw` on the control port), which answers 204 once the directory has stored it (a 409 says its parent still hears it: wait `Retry-After` seconds and try once more); then delete its objects (`kubectl --context {} --namespace {} delete deployments,services,configmaps -l gdl.dev/pool={}`) and deploy again",
             pool.pool, pool.class, pool.pool, at.context, at.namespace, pool.pool
         )));
     }
@@ -112,7 +112,7 @@ pub(super) fn withdrawn_without_hub(
             at.namespace, home, pool.class, pool.pool
         );
         format!(
-            "its hub's Deployment is gone, so it cannot drain, and its parent still holds its record. Withdraw it on the parent's hub (`POST /v1/ext/gdl-pool/children/{}/{}/withdraw` on the control port), for example with `kubectl --context {} create --raw {withdraw} -f /dev/null`, then deploy again",
+            "its hub's Deployment is gone, so it cannot drain, and its parent still holds its record. Withdraw it on the parent's hub (`POST /v1/ext/gdl-pool/children/{}/{}/withdraw` on the control port), for example with `kubectl --context {} create --raw {withdraw} -f /dev/null` (a 409 says its parent still hears it: wait `Retry-After` seconds and try once more), then deploy again",
             pool.class, pool.pool, at.context
         )
     } else {

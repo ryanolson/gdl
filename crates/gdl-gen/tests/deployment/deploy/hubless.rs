@@ -90,6 +90,9 @@ fn a_held_child_without_its_hub_names_the_withdraw_route() {
         "pool `model-x-removed` is not known to have withdrawn from its parent `global-us`",
         "POST /v1/ext/gdl-pool/children/model_x/model-x-removed/withdraw",
         "services/http:global-us:control/proxy/v1/ext/gdl-pool/children/model_x/model-x-removed/withdraw",
+        // The parent refuses a child it still hears; a hub that just died
+        // stops being heard within one lease.
+        "a 409 says its parent still hears it: wait `Retry-After` seconds and try once more",
     ] {
         assert!(error.contains(part), "{part} in {error}");
     }

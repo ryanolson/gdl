@@ -170,6 +170,131 @@ fn a_withdrawal_the_parent_does_not_store_stops_down_before_any_cancel() {
     assert_eq!(slurm.listed().len(), 2);
 }
 
+/// The `409` a parent's hub answers for a child whose record is still
+/// fresh on its clock, `retry_after_ms` before its lease of `lease_ms`
+/// passes.
+fn fresh(retry_after_ms: u64, lease_ms: u64) -> (u16, String) {
+    let body = serde_json::to_string(&gdl_model::FreshChild {
+        error: format!(
+            "pool `model-x-01` of class `model_x` is still heard: its lease ends in {retry_after_ms} ms"
+        ),
+        retry_after_ms,
+        lease_ms,
+    })
+    .expect("a body");
+    (409, body)
+}
+
+/// The child's job is gone, but its hub's last heartbeat is still within
+/// its lease at the parent: the parent answers 409 with how long until the
+/// lease passes. `down` waits that long, asks once more, and the parent
+/// withdraws the record; the rest goes as before.
+#[test]
+fn down_waits_out_a_fresh_lease_and_withdraws_once_it_passes() {
+    let mirror = Mirror::new();
+    let site = Site::new(&mirror, 1, "");
+    let mut slurm = Fake::new(&site);
+    site.deploy(&mirror, &mut slurm, false).expect("deployed");
+    slurm.job(1003).state = "NODE_FAIL";
+    slurm.withdraw_answers.push_back(fresh(2_500, 30_000));
+    slurm.calls.borrow_mut().clear();
+
+    let said = site.down(&mut slurm).expect("down");
+    let lines = slurm.lines();
+    let withdraw = calls_of(&lines, &withdraw_url("model-x-01"));
+    assert_eq!(withdraw.len(), 2, "asked once more: {lines:#?}");
+    assert_eq!(slurm.waits, [Duration::from_millis(2_500)]);
+    let terminate = lines
+        .iter()
+        .position(|line| line[..2] == ["scancel", "--signal=TERM"])
+        .expect("the global pool's instances leave");
+    assert!(withdraw[1] < terminate, "{lines:#?}");
+    assert_eq!(slurm.withdrawals, ["model_x/model-x-01"]);
+    assert_eq!(slurm.listed(), Vec::<String>::new());
+    assert!(
+        said.iter()
+            .any(|step| step.contains("pool `model-x-01`") && step.contains("parent `global-us`")),
+        "{said:?}"
+    );
+}
+
+/// The wait is never longer than one lease, whatever the hub says.
+#[test]
+fn down_waits_no_longer_than_one_lease() {
+    let mirror = Mirror::new();
+    let site = Site::new(&mirror, 1, "");
+    let mut slurm = Fake::new(&site);
+    site.deploy(&mirror, &mut slurm, false).expect("deployed");
+    slurm.job(1003).state = "NODE_FAIL";
+    slurm.withdraw_answers.push_back(fresh(90_000, 30_000));
+    slurm.calls.borrow_mut().clear();
+
+    site.down(&mut slurm).expect("down");
+    assert_eq!(slurm.waits, [Duration::from_secs(30)]);
+    assert_eq!(slurm.withdrawals, ["model_x/model-x-01"]);
+}
+
+/// `squeue --me` lists only the user's own jobs, so a pool another user's
+/// job runs looks gone. Its hub still heartbeats, so the parent refuses its
+/// withdrawal twice: `down` stops before any pool above it stops, names the
+/// pool and the parent, and does not ask a third time.
+#[test]
+fn a_child_its_parent_still_hears_stops_down_before_any_pool_above_it_stops() {
+    let mirror = Mirror::new();
+    let site = Site::new(&mirror, 1, "");
+    let mut slurm = Fake::new(&site);
+    site.deploy(&mirror, &mut slurm, false).expect("deployed");
+    // Another user's job: not in `squeue --me`, but its hub runs.
+    slurm.job(1003).state = "CANCELLED";
+    slurm.withdraw_answers.push_back(fresh(2_000, 30_000));
+    slurm.withdraw_answers.push_back(fresh(29_000, 30_000));
+    slurm.calls.borrow_mut().clear();
+
+    let error = site.down(&mut slurm).expect_err("refused").to_string();
+    assert!(
+        error.contains("pool `model-x-01`")
+            && error.contains("`global-us`")
+            && error.contains("still heard"),
+        "{error}"
+    );
+    assert_eq!(error.lines().count(), 1, "one line: {error}");
+    let lines = slurm.lines();
+    assert_eq!(
+        calls_of(&lines, &withdraw_url("model-x-01")).len(),
+        2,
+        "{lines:#?}"
+    );
+    assert_eq!(slurm.waits, [Duration::from_secs(2)]);
+    assert!(cancels(&lines).is_empty(), "{lines:#?}");
+    assert!(slurm.withdrawals.is_empty());
+    assert_eq!(slurm.listed().len(), 2);
+}
+
+/// A 409 whose body is not a fresh child's, such as the directory refusing
+/// the write, is no reason to ask again: `down` stops at once, as for any
+/// refusal.
+#[test]
+fn a_plain_conflict_is_not_asked_again() {
+    let mirror = Mirror::new();
+    let site = Site::new(&mirror, 1, "");
+    let mut slurm = Fake::new(&site);
+    site.deploy(&mirror, &mut slurm, false).expect("deployed");
+    slurm.job(1003).state = "CANCELLED";
+    slurm.withdraw_answer = Some((409, "the directory holds a newer write"));
+    slurm.calls.borrow_mut().clear();
+
+    let error = site.down(&mut slurm).expect_err("refused").to_string();
+    assert!(error.contains("HTTP 409"), "{error}");
+    let lines = slurm.lines();
+    assert_eq!(
+        calls_of(&lines, &withdraw_url("model-x-01")).len(),
+        1,
+        "{lines:#?}"
+    );
+    assert!(slurm.waits.is_empty());
+    assert!(cancels(&lines).is_empty(), "{lines:#?}");
+}
+
 /// With its parent's job gone too, no hub can withdraw the pool's record:
 /// `down` says so, and takes down the rest.
 #[test]
@@ -368,4 +493,70 @@ fn a_dead_pool_whose_recipe_names_another_home_is_withdrawn_by_the_one_it_ran_un
             .any(|step| step.contains("pool `model-x-02`") && step.contains("parent `global-us`")),
         "{said:?}"
     );
+}
+
+/// A fake Slurm whose wait for a fresh lease sees pool `model-x-01`
+/// submitted again, as another deploy would, and running: its new hub has
+/// not published yet.
+struct SubmittedWhileWaiting<'a> {
+    fake: &'a mut Fake,
+    fleet_dir: PathBuf,
+    submitted: Option<u64>,
+}
+
+impl gdl_gen::Slurm for SubmittedWhileWaiting<'_> {
+    fn run(&mut self, command: &gdl_gen::SlurmCommand) -> Result<gdl_gen::Reply, gdl_gen::Error> {
+        gdl_gen::Slurm::run(self.fake, command)
+    }
+
+    fn wait(&mut self, how_long: Duration) {
+        gdl_gen::Slurm::wait(self.fake, how_long);
+        self.submitted = Some(
+            self.fake
+                .seed(&self.fleet_dir, "model-x-01/pool.yaml", "RUNNING"),
+        );
+    }
+}
+
+/// The wait for a fresh lease is long, so the jobs are listed again after
+/// it: a pool submitted again meanwhile, whose new hub has not published
+/// yet, is not withdrawn, and `down` stops before any pool above it stops,
+/// naming the new job.
+#[test]
+fn a_pool_submitted_again_during_the_wait_is_not_withdrawn() {
+    let mirror = Mirror::new();
+    let site = Site::new(&mirror, 1, "");
+    let mut fake = Fake::new(&site);
+    site.deploy(&mirror, &mut fake, false).expect("deployed");
+    fake.job(1003).state = "NODE_FAIL";
+    fake.withdraw_answers.push_back(fresh(2_500, 30_000));
+    fake.calls.borrow_mut().clear();
+    let mut slurm = SubmittedWhileWaiting {
+        fake: &mut fake,
+        fleet_dir: site.fleet_dir.clone(),
+        submitted: None,
+    };
+    let log = Log::default();
+    let result = gdl_gen::down(
+        &site.files.fleet,
+        &slurm_waits(),
+        &mut Kube::new(&log),
+        &mut slurm,
+        &mut |_| {},
+    );
+    assert_eq!(slurm.submitted, Some(1004));
+    let error = result.expect_err("refused").to_string();
+    assert!(
+        error.contains("pool `model-x-01` has job 1004 (RUNNING)")
+            && error.contains("run this again"),
+        "{error}"
+    );
+    let lines = slurm.fake.lines();
+    assert_eq!(
+        calls_of(&lines, &withdraw_url("model-x-01")).len(),
+        1,
+        "not asked again: {lines:#?}"
+    );
+    assert!(cancels(&lines).is_empty(), "{lines:#?}");
+    assert!(slurm.fake.withdrawals.is_empty());
 }

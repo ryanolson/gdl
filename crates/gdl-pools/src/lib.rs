@@ -45,4 +45,4 @@ pub use record::{
     Version, Withdrawal,
 };
 pub use relay::RelayDirectory;
-pub use view::PoolView;
+pub use view::{PoolView, lease_holds};
