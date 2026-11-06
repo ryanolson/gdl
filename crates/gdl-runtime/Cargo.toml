@@ -7,6 +7,13 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# The gdl level: what generated code may call and what a render may set
+# for this gdl and its hub. The generator reads it from a pinned gdl,
+# without building it, and refuses a pin below what its output needs. A gdl
+# without the key is level 0.
+[package.metadata.gdl]
+level = 1
+
 [features]
 # Hooks that delay or drop runtime steps, for the fault tests. Never enable
 # in a deployment.
