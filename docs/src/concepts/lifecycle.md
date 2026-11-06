@@ -202,7 +202,7 @@ A hook gets a `gdl::Leave`:
 |---|---|
 | `Confirmed` | the instance retired, its hub confirmed that it withdrew `ready` and `loaded`, every sender has acknowledged, and an entry instance's following pools said that they avoid it. Also: nothing in gdl sends here, at once |
 | `SourcesDone` | (B) holds |
-| `Unconfirmed(ParentTimeout)` | an entry instance's following pools did not answer within their bound, or its pool's drain reached its bound with another pool still following. A chooser with a stale view can still offer, and the entry declines |
+| `Unconfirmed(ParentTimeout)` | an entry instance's following pools did not answer within their bound, or its pool's drain reached its bound with another pool still following. A chooser with a stale view can still offer, and the entry declines. After a drain, it declines before the hook starts |
 | `Unconfirmed(LeaseLost)` | the lease was lost, at any point in the stop |
 | `Unconfirmed(NotWithdrawn)` | none of these came by the fallback time, and the hub did not confirm the withdrawals: later rosters may still hold the instance |
 | `Unconfirmed(Bound)` | none of these came by the fallback time: the last instance of a segment, a last interior instance reached from another class, or an entry instance that its pool's drain stopped |

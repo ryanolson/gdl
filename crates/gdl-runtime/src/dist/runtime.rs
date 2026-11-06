@@ -248,6 +248,11 @@ pub struct Faults {
     /// has retired that input, as a host too busy to run the stop watcher
     /// before the run ends would.
     pub stop_after_input_retired: bool,
+    /// Hold each stop at this gate once it has begun and started its leave
+    /// hooks, before anything else of the stop runs, as a host too busy to
+    /// run the instance's serving task again soon would; the test observes
+    /// the hold and ends it.
+    pub stop_gate: Option<Arc<Gate>>,
     /// Never announce that the instance detached from its draining pool,
     /// as a build from before the announcement does.
     pub withhold_detached: bool,

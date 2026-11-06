@@ -700,6 +700,8 @@ impl<H> ProcessConfig<H> {
             _requests: requests,
             #[cfg(feature = "hub")]
             detached: false,
+            #[cfg(feature = "fault-injection")]
+            stop_gate: self.runtime.faults.stop_gate.clone(),
             _leaving: leaving,
         })
     }
@@ -802,6 +804,9 @@ pub struct Launch {
     /// pool.
     #[cfg(feature = "hub")]
     detached: bool,
+    /// Where a test holds each stop once it has begun.
+    #[cfg(feature = "fault-injection")]
+    stop_gate: Option<Arc<crate::dist::Gate>>,
     /// Dropped last, on every way out: says the instance has left.
     _leaving: Leaving,
 }
@@ -1132,7 +1137,18 @@ impl Launch {
                     () = process.asked_to_stop() => (None, Ok(()), true, false),
                     result = lease => (None, result, true, false),
                     () = self.pool_drain_stops() => {
-                        (None, Ok(()), self.pool_drain_retires(), true)
+                        let retires = self.pool_drain_retires();
+                        // An entry's stop begins because it declines
+                        // offers: declined before its hooks hear that its
+                        // bound passed, so no offer lands between the two
+                        // however late this task runs again. A stop that
+                        // retires an entry declines nothing yet: its peers
+                        // are still being told, and an offer sent before
+                        // they heard must land.
+                        if !retires {
+                            segment.decline_offers();
+                        }
+                        (None, Ok(()), retires, true)
                     }
                 };
                 let cause = match (&stop, by_pool) {
@@ -1144,6 +1160,11 @@ impl Launch {
                 let holds =
                     ended.is_none() && stop.is_ok() && !by_pool && process.asked_to_retire();
                 let (stopping, mut leaving) = self.begin_stop(hooks, cause);
+                #[cfg(feature = "fault-injection")]
+                if let Some(gate) = &self.stop_gate {
+                    gate.arrived.notify_one();
+                    gate.release.notified().await;
+                }
                 let deadline = stopping.deadline();
                 let mut cutoff = Box::pin(self.pool_cutoff(deadline, by_pool).fuse());
                 process.health.set(Phase::Draining);

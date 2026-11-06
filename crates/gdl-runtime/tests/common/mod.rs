@@ -489,6 +489,10 @@ impl Sink for NodeD {
                         return;
                     }
                     () = cx.stopping() => {
+                        if let Some(ended) = cancelled(&cx) {
+                            events.record(format!("D:{ended}:{key}"));
+                            return;
+                        }
                         // Deliver the buffered tail, then end normally.
                         let _ = tx.send(Ok(Raw(STOP_MARK))).await;
                         events.record(format!("D:stopped:{key}"));
@@ -524,6 +528,10 @@ impl Sink for NodeD {
                         return;
                     }
                     () = cx.stopping() => {
+                        if let Some(ended) = cancelled(&cx) {
+                            events.record(format!("D:{ended}:{key}"));
+                            return;
+                        }
                         let _ = tx.send(Ok(Raw(STOP_MARK))).await;
                         events.record(format!("D:stopped:{key}"));
                         return;
@@ -540,6 +548,18 @@ async fn pause(delay_ms: u64) {
     if delay_ms > 0 {
         tokio::time::sleep(ms(delay_ms)).await;
     }
+}
+
+/// What D records when `stopping` resolved on a cancel rather than a
+/// stop. `stopping` resolves on both, and its `select!` polls `done`
+/// first, but a cancel can land between those two polls when the host is
+/// busy: it is still a cancel, and is recorded as one, not as a stop.
+fn cancelled(cx: &Cx) -> Option<&'static str> {
+    cx.is_cancelled().then(|| {
+        cx.check()
+            .err()
+            .map_or("cancelled", |reason| end_label(&reason))
+    })
 }
 
 fn end_label(reason: &Error) -> &'static str {

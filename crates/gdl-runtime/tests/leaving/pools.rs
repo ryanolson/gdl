@@ -178,7 +178,10 @@ async fn an_entry_whose_parent_never_answers_reads_parent_timeout() {
 
 /// A pool's drain stops an entry at its bound. Nothing said that no pool
 /// follows it, so it reads `Unconfirmed(ParentTimeout)`, and a stale
-/// chooser's later offer is declined.
+/// chooser's later offer is declined: from the moment the stop begins, as
+/// the hook hears it, even while the rest of the stop has not run. The
+/// stop is held there, as on a host too busy to run the instance's serving
+/// task again soon; an offer that arrived then was once taken.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_draining_entry_past_its_bound_reads_parent_timeout_and_declines() {
     let spec = spec_of(placement());
@@ -187,13 +190,18 @@ async fn a_draining_entry_past_its_bound_reads_parent_timeout_and_declines() {
     let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let first = chooser(&spec, &hub, hub.public_addr().port()).await;
     let hooked = HookOnce::default();
+    let held = Arc::new(gdl_runtime::Gate::default());
     let (m1, proxy) = model_proxied_configured(
         &spec,
         &directory,
         pool(M1, "m1-hub:1337", 1),
         RUNTIME,
         &|segment, runtime| match segment {
-            "f" => hooked.configure(runtime),
+            "f" => {
+                let mut runtime = hooked.configure(runtime);
+                runtime.faults.stop_gate = Some(Arc::clone(&held));
+                runtime
+            }
             _ => runtime,
         },
         &|deployment| reference_graph(deployment, &e1),
@@ -217,6 +225,9 @@ async fn a_draining_entry_past_its_bound_reads_parent_timeout_and_declines() {
     let began = Instant::now();
     m1.readiness.drain().await.expect("the pool drains");
     let leave = hook.leave().await;
+    tokio::time::timeout(WAIT, held.arrived.notified())
+        .await
+        .expect("the stop is held");
     assert!(began.elapsed() >= BOUND, "stopped {:?}", began.elapsed());
     assert_eq!(leave.cause(), LeaveCause::PoolDrain);
     assert_eq!(
@@ -228,6 +239,7 @@ async fn a_draining_entry_past_its_bound_reads_parent_timeout_and_declines() {
     ask(&first.segment).await.expect("the other pool answered");
     assert_eq!(m1.entries[0].offered(), offered + 1, "the chooser is stale");
     assert_eq!(m1.forwards(), forwards, "taken past the bound");
+    held.release.notify_one();
     hook.finish(Handoff::Done);
     first.stop().await;
 }
