@@ -36,7 +36,9 @@ pub(super) fn environment<H: Hosted>() -> gdl::Result<Figment> {
 /// that hosts the node: a fleet sets a cluster's environment on every
 /// segment in it, and one node's settings must not stop the others. One
 /// whose name could be a hosted node's or another node's, which differ only
-/// in case, is refused: its name cannot say which it is for.
+/// in case, is refused: its name cannot say which it is for. So is one
+/// that sets a table the hub reads too in a form the hub does not read,
+/// `GDL_HUB` alone or `GDL_HUB.<KEY>` ([`gdl_model::whole_table_variable`]).
 fn variables<H: Hosted>() -> impl Iterator<Item = gdl::Result<Variable>> {
     const PREFIX: &str = "GDL_";
     std::env::vars_os().filter_map(|(name, value)| {
@@ -45,6 +47,11 @@ fn variables<H: Hosted>() -> impl Iterator<Item = gdl::Result<Variable>> {
             .get(..PREFIX.len())
             .filter(|prefix| prefix.eq_ignore_ascii_case(PREFIX))
             .map(|_| &name[PREFIX.len()..])?;
+        // Before any other check, so that the hub, which refuses the same
+        // names, and the segment never differ on one.
+        if let Some(refused) = gdl_model::whole_table_variable(&name) {
+            return Some(Err(Error::new(ErrorKind::Placement, refused)));
+        }
         let key = canonical::<H>(rest);
         let mut parts = key.split('.');
         let first = parts.next().unwrap_or_default();

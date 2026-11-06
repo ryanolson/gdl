@@ -836,6 +836,31 @@ pub fn pool_variable(key: &str) -> String {
     format!("GDL_POOL__{}", key.replace('.', "__").to_ascii_uppercase())
 }
 
+/// The refusal of a variable that sets a table both a segment and the
+/// `gdl-hub` binary read, `GDL_HUB` or `GDL_POOL`, in a form only the
+/// segment reads; `None` for any other name. The name is matched in any
+/// case and with space around it, as both match names. Two forms are
+/// refused: the table's name alone, which would hold the whole table as
+/// TOML, and the table's name followed by `.`, which a segment would split
+/// into keys (`GDL_HUB.PUBLIC_PORT`). The hub reads only `GDL_HUB__<KEY>`
+/// and `GDL_POOL__<KEY>`, one key to a variable, so both readers refuse
+/// these with this, and one environment never gives them two values.
+pub fn whole_table_variable(name: &str) -> Option<String> {
+    let name = name.trim();
+    ["GDL_HUB", "GDL_POOL"].into_iter().find_map(|table| {
+        let rest = name
+            .get(..table.len())
+            .filter(|given| given.eq_ignore_ascii_case(table))
+            .map(|_| &name[table.len()..])?;
+        (rest.is_empty() || rest.starts_with('.')).then(|| {
+            format!(
+                "{name}: the hub reads `[{}]` only from variables named {table}__<KEY>, one key to each; set each key that way",
+                table["GDL_".len()..].to_ascii_lowercase()
+            )
+        })
+    })
+}
+
 /// Whether `address` is `host:port` as a hub's address must be: a host
 /// name of letters, digits, `-`, and `.`, an IPv4 address, or a bracketed
 /// IPv6 address, and a port from 1 to 65535. Nothing else, so that a URL

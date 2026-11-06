@@ -298,3 +298,36 @@ fn an_error_anywhere_in_text_that_is_not_ascii_is_reported() {
         assert!(error.starts_with("line "), "{error}");
     }
 }
+
+/// A variable named only by `GDL_HUB` or `GDL_POOL`, or by either followed
+/// by `.`, in any case and with space around it, is refused, naming it and
+/// the form to use. A longer name that starts the same, a key or another
+/// setting, is not.
+#[test]
+fn a_whole_table_variable_is_refused_and_a_key_is_not() {
+    for (name, form) in [
+        ("GDL_HUB", "GDL_HUB__<KEY>"),
+        (" gdl_hub ", "GDL_HUB__<KEY>"),
+        ("GDL_POOL", "GDL_POOL__<KEY>"),
+        ("Gdl_Pool\t", "GDL_POOL__<KEY>"),
+        ("GDL_HUB.PUBLIC_PORT", "GDL_HUB__<KEY>"),
+        ("gdl_pool.ready__d", "GDL_POOL__<KEY>"),
+        ("GDL_HUB.", "GDL_HUB__<KEY>"),
+    ] {
+        let refused = gdl_model::whole_table_variable(name)
+            .unwrap_or_else(|| panic!("{name:?} is not refused"));
+        assert!(refused.starts_with(name.trim()), "{name:?}: {refused}");
+        assert!(refused.contains(form), "{name:?}: {refused}");
+    }
+    for name in [
+        "GDL_HUB__HOST",
+        "GDL_HUB_WAIT_MS",
+        "GDL_POOL__READY__E",
+        "GDL_POOLS",
+        "GDL_HUBX.PORT",
+        "GDL_RUNTIME",
+        "HUB",
+    ] {
+        assert_eq!(gdl_model::whole_table_variable(name), None, "{name}");
+    }
+}

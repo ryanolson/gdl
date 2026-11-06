@@ -17,7 +17,10 @@ use crate::{GraphAdmission, HubDirectory, KeyedRecords, PoolError, PoolReadiness
 /// between nested keys. `None` when no `GDL_POOL__` variable is set: the
 /// hub of a deployment without pools. A variable that names no setting,
 /// or whose value does not fit its setting or `spec`'s layout, is refused,
-/// and every refusal names its variable.
+/// as is a variable that sets the table in a form the hub does not read,
+/// `GDL_POOL` alone or `GDL_POOL.<KEY>`, which a segment refuses too
+/// ([`gdl_model::whole_table_variable`]); every refusal names its
+/// variable.
 ///
 /// The hub binary takes its deployment as its only argument and has no
 /// settings file, so the environment is the only source.
@@ -34,7 +37,9 @@ pub fn pool_from_vars(
 ) -> Result<Option<PoolSettings>, PoolError> {
     // One provider to a variable, so that figment's provenance of a value
     // names the variable that gave it, whichever of several set it last.
-    let figment = variables(POOL_PREFIX, vars).fold(Figment::new(), Figment::merge);
+    let figment = variables(POOL_PREFIX, vars)?
+        .into_iter()
+        .fold(Figment::new(), Figment::merge);
     let given = figment
         .extract::<Dict>()
         .map_err(|e| PoolError::new(format!("GDL_POOL__*: {e}")))?;
@@ -83,7 +88,10 @@ pub fn hub_config_from_env() -> Result<HubConfig, PoolError> {
 /// the last of two spellings winning, and a value as figment parses it.
 /// The segment's own keys, such as `host` and `heartbeat_ms`, are left to
 /// it. A value that does not fit its key, a lease or prune period of 0,
-/// and a lease not longer than the prune period are refused, naming the
+/// a lease not longer than the prune period, and a variable that sets the
+/// table in a form the hub does not read, `GDL_HUB` alone or
+/// `GDL_HUB.<KEY>`, which a segment refuses too
+/// ([`gdl_model::whole_table_variable`]), are refused, naming the
 /// variable.
 pub fn hub_config_from_vars(
     vars: impl IntoIterator<Item = (OsString, OsString)>,
@@ -98,7 +106,9 @@ pub fn hub_config_from_vars(
     }
     // One provider to a variable, so that an error names the variable
     // that gave the value.
-    let figment = variables(HUB_PREFIX, vars).fold(Figment::new(), Figment::merge);
+    let figment = variables(HUB_PREFIX, vars)?
+        .into_iter()
+        .fold(Figment::new(), Figment::merge);
     let server: Server = figment
         .extract()
         .map_err(|e| PoolError::new(format!("{HUB_PREFIX}*: {e}")))?;
@@ -293,7 +303,7 @@ pub fn directory_from_vars(
     // value that a generator quoted so that it reads as a string, such as
     // a table named `"123"`.
     let mut given = std::collections::BTreeMap::new();
-    for variable in variables(POOL_PREFIX, vars) {
+    for variable in variables(POOL_PREFIX, vars)? {
         given.insert(variable.key.clone(), variable);
     }
     let mut take = |key: &str| -> Result<Option<String>, PoolError> {
@@ -345,22 +355,43 @@ const HUB_PREFIX: &str = "GDL_HUB__";
 /// with `__` between nested keys. A segment reads its variables the same
 /// way (`gdl-runtime`'s `process/origins.rs`), so a variable that both
 /// read gives both one value.
+///
+/// # Errors
+///
+/// A variable that sets the prefix's table in a form only a segment would
+/// read, `GDL_POOL` alone or `GDL_POOL.<KEY>`, which a segment refuses too
+/// ([`gdl_model::whole_table_variable`]): skipped here, it would leave the
+/// hub's value different from its segments'.
 pub(crate) fn variables(
     prefix: &'static str,
     vars: impl IntoIterator<Item = (OsString, OsString)>,
-) -> impl Iterator<Item = Variable> {
-    vars.into_iter().filter_map(move |(name, value)| {
+) -> Result<Vec<Variable>, PoolError> {
+    let table = prefix.trim_end_matches('_');
+    let mut read = Vec::new();
+    for (name, value) in vars {
         let name = name.to_string_lossy().trim().to_string();
-        let key = name
+        let ours = name
+            .get(..table.len())
+            .is_some_and(|given| given.eq_ignore_ascii_case(table));
+        if ours && let Some(refused) = gdl_model::whole_table_variable(&name) {
+            return Err(PoolError::new(refused));
+        }
+        let Some(key) = name
             .get(..prefix.len())
             .filter(|given| given.eq_ignore_ascii_case(prefix))
-            .map(|_| name[prefix.len()..].replace("__", ".").to_ascii_lowercase())?;
-        (!key.split('.').any(str::is_empty)).then(|| Variable {
-            key,
-            value: value.to_string_lossy().to_string(),
-            name,
-        })
-    })
+            .map(|_| name[prefix.len()..].replace("__", ".").to_ascii_lowercase())
+        else {
+            continue;
+        };
+        if !key.split('.').any(str::is_empty) {
+            read.push(Variable {
+                key,
+                value: value.to_string_lossy().to_string(),
+                name,
+            });
+        }
+    }
+    Ok(read)
 }
 
 /// One environment variable, as a provider named for it.

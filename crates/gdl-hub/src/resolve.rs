@@ -285,7 +285,7 @@ fn directory_from_vars(
     let mut dir = None;
     let mut prefix = None;
     let mut endpoints = None;
-    for variable in variables(POOL_PREFIX, vars.iter().cloned()) {
+    for variable in variables(POOL_PREFIX, vars.iter().cloned())? {
         // Only these keys are decoded: a joining job shares its pool's
         // variables, such as `GDL_POOL__HEARTBEAT_MS`, which are not strings.
         // Each value as the hub reads it, through figment, which decodes a
@@ -518,6 +518,21 @@ mod tests {
                     ("GDL_POOL__PREFIX", "pools"),
                 ]),
                 "GDL_POOL__PREFIX: \"pools\"",
+            ),
+            // A segment and the pool's hub refuse it too.
+            (
+                vars(&[
+                    ("GDL_POOL__DIRECTORY", "dir"),
+                    ("gdl_pool", r#"{dir = "/shared/pools"}"#),
+                ]),
+                "gdl_pool: the hub reads `[pool]` only from variables named GDL_POOL__<KEY>",
+            ),
+            (
+                vars(&[
+                    ("GDL_POOL__DIRECTORY", "dir"),
+                    ("GDL_POOL.DIR", "/shared/pools"),
+                ]),
+                "GDL_POOL.DIR: the hub reads `[pool]` only from variables named GDL_POOL__<KEY>",
             ),
         ] {
             let error = directory_from_vars(given).expect_err(expected);

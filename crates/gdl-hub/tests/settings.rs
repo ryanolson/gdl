@@ -8,8 +8,8 @@ use std::time::Duration;
 use figment::Jail;
 use futures::StreamExt;
 use gdl_hub::{
-    PoolTiming, hub_builder, hub_config_from_env, hub_config_from_vars, pool_from_env,
-    pool_from_vars,
+    PoolTiming, directory_from_vars, hub_builder, hub_config_from_env, hub_config_from_vars,
+    pool_from_env, pool_from_vars,
 };
 use gdl_model::{
     DeploymentSpec, DirectoryBackend, HopInfo, HubTiming, Manifest, NodeInfo, Placement,
@@ -1067,4 +1067,84 @@ fn the_hub_reads_its_variables_as_a_segment_does() {
         hub_config_from_vars(given.map(|(n, v)| (n.into(), v.into()))).expect("the variables");
     assert_eq!(config.server.ttl, Duration::from_secs(60));
     assert_eq!(config.server.prune_interval, Duration::from_millis(250));
+}
+
+/// What a segment of [`spec`] takes besides its process settings, for a
+/// test that loads one as the hub's segments do: nothing.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoTables {}
+
+impl gdl_runtime::Hosted for NoTables {
+    const KEYS: &'static [&'static str] = &[];
+    const NODES: &'static [&'static str] = &["D"];
+    const ADAPTERS: &'static [&'static str] = &[];
+    const GRAPH_NODES: &'static [&'static str] = &["S", "D"];
+}
+
+/// A variable named only by its table, `GDL_HUB` or `GDL_POOL`, could hold
+/// the whole table as TOML, and one that puts a `.` after the table's name
+/// (`GDL_HUB.PUBLIC_PORT`) names a key the way a segment splits it but not
+/// the way the hub does. The hub reads `GDL_HUB__<KEY>` and
+/// `GDL_POOL__<KEY>` only, so a segment that read either would take
+/// another lease, other ports, or another pool from the same environment.
+/// Each reader refuses them, naming the variable and the form to use, in
+/// any case and with space around its name, as each matches the names it
+/// reads: the segment, the hub's server settings, its pool's, and the
+/// tables step (`--resolve` is checked in its own unit test).
+#[test]
+fn a_whole_table_variable_is_refused_by_the_hub_and_its_segments() {
+    let pool = r#"{name = "model-x-01-us-east-1", class = "model_x", region = "us-east-1", directory = "dir", dir = "/srv/pools"}"#;
+    for (name, value, form) in [
+        ("GDL_HUB", "{instance_lease_ms = 0}", "GDL_HUB__<KEY>"),
+        (" gdl_hub ", "{public_port = 1444}", "GDL_HUB__<KEY>"),
+        ("GDL_HUB.PUBLIC_PORT", "1444", "GDL_HUB__<KEY>"),
+        ("gdl_hub.Instance_Lease_Ms", "0", "GDL_HUB__<KEY>"),
+        ("GDL_POOL", pool, "GDL_POOL__<KEY>"),
+        ("Gdl_Pool ", pool, "GDL_POOL__<KEY>"),
+        ("GDL_POOL.READY", "{d = 2}", "GDL_POOL__<KEY>"),
+        ("GDL_POOL.READY__D", "2", "GDL_POOL__<KEY>"),
+        ("GDL_HUB.", "1444", "GDL_HUB__<KEY>"),
+    ] {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                "listen = \"127.0.0.1:0\"\n[hub]\nhost = \"hub\"\n",
+            )?;
+            if form.starts_with("GDL_POOL") {
+                model_pool(jail, "/srv/pools");
+            }
+            jail.set_env(name, value);
+            let segment = gdl_runtime::ProcessConfig::<NoTables>::load(["config.toml"])
+                .map(|config| format!("{:?}", config.pool().map(|pool| &pool.ready)))
+                .map_err(|e| e.to_string());
+            let mut readers = vec![("segment", segment)];
+            if form.starts_with("GDL_HUB") {
+                let server = hub_config_from_env()
+                    .map(|config| format!("{:?}", (config.server.public_port, config.server.ttl)))
+                    .map_err(|e| e.to_string());
+                readers.push(("hub's server settings", server));
+            } else {
+                let pool = pool_from_env(&spec())
+                    .map(|pool| format!("{:?}", pool.map(|pool| pool.ready)))
+                    .map_err(|e| e.to_string());
+                let tables = directory_from_vars(std::env::vars_os())
+                    .map(|directory| format!("{directory:?}"))
+                    .map_err(|e| e.to_string());
+                readers.push(("hub's pool settings", pool));
+                readers.push(("tables step", tables));
+            }
+            for (reader, read) in &readers {
+                let refused = read
+                    .as_ref()
+                    .err()
+                    .is_some_and(|why| why.contains(name.trim()) && why.contains(form));
+                assert!(
+                    refused,
+                    "{name:?}: the {reader} gives {read:?}; all: {readers:?}"
+                );
+            }
+            Ok(())
+        });
+    }
 }
