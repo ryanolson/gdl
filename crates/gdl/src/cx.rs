@@ -9,12 +9,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::time::Instant;
 
+pub use interrupts::Interrupts;
 pub(crate) use scope::Cancelled;
 #[cfg(test)]
 pub(crate) use scope::REGISTERED;
 use scope::{CANCEL, STOP};
 pub use scope::{CancelOnDrop, Scope};
 
+mod interrupts;
 mod scope;
 
 use crate::error::{Error, Result};
@@ -164,14 +166,46 @@ impl Cx {
     /// A passed deadline is reported ahead of a cancel: when the deadline
     /// ends a stream, dropping that stream cancels the attempt too, and the
     /// deadline is the cause worth reporting.
+    ///
+    /// ```
+    /// use gdl::{Cx, ErrorKind};
+    ///
+    /// let cx = Cx::new();
+    /// assert!(cx.check().is_ok());
+    /// cx.cancel();
+    /// assert_eq!(cx.check().unwrap_err().kind(), ErrorKind::Cancelled);
+    /// ```
     pub fn check(&self) -> Result<()> {
-        if self.deadline.is_some_and(|d| d.is_expired()) {
-            return Err(Error::deadline_exceeded());
-        }
-        if self.is_cancelled() {
-            return Err(Error::cancelled());
-        }
-        Ok(())
+        interrupts::check(&self.scope, self.deadline)
+    }
+
+    /// This context's cancel and deadline, apart from the rest of it: a
+    /// handle whose [`check`](Interrupts::check) answers as [`Cx::check`]
+    /// does.
+    ///
+    /// Take it for a stream that outlives the node's call and checks for a
+    /// cancel or a passed deadline at its end: a clone of the context would
+    /// keep the request's extensions and metadata alive until the stream
+    /// ends. Taking it clones the scope's `Arc` and copies the deadline,
+    /// with no allocation.
+    ///
+    /// The handle answers for the context it was taken from: it keeps that
+    /// context's deadline, so a context derived later with a new deadline
+    /// needs its own handle.
+    ///
+    /// ```
+    /// use gdl::{Cx, ErrorKind};
+    ///
+    /// let parent = Cx::new();
+    /// let mut cx = parent.child();
+    /// cx.insert_ext(vec![0u8; 1 << 17]);
+    /// let interrupts = cx.interrupts();
+    /// drop(cx); // the extension goes with the last context
+    /// parent.cancel();
+    /// assert_eq!(interrupts.check().unwrap_err().kind(), ErrorKind::Cancelled);
+    /// ```
+    pub fn interrupts(&self) -> Interrupts {
+        Interrupts::new(self.scope.clone(), self.deadline)
     }
 
     /// Resolves with the reason the request must end: deadline or cancel,

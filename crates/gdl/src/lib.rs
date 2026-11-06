@@ -46,7 +46,7 @@ pub use compose::{
     BackwardChain, BackwardHalf, ForwardChain, ForwardHalf, Hop, Inner, Join, Kept, OperatorStage,
     SinkStage, Source, around,
 };
-pub use cx::{Cx, Deadline, RequestId};
+pub use cx::{Cx, Deadline, Interrupts, RequestId};
 pub use error::{Error, ErrorKind, Result};
 pub use followed::{
     ClassPools, FollowedPools, PropertyIndex, PropertyIndexes, PropertyKinds, PropertyPool,

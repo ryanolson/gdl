@@ -25,16 +25,17 @@ async fn guide<N: Next<u32, u32>>(cx: Cx, req: u32, next: N) -> Result<Items<u32
     // The example begins.
     use futures::StreamExt;
 
-    let below = next.generate(cx.clone(), req).await?;
-    let out = futures::stream::unfold(Some((below, cx)), |state| async move {
-        let (mut below, cx) = state?;
+    let interrupts = cx.interrupts();
+    let below = next.generate(cx, req).await?;
+    let out = futures::stream::unfold(Some((below, interrupts)), |state| async move {
+        let (mut below, interrupts) = state?;
         match below.next().await {
-            Some(Ok(chunk)) => Some((Ok(reply(chunk)), Some((below, cx)))),
+            Some(Ok(chunk)) => Some((Ok(reply(chunk)), Some((below, interrupts)))),
             Some(Err(error)) => Some((Err(error), None)),
             // A cancel or a passed deadline also ends here: drop, then check.
             None => {
                 drop(below);
-                Some((cx.check().map(|()| closing()), None))
+                Some((interrupts.check().map(|()| closing()), None))
             }
         }
     });
@@ -77,7 +78,7 @@ fn guided() -> String {
 #[test]
 fn the_guides_closing_example_is_the_compiled_one() {
     let compiled = compiled();
-    assert!(compiled.contains("cx.check()"), "{compiled}");
+    assert!(compiled.contains("interrupts.check()"), "{compiled}");
     assert_eq!(guided(), compiled);
 }
 

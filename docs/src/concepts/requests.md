@@ -13,7 +13,7 @@ Every node receives a request context, `gdl::Cx`. The context carries the reques
 | cancel (`cancel`, `cancelled`) | through anchors | A hard cancel: stop now. |
 | extensions (`ext`, `insert_ext`) | no | Values stored by type, local to one segment. |
 
-Stop and cancel are separate signals. A stop does not imply a cancel, because a stopped producer still delivers its buffered output. A cancel is also a stop: `is_stopping` is true after either. `check` returns the reason a request must end, and reports a passed deadline ahead of a cancel. `done` resolves with that reason.
+Stop and cancel are separate signals. A stop does not imply a cancel, because a stopped producer still delivers its buffered output. A cancel is also a stop: `is_stopping` is true after either. `check` returns the reason a request must end, and reports a passed deadline ahead of a cancel. `done` resolves with that reason. `interrupts` takes a handle that holds only the cancel and the deadline, and whose `check` answers as the context's does: a stream that outlives its node's call holds it instead of a clone of the context, so the request's extensions are not kept alive.
 
 ## The request id
 

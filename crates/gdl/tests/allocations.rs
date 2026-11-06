@@ -500,3 +500,24 @@ fn hosted_call_allocations(durations: bool) {
     assert_eq!(call_allocations(&ready), 0, "durations: {durations}");
     assert_eq!(call_allocations(&locked), 0, "durations: {durations}");
 }
+
+/// Taking a context's interrupts clones its scope's `Arc` and copies its
+/// deadline; cloning, checking, and dropping the handle allocate nothing.
+/// Making the context does allocate (its root scope), which shows the
+/// count is live here.
+#[test]
+fn taking_and_checking_the_interrupts_allocates_nothing() {
+    COUNTED.with(|counted| counted.set(0));
+    COUNTING.with(|counting| counting.set(true));
+    let cx = Cx::new().with_timeout(std::time::Duration::from_secs(60));
+    let made = COUNTED.with(Cell::get);
+    let interrupts = cx.interrupts();
+    let clone = interrupts.clone();
+    let checked = (interrupts.check(), clone.check());
+    drop((interrupts, clone));
+    let taken = COUNTED.with(Cell::get) - made;
+    COUNTING.with(|counting| counting.set(false));
+    assert!(made >= 1, "the root scope is an allocation");
+    assert!(checked.0.is_ok() && checked.1.is_ok());
+    assert_eq!(taken, 0);
+}

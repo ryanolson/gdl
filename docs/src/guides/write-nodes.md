@@ -56,23 +56,24 @@ An operator that turns its `next`'s end into output, such as closing replies, an
 ```rust
 use futures::StreamExt;
 
-let below = next.generate(cx.clone(), req).await?;
-let out = futures::stream::unfold(Some((below, cx)), |state| async move {
-    let (mut below, cx) = state?;
+let interrupts = cx.interrupts();
+let below = next.generate(cx, req).await?;
+let out = futures::stream::unfold(Some((below, interrupts)), |state| async move {
+    let (mut below, interrupts) = state?;
     match below.next().await {
-        Some(Ok(chunk)) => Some((Ok(reply(chunk)), Some((below, cx)))),
+        Some(Ok(chunk)) => Some((Ok(reply(chunk)), Some((below, interrupts)))),
         Some(Err(error)) => Some((Err(error), None)),
         // A cancel or a passed deadline also ends here: drop, then check.
         None => {
             drop(below);
-            Some((cx.check().map(|()| closing()), None))
+            Some((interrupts.check().map(|()| closing()), None))
         }
     }
 });
 Ok(gdl::items(out))
 ```
 
-`Cx::check` reports a passed deadline before a cancel, as an attempt does. Choose by what the operator needs:
+The stream outlives `generate`, so it holds `cx.interrupts()`, not a clone of `cx`: the handle checks the same cancel and deadline, and does not keep the request's extensions alive until the stream ends. Its `check`, like `Cx::check`, reports a passed deadline before a cancel, as an attempt does. Choose by what the operator needs:
 
 - **The check** costs one test per stream, on its end. Use it when only the end matters: the operator passes items on as they come, and its output differs only at the end.
 - **`CALL_SCOPE`** also ends the call at once on a kill, with `Cancelled` or `DeadlineExceeded`, and checks the cancel and the deadline every 64 items. It costs about 49 Ir more per item and 1,981 Ir and 4.05 allocations more per request at each operator stage ([Feature costs](../operations/feature-costs.md#stages-in-callgrind-ir)). Use it when the operator must stop reading as soon as the request is killed, or for one of the other reasons above.
