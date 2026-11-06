@@ -26,6 +26,8 @@ gdl-syntax = { path = "../gdl-syntax" }
 icu_normalizer = { version = "2.3", default-features = false, features = ["compiled_data"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
+# Image references, by distribution's own patterns (`deployment/reference.rs`).
+regex = { version = "1", default-features = false, features = ["std"] }
 serde = { workspace = true }
 sha2 = "0.10"
 syn = "2"

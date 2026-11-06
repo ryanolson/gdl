@@ -61,7 +61,6 @@ pub(super) fn bundle(
             "the fleet has no pools, so there is nothing to deploy",
         ));
     }
-    bundle.validate_images()?;
     let directory = fleet.directory();
     if let Some(directory) = directory {
         local_directory(directory, &pools)?;

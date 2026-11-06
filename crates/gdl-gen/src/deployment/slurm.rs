@@ -25,8 +25,8 @@ pub(crate) fn problems(fleet: &Fleet, spec: Option<&Spec>) -> Vec<Problem> {
             ("base_image", &site.base_image),
             ("hub_image", &site.hub_image),
         ] {
-            if let Some(Err(error)) = image.as_deref().map(super::validate_image) {
-                problems.push(at(key, error.to_string()));
+            if let Some(Err(why)) = image.as_deref().map(super::reference::check_image) {
+                problems.push(at(key, why));
             }
         }
         if let Some(registry) = &site.registry

@@ -616,6 +616,35 @@ fn check_names_a_shared_pool_that_relay_refuses() {
     assert!(!out.exists(), "compose wrote a bundle");
 }
 
+/// Each image the spec names is an image reference by its grammar, not
+/// only by its characters: `check` refuses each that is not, naming its
+/// key and why, and `compose` refuses the same spec.
+#[test]
+fn each_image_of_the_spec_is_a_reference() {
+    let spec = spec(
+        "[deployment]\nbase_image = \":\"\nbuild_image = \"rust:\"\nhub_image = \"@sha256:\"\n\
+         [deployment.segment.engine]\nbase_image = \"Debian:12\"\n",
+    );
+    let files = Files::new(&spec, FLEET);
+    let s = files.spec().display().to_string();
+    let not = "is not an image reference `[host[:port]/]path[:tag][@digest]`";
+    let expected = [
+        format!("{s}: [deployment] base_image: `:` {not}: it names no repository"),
+        format!("{s}: [deployment] build_image: `rust:` {not}: its tag, after `:`, is empty"),
+        format!("{s}: [deployment] hub_image: `@sha256:` {not}: it names no repository"),
+        format!(
+            "{s}: [deployment.segment.engine] base_image: `Debian:12` {not}: `Debian`, which Docker reads as the repository path (after the host, up to the first `:`), has an uppercase letter: each part of a path is lowercase letters and digits, joined by `.`, `_`, `__`, or runs of `-`"
+        ),
+    ];
+    let check = files.check();
+    assert_eq!(check.status.code(), Some(1), "{check:?}");
+    assert_problems(&problems(&check), &expected);
+    let out = files.dir.path().join("deployment");
+    let compose = files.run("compose", &["--out".as_ref(), out.as_os_str()]);
+    assert_problems(&problems(&compose), &expected);
+    assert!(!out.exists(), "compose wrote a bundle");
+}
+
 #[path = "check/dgd.rs"]
 mod dgd;
 #[path = "check/slurm.rs"]

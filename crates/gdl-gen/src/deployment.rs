@@ -94,6 +94,32 @@ impl Settings {
         !self.codegen.is_empty()
     }
 
+    /// Each image the settings name that is not an image reference, with
+    /// its table and key ([`reference::check_image`]).
+    pub(crate) fn image_problems(&self) -> Vec<String> {
+        let table = "[deployment]".to_string();
+        let mut images = vec![
+            (table.clone(), "base_image", &self.base_image),
+            (table.clone(), "build_image", &self.build_image),
+        ];
+        images.extend(
+            self.hub_image
+                .iter()
+                .map(|image| (table.clone(), "hub_image", image)),
+        );
+        images.extend(self.segment.iter().filter_map(|(name, segment)| {
+            let image = segment.base_image.as_ref()?;
+            Some((format!("[deployment.segment.{name}]"), "base_image", image))
+        }));
+        images
+            .into_iter()
+            .filter_map(|(table, key, image)| {
+                let why = reference::check_image(image).err()?;
+                Some(format!("{table} {key}: {why}"))
+            })
+            .collect()
+    }
+
     /// What is wrong with the `[deployment.codegen.<arch>]` tables.
     pub(crate) fn codegen_problems(&self) -> Vec<String> {
         self.codegen
@@ -366,19 +392,6 @@ impl Codegen {
 struct Secret {
     file: String,
 }
-pub(crate) fn validate_image(image: &str) -> Result<(), Error> {
-    if image.is_empty()
-        || image.starts_with('-')
-        || !image
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"/_.:@-".contains(&b))
-    {
-        return Err(Error::new(format!(
-            "invalid container image reference `{image}`"
-        )));
-    }
-    Ok(())
-}
 use crate::paths::display;
 use crate::{
     Error, Files, Offers, Spec, emit,
@@ -392,6 +405,7 @@ mod images;
 mod k8s;
 pub(crate) mod locks;
 mod pools;
+mod reference;
 pub(crate) mod slurm;
 mod tree;
 mod variables;
@@ -687,24 +701,6 @@ impl Bundle {
         }
     }
 
-    /// Every image the settings name, checked.
-    fn validate_images(&self) -> Result<(), Error> {
-        let settings = &self.settings;
-        for image in [&settings.base_image, &settings.build_image]
-            .into_iter()
-            .chain(settings.hub_image.iter())
-            .chain(
-                settings
-                    .segment
-                    .values()
-                    .filter_map(|s| s.base_image.as_ref()),
-            )
-        {
-            validate_image(image)?;
-        }
-        Ok(())
-    }
-
     /// The Dockerfile of a hub that admits the deployment in
     /// `deployment`, a path in the bundle, with an empty directory at
     /// `state_dir` that any user can write, if it names one, and built with
@@ -942,7 +938,6 @@ fn single(spec: &Spec, mut bundle: Bundle, target: &Path) -> Result<Files, Error
         "deployment.json".into(),
         serde_json::to_string_pretty(&deployment).map_err(|e| Error::new(e.to_string()))?,
     );
-    bundle.validate_images()?;
     let mut services = serde_json::Map::new();
     let build = bundle.build(Path::new("hub/Dockerfile"));
     services.insert(

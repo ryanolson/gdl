@@ -86,19 +86,33 @@ fn a_slurm_sites_registry_and_platform_are_an_images() {
     );
 }
 
-/// A site's `base_image` and `hub_image` are image references by the rule
-/// the spec's own images are held to.
+/// A site's `base_image` and `hub_image` are image references by the
+/// grammar the spec's own images are held to, each refusal naming its key
+/// and why.
 #[test]
 fn a_slurm_sites_images_are_references() {
-    let found = checked(
-        "",
-        &format!("{ARM}\nbase_image = \"-debian\"\nhub_image = \"a b\""),
+    let refused = |base: &str, hub: &str| {
+        checked(
+            "",
+            &format!("{ARM}\nbase_image = \"{base}\"\nhub_image = \"{hub}\""),
+        )
+    };
+    assert_eq!(
+        refused("-debian", "a b"),
+        [
+            "[cluster.lab] base_image: `-debian` is not an image reference `[host[:port]/]path[:tag][@digest]`: `-debian` is not a path component: lowercase letters and digits, joined by `.`, `_`, `__`, or runs of `-`",
+            "[cluster.lab] hub_image: `a b` is not an image reference `[host[:port]/]path[:tag][@digest]`: `a b` is not a path component: lowercase letters and digits, joined by `.`, `_`, `__`, or runs of `-`",
+        ]
     );
     assert_eq!(
-        found,
+        refused(":", "a:"),
         [
-            "[cluster.lab] base_image: invalid container image reference `-debian`",
-            "[cluster.lab] hub_image: invalid container image reference `a b`",
+            "[cluster.lab] base_image: `:` is not an image reference `[host[:port]/]path[:tag][@digest]`: it names no repository",
+            "[cluster.lab] hub_image: `a:` is not an image reference `[host[:port]/]path[:tag][@digest]`: its tag, after `:`, is empty",
         ]
+    );
+    assert_eq!(
+        refused("debian:bookworm-slim", "registry.example:5000/gdl/hub:1"),
+        Vec::<String>::new()
     );
 }

@@ -14,7 +14,7 @@ use gdl_model::{Fleet, KubernetesCluster, PoolSettings, Resources};
 use serde_json::{Map, Value, json};
 
 use crate::Error;
-use crate::deployment::Published;
+use crate::deployment::{Published, reference};
 
 /// The address every segment's system listener binds in a pod: every
 /// interface, so that the kubelet's probes reach it at the pod's IP.
@@ -198,7 +198,9 @@ impl Pod<'_> {
         let registry = self.cluster.registry.as_deref().unwrap_or_default();
         let platform = self.cluster.platform.as_deref().unwrap_or_default();
         let image = self.naming.image(registry, repository, platform)?;
-        crate::deployment::validate_image(&image)?;
+        reference::check_image(&image).map_err(|why| {
+            Error::new(format!("[cluster.{}] registry: {why}", self.cluster_name))
+        })?;
         Ok(image)
     }
 }
@@ -363,56 +365,20 @@ pub(in crate::deployment) fn check_platform(platform: &str) -> Result<(), String
     ))
 }
 
-/// Refuse a registry that cannot start an image reference: a host, with a
-/// port if it has one, and then path components, or path components alone,
-/// which name a Docker Hub namespace. A scheme, a tag, or a digest would
+/// Refuse a registry that cannot start an image reference
+/// ([`reference::check_registry`]). A scheme, a tag, or a digest would
 /// make every image name one that Docker refuses.
 pub(in crate::deployment) fn check_registry(registry: &str) -> Result<(), String> {
-    let mut parts = registry.trim_end_matches('/').split('/').peekable();
-    let first = parts.peek().copied().unwrap_or_default();
-    let host = first.contains(['.', ':']) || first == "localhost";
-    if host {
-        parts.next();
-    }
-    let host_ok = !host || {
-        let (name, port) = first.split_once(':').unwrap_or((first, "1"));
-        let label = |label: &str| {
-            !label.is_empty()
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-        };
-        name.split('.').all(label) && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
-    };
-    // A path component: lowercase letters and digits, joined by `.`, `_`,
-    // `__`, or runs of `-`.
-    let component = |part: &str| {
-        let alnum = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
-        let separator =
-            |run: &str| matches!(run, "." | "_" | "__") || run.chars().all(|c| c == '-');
-        !part.is_empty()
-            && part.starts_with(alnum)
-            && part.ends_with(alnum)
-            && part
-                .split(alnum)
-                .filter(|run| !run.is_empty())
-                .all(separator)
-    };
-    if host_ok && parts.all(component) && !registry.is_empty() {
-        return Ok(());
-    }
-    Err(format!(
-        "`{registry}` is not a registry that an image reference can start with: write `host[:port][/path]`, with no scheme, tag, or digest, such as `registry.example:5000/gdl`"
-    ))
+    reference::check_registry(registry).map_err(|why| {
+        format!(
+            "`{registry}` is not a registry that an image reference can start with ({why}): write `host[:port][/path]`, with no scheme, tag, or digest, such as `registry.example:5000/gdl`"
+        )
+    })
 }
 
 /// Refuse a tag that an image reference cannot hold.
 pub(super) fn check_tag(tag: &str) -> Result<(), Error> {
-    let shaped = tag.len() <= 128
-        && tag.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
-        && tag
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c));
+    let shaped = reference::tag(tag);
     if shaped {
         return Ok(());
     }

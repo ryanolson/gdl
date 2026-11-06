@@ -1436,6 +1436,7 @@ dependencies = [
  "mimalloc",
  "proc-macro2",
  "quote",
+ "regex",
  "rustix 1.1.5",
  "serde",
  "serde_json",

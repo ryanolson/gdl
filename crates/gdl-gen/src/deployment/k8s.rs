@@ -424,7 +424,8 @@ impl Render<'_> {
                 let registry = cluster.registry.as_deref().unwrap_or_default();
                 let platform = cluster.platform.as_deref().unwrap_or_default();
                 let image = naming.image(registry, &hub_repository, platform)?;
-                crate::deployment::validate_image(&image)?;
+                super::reference::check_image(&image)
+                    .map_err(|why| Error::new(format!("[cluster.{name}] registry: {why}")))?;
                 let job = dynamodb::tables_job(
                     fleet_name,
                     name,
