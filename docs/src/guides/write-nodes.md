@@ -46,10 +46,38 @@ An `Operator` may call `next` zero or more times. A call with the operator's own
 
 - It hedges or abandons calls, and expects a dropped call's nodes to see a cancel while the request goes on. Under the request scope, a dropped loser's `cx.cancelled()` resolves only when the whole request ends, so an operator, or a sink below it, that waits on it to clean up must set the constant.
 - It relies on its `next`'s stream ending at the first `Err`. Under the request scope, a producer's items after an `Err` reach the operator.
-- It turns its `next`'s end into output, such as closing replies, and must tell a cancel from a clean end. Under the request scope, a call whose request is over ends quietly, with an empty stream.
+- It turns its `next`'s end into output and must stop reading at once when the request is killed. For output at the end alone, one check is enough (below).
 - It filters or batches an always-ready local source, or calls `next` from a task it spawned.
 
 A call that passes a context the operator derived, `cx.child()` or another deadline, gets its own scope without the constant.
+
+An operator that turns its `next`'s end into output, such as closing replies, an SSE `[DONE]`, a `finish_reason`, or a final usage chunk, must tell a kill from a clean end. Under the request scope, a call whose request is cancelled or past its deadline ends quietly: with an empty stream, or with the producer's own clean end, when the producer stops on its context. Only the request's edge reports why, after the operator's output. So check the context on the clean end, before the closing output, and end with its error. Drop the stream first, as a node boundary does: a producer's cleanup may be what cancels.
+
+```rust
+use futures::StreamExt;
+
+let below = next.generate(cx.clone(), req).await?;
+let out = futures::stream::unfold(Some((below, cx)), |state| async move {
+    let (mut below, cx) = state?;
+    match below.next().await {
+        Some(Ok(chunk)) => Some((Ok(reply(chunk)), Some((below, cx)))),
+        Some(Err(error)) => Some((Err(error), None)),
+        // A cancel or a passed deadline also ends here: drop, then check.
+        None => {
+            drop(below);
+            Some((cx.check().map(|()| closing()), None))
+        }
+    }
+});
+Ok(gdl::items(out))
+```
+
+`Cx::check` reports a passed deadline before a cancel, as an attempt does. Choose by what the operator needs:
+
+- **The check** costs one test per stream, on its end. Use it when only the end matters: the operator passes items on as they come, and its output differs only at the end.
+- **`CALL_SCOPE`** also ends the call at once on a kill, with `Cancelled` or `DeadlineExceeded`, and checks the cancel and the deadline every 64 items. It costs about 49 Ir more per item and 1,981 Ir and 4.05 allocations more per request at each operator stage ([Feature costs](../operations/feature-costs.md#stages-in-callgrind-ir)). Use it when the operator must stop reading as soon as the request is killed, or for one of the other reasons above.
+
+`crates/gdl/tests/closing.rs` runs all three forms, with no check, with the check, and with `CALL_SCOPE`, under a cancel and under a deadline.
 
 Use an `Around` instead of an `Operator` when the node would call `next` exactly once, and every value its response side needs from its request side belongs to that call. It costs what a forward node and a backward node cost ([The graph model](../concepts/model.md#around-nodes)):
 

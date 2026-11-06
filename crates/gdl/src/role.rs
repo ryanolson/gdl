@@ -238,13 +238,15 @@ pub trait Operator: Send + Sync + 'static {
     /// than a quiet end, when its request is cancelled; and a clean end
     /// after a cancel reported as `Cancelled`. Without it, a call of `next`
     /// with the operator's own context runs under the request's scope, which
-    /// costs about 49 Ir less per item and 1,600 Ir and three allocations
+    /// costs about 49 Ir less per item and 1,981 Ir and four allocations
     /// less per request (docs/src/operations/feature-costs.md).
     ///
     /// Set it if the operator hedges or abandons calls and expects the
     /// dropped call's nodes to see a cancel, turns its `next`'s end into
-    /// output and must tell a cancel from a clean end, filters or batches
+    /// output and must stop reading at once on a kill, filters or batches
     /// an always-ready local source, or calls `next` from a task it spawned.
+    /// An operator whose output differs only at the end needs no scope: a
+    /// [`Cx::check`] on the clean end tells a kill from a real end.
     /// A call with a context the operator derived is an attempt whatever
     /// this says.
     const CALL_SCOPE: bool = false;

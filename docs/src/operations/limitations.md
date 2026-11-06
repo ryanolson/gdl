@@ -124,10 +124,10 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** an operator that may run over a remote hop treats `Cancelled` after `cx.is_cancelled()` as the end of its request.
 
 ### Under the request scope, a call whose request is over ends quietly
-- **What:** a call that finds its request cancelled or past its deadline returns an empty stream, and a stream that ends cleanly after a cancel reaches the operator as a clean end. The edge reports the cause after anything the operator sends. An operator that turns a clean end into output, such as closing replies, can send it before the edge's `Cancelled`.
+- **What:** a call that finds its request cancelled or past its deadline returns an empty stream, and a stream that ends cleanly after a cancel reaches the operator as a clean end. The edge reports the cause after anything the operator sends. An operator that turns a clean end into output, such as closing replies, can send it before the edge's `Cancelled` or `DeadlineExceeded` (`crates/gdl/tests/closing.rs`).
 - **When:** the operator calls `next` with its own context and does not set `CALL_SCOPE`.
 - **Why:** an error would let a retry or a migration send the failure that caused it after the request was cancelled.
-- **Workaround:** an operator that must tell a cancel from a clean end sets `CALL_SCOPE`.
+- **Workaround:** an operator that must tell a kill from a clean end calls `cx.check()` on the clean end, before its closing output, and ends with its error. One that must also stop reading at once sets `CALL_SCOPE`. See [Write nodes](../guides/write-nodes.md#pick-a-role).
 
 ### Under the request scope, a producer's items after an `Err` reach a nested operator
 - **What:** a producer that sends items after an `Err` hands them on to the operator above it. The request's edge ends the stream at the first `Err` that reaches it.
