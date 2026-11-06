@@ -771,6 +771,17 @@ fn a_slurm_sites_images_are_built_on_a_base_with_bash() {
     assert_eq!(built.len(), 3, "{built:?}");
     for (reference, context) in &docker.contexts {
         assert_eq!(base_of(context), "debian:bookworm-slim", "{reference}");
+        // The slim base has no root CA certificates and the final stage
+        // runs nothing, so the bundle comes from the build stage.
+        let dockerfile = &context[Path::new("Dockerfile")];
+        let last = dockerfile
+            .rsplit_once("FROM debian:bookworm-slim\n")
+            .expect("a final stage")
+            .1;
+        assert!(
+            last.contains("COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt\n"),
+            "{reference}: {last}"
+        );
     }
     let target = mirror.target();
     let files = gdl_gen::slurm_files(

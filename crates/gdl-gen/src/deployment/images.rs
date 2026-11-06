@@ -602,8 +602,9 @@ fn hub_dockerfile(bundle: &super::Bundle, fleet: &Fleet, base: &str) -> String {
 /// A Dockerfile that runs `build` in `builder`, on the build host's
 /// platform, after [`TOOLCHAIN`], with the context at `/app` when
 /// `copies`, and copies the binary `build` leaves at `/gdl/segment` into
-/// `base`, of the image's platform. The final stage runs nothing, so it
-/// needs no emulation.
+/// `base`, of the image's platform, with the build stage's CA bundle
+/// ([`CA_BUNDLE`]), which a slim base lacks. The final stage runs nothing, so
+/// it needs no emulation.
 /// A segment's image carries `env`, [`super::segment_tunables_env`]; the
 /// hub's carries nothing more.
 fn dockerfile(builder: &str, base: &str, copies: bool, build: &str, env: &str) -> String {
@@ -617,11 +618,13 @@ fn dockerfile(builder: &str, base: &str, copies: bool, build: &str, env: &str) -
          FROM --platform=$BUILDPLATFORM {builder} AS build\n\
          ARG TARGETARCH\n\
          RUN {TOOLCHAIN}\n\
+         RUN {CA_CERTIFICATES}\n\
          {copy}\
          ENV CARGO_TARGET_DIR=/build\n\
          RUN . /gdl/target.env && {build}\n\
          FROM {base}\n\
          {env}\
+         COPY --from=build {CA_BUNDLE} {CA_BUNDLE}\n\
          COPY --from=build /gdl/segment /usr/local/bin/segment\n\
          ENTRYPOINT [\"/usr/local/bin/segment\"]\n",
         marker = emit::MARKER,
@@ -744,6 +747,20 @@ const TOOLCHAIN: &str = "set -eu; mkdir -p /gdl; \\
       echo \"export $linker=$gnu-gcc $cc=$gnu-gcc $cxx=$gnu-g++\" >> /gdl/target.env; \\
     fi";
 
+/// Where rustls' native roots read the CA bundle on Debian, and where the
+/// final stage puts the build stage's copy. See
+/// `docs/src/guides/kubernetes.md` (Images).
+const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
+
+/// What the build stage runs so that it has a [`CA_BUNDLE`] to copy: nothing
+/// when its image has one, as the official Rust images do, else Debian's
+/// package, and a rebuild of the bundle from it, since an image can hold the
+/// package and lack the generated bundle. An image with neither the bundle nor
+/// `apt-get` ends the build with one line that says so.
+const CA_CERTIFICATES: &str = "[ -s /etc/ssl/certs/ca-certificates.crt ] || { \\
+    command -v apt-get >/dev/null || { echo \"the build image has no /etc/ssl/certs/ca-certificates.crt and no apt-get to install ca-certificates\" >&2; exit 1; }; \\
+    apt-get update && apt-get install -y --no-install-recommends ca-certificates && update-ca-certificates && rm -rf /var/lib/apt/lists/*; }";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,6 +860,119 @@ mod tests {
         );
         let last = text.split("FROM base\n").nth(1).expect("a final stage");
         assert!(!last.contains("RUN"), "{last}");
+    }
+
+    /// A slim base has no root CA certificates, and the final stage runs
+    /// nothing to install them, so it copies the build stage's bundle to the
+    /// path rustls' native roots read on Debian, and the build stage makes
+    /// sure it has one.
+    #[test]
+    fn the_final_stage_copies_the_build_stages_ca_bundle() {
+        let text = dockerfile("builder", "debian:bookworm-slim", true, "true", "");
+        let (build, last) = text
+            .split_once("FROM debian:bookworm-slim\n")
+            .expect("a final stage");
+        let copy = "COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt\n";
+        assert!(last.contains(copy), "{last}");
+        assert!(!last.contains("RUN"), "{last}");
+        assert!(
+            build.contains(&format!("RUN {CA_CERTIFICATES}\n")),
+            "{build}"
+        );
+    }
+
+    /// The build stage installs `ca-certificates` only when its image has
+    /// no bundle: a build image of the user's may be any Debian-family one.
+    #[cfg(unix)]
+    #[test]
+    fn the_build_stage_installs_ca_certificates_only_without_a_bundle() {
+        for (present, installs) in [(false, true), (true, false)] {
+            let dir = tempfile::Builder::new()
+                .prefix("gdl-cacerts-")
+                .tempdir()
+                .expect("a directory");
+            let bin = dir.path().join("bin");
+            std::fs::create_dir(&bin).expect("a directory");
+            let log = dir.path().join("apt.log");
+            let bundle = dir.path().join("ca-certificates.crt");
+            // `apt-get` leaves a bundle that is not there as it was, as it
+            // does when the package is installed already; only
+            // `update-ca-certificates` writes one.
+            for (name, body) in [
+                ("apt-get", "echo \"$@\" >> \"$LOG\""),
+                (
+                    "update-ca-certificates",
+                    "echo update >> \"$LOG\"; echo bundle > \"$BUNDLE\"",
+                ),
+            ] {
+                let path = bin.join(name);
+                std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("a stand-in");
+                std::fs::set_permissions(
+                    &path,
+                    std::os::unix::fs::PermissionsExt::from_mode(0o755),
+                )
+                .expect("executable");
+            }
+            if present {
+                std::fs::write(&bundle, "-----BEGIN CERTIFICATE-----\n").expect("a bundle");
+            }
+            let script = CA_CERTIFICATES
+                .replace("\\\n", "\n")
+                .replace(CA_BUNDLE, "\"$BUNDLE\"")
+                .replace("rm -rf /var/lib/apt/lists/*", "true");
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .env("LOG", &log)
+                .env("BUNDLE", &bundle)
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        bin.display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                )
+                .output()
+                .expect("sh runs");
+            assert!(output.status.success(), "{present}: {output:?}");
+            let ran = std::fs::read_to_string(&log).unwrap_or_default();
+            assert_eq!(
+                ran.contains("install -y --no-install-recommends ca-certificates"),
+                installs,
+                "bundle present {present}: {ran}"
+            );
+            assert!(bundle.is_file(), "a bundle after the step: {ran}");
+        }
+    }
+
+    /// A build image with neither a bundle nor `apt-get` ends the build with
+    /// one line that names the missing bundle, not apt's error.
+    #[cfg(unix)]
+    #[test]
+    fn a_build_image_with_no_bundle_and_no_apt_get_is_refused_by_name() {
+        let dir = tempfile::Builder::new()
+            .prefix("gdl-cacerts-")
+            .tempdir()
+            .expect("a directory");
+        let script = CA_CERTIFICATES
+            .replace("\\\n", "\n")
+            .replace(CA_BUNDLE, "\"$BUNDLE\"");
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .env("BUNDLE", dir.path().join("ca-certificates.crt"))
+            // A path with no `apt-get`: only the shell's own commands run.
+            .env("PATH", dir.path())
+            .output()
+            .expect("sh runs");
+        assert!(!output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+        assert!(
+            stderr.contains("ca-certificates.crt") && stderr.contains("apt-get"),
+            "{stderr}"
+        );
     }
 
     /// The build stage's checks and flags of a `[deployment.codegen.arm64]`

@@ -13,8 +13,12 @@ RUN set -eu; mkdir -p /gdl; \
       rustup target add "$target"; \
       echo "export $linker=$gnu-gcc $cc=$gnu-gcc $cxx=$gnu-g++" >> /gdl/target.env; \
     fi
+RUN [ -s /etc/ssl/certs/ca-certificates.crt ] || { \
+    command -v apt-get >/dev/null || { echo "the build image has no /etc/ssl/certs/ca-certificates.crt and no apt-get to install ca-certificates" >&2; exit 1; }; \
+    apt-get update && apt-get install -y --no-install-recommends ca-certificates && update-ca-certificates && rm -rf /var/lib/apt/lists/*; }
 ENV CARGO_TARGET_DIR=/build
 RUN . /gdl/target.env && cargo install --git '<url>' --rev '<rev>' --features dynamodb --locked --root /build-tools --target "$GDL_TARGET" gdl-hub && cp /build-tools/bin/gdl-hub /gdl/segment
 FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /gdl/segment /usr/local/bin/segment
 ENTRYPOINT ["/usr/local/bin/segment"]
