@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Layout, Problem, Problems, PropertyKey, check_layout_name};
+use crate::{Layout, LeaveBy, Problem, Problems, PropertyKey, check_layout_name};
 
 /// A pool's own settings: the `[pool]` table of a segment's settings
 /// (`GDL_POOL__NAME`, `GDL_POOL__READY__<SEGMENT>`, and so on), which tells
@@ -37,6 +37,8 @@ use crate::{Layout, Problem, Problems, PropertyKey, check_layout_name};
 /// keyed_capacity = 1000000     # optional, the hub's alone: keyed records its table holds
 /// drain_on_stop = false        # optional, the hub's alone: drain the pool on the first SIGTERM or SIGINT
 /// # stop_wait_ms = 660000      # with drain_on_stop, and only with it: how long the hub waits for the drain
+/// # leave_by = 1800000000000   # with drain_on_stop, and only with it: unix ms by which the hub must be gone
+/// # leave_margin_ms = 30000    # with leave_by, and only with it: how long before leave_by the stop must end
 /// [watch_caps]                 # optional, the hub's alone: watches each route serves at once
 /// relay = 2048
 /// [ready]                      # optional: the quorum of each segment of the class
@@ -124,6 +126,13 @@ pub struct PoolSettings {
     /// signal stops it at once. `None`, the default, stops the hub at its
     /// first signal. Only the pool's hub reads it.
     pub drain_on_stop: Option<Duration>,
+    /// When the pool's hub must be gone, if it knows, as a batch job knows
+    /// its walltime (`leave_by`, unix ms, with `leave_margin_ms`, by
+    /// default [`LeaveBy::DEFAULT_MARGIN`]). The hub starts by itself the
+    /// stop it runs on its first signal, the stop's wait and the margin
+    /// before then, so it is read only with `drain_on_stop`. Only the
+    /// pool's hub reads it.
+    pub leave_by: Option<LeaveBy>,
 }
 
 /// How a pool's hub paces its judgment, its record, and its watches, and
@@ -1026,6 +1035,10 @@ struct Table {
     drain_on_stop: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stop_wait_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    leave_by: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    leave_margin_ms: Option<u64>,
 }
 
 /// The `[watch_caps]` table as written: each cap that is set.
@@ -1156,6 +1169,27 @@ impl TryFrom<Table> for PoolSettings {
             }
             (true, wait) => Some(wait.map_or(Self::DEFAULT_STOP_WAIT, Duration::from_millis)),
         };
+        let leave_by = match (table.leave_by, table.leave_margin_ms) {
+            (None, None) => None,
+            (None, Some(ms)) => {
+                return Err(at(
+                    "leave_margin_ms",
+                    format!("{ms} is read only with `leave_by`, which is not set"),
+                ));
+            }
+            (Some(ms), _) if drain_on_stop.is_none() => {
+                return Err(at(
+                    "leave_by",
+                    format!(
+                        "{ms} is read only by a hub that drains on stop, and `drain_on_stop` is not true"
+                    ),
+                ));
+            }
+            (Some(unix_ms), margin) => Some(LeaveBy {
+                unix_ms,
+                margin: margin.map_or(LeaveBy::DEFAULT_MARGIN, Duration::from_millis),
+            }),
+        };
         let parent =
             Parent::from_keys(table.home, table.parents).map_err(|(key, why)| at(key, why))?;
         let directory = match (table.directory, table.dir) {
@@ -1265,6 +1299,7 @@ impl TryFrom<Table> for PoolSettings {
             timing,
             properties,
             drain_on_stop,
+            leave_by,
         })
     }
 }
@@ -1458,6 +1493,11 @@ impl From<PoolSettings> for Table {
             stop_wait_ms: settings
                 .drain_on_stop
                 .and_then(|wait| set(wait, PoolSettings::DEFAULT_STOP_WAIT))
+                .map(millis),
+            leave_by: settings.leave_by.map(|leave| leave.unix_ms),
+            leave_margin_ms: settings
+                .leave_by
+                .and_then(|leave| set(leave.margin, LeaveBy::DEFAULT_MARGIN))
                 .map(millis),
         }
     }

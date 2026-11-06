@@ -149,6 +149,7 @@ impl Watch {
                 segment: "f".into(),
                 peer: (*peer).clone(),
                 joined: stamp(peer),
+                leave_by: None,
             })
             .await;
         }
@@ -517,6 +518,7 @@ async fn an_unknown_event_in_the_first_snapshot_installs_the_pool_withheld() {
             segment: "f".into(),
             peer: a.clone(),
             joined: stamp(&a),
+            leave_by: None,
         })
         .await;
     first.send(&PoolWatchEvent::Synced).await;
@@ -692,6 +694,7 @@ async fn what_the_replaced_watch_sends_is_not_applied_over_the_reading() {
         segment: "f".into(),
         peer: b.clone(),
         joined: stamp(&b),
+        leave_by: None,
     })
     .expect("an event serializes");
     first.offer(&degraded).await;
@@ -763,6 +766,7 @@ async fn an_unknown_event_in_the_reading_keeps_the_pool_withheld() {
             segment: "f".into(),
             peer: a.clone(),
             joined: stamp(&a),
+            leave_by: None,
         })
         .await;
     second.send(&PoolWatchEvent::Synced).await;

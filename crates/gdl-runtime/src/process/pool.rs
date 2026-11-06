@@ -151,7 +151,7 @@ impl Launch {
             pool.accepting(deadline).await;
             segment.decline_offers();
             loop {
-                self.pool_detaches(segment, hub, false).await;
+                self.pool_detaches(segment, hub, false, deadline).await;
                 if segment.admitted() == 0 || tokio::time::Instant::now() + DRAIN_POLL > deadline {
                     break;
                 }
@@ -176,10 +176,33 @@ impl Launch {
     /// pool has drained or left, as it did before such a stop could come
     /// earlier, so that a response the pool took before its drain is not
     /// cut sooner than it was. If its lease is lost first, it counts its
-    /// bound from the loss, as a stop by a lost lease does.
+    /// bound from the loss, as a stop by a lost lease does. An instance
+    /// with a leave point (`[runtime] leave_by`) is cut off by the end of
+    /// the drain its leave point begins, whichever comes first, so that it
+    /// is gone by then, its margin before `leave_by`, whatever its entry
+    /// instances still hold.
     /// What it reads is taken now, so that it borrows nothing of the
     /// launch.
     pub(super) fn pool_cutoff(
+        &self,
+        deadline: tokio::time::Instant,
+        by_pool: bool,
+    ) -> impl Future<Output = ()> + Send + use<> {
+        let cut = self.pool_cutoff_uncapped(deadline, by_pool);
+        let leave_end = self.process.leave_end();
+        async move {
+            match leave_end {
+                Some(end) => tokio::select! {
+                    () = cut => {}
+                    () = tokio::time::sleep_until(end) => {}
+                },
+                None => cut.await,
+            }
+        }
+    }
+
+    /// [`Launch::pool_cutoff`], for an instance without a leave point.
+    fn pool_cutoff_uncapped(
         &self,
         deadline: tokio::time::Instant,
         by_pool: bool,
@@ -280,7 +303,8 @@ impl Launch {
     /// For an instance of a draining pool that takes no more work, from
     /// outside the pool or, with `closed` false, from inside it: announce
     /// that it detached once no request it holds can send work into the
-    /// pool, tried once, for at most ten hub polls. An instance not in
+    /// pool, tried once, for at most ten hub polls and never past the
+    /// stop's `deadline`. An instance not in
     /// a draining pool, one that does not detach, or one whose lease is
     /// lost (`hub` false) announces nothing. An entry instance that only
     /// declines offers asks its hub first whether the segments of its
@@ -288,7 +312,13 @@ impl Launch {
     /// pool adds a request after it read none; one that `closed` takes no
     /// hand-off at all. Every interior instance waits for its senders to
     /// detach before it drains, or for the entry instances to drain.
-    pub(super) async fn pool_detaches(&mut self, segment: &dyn Drains, hub: bool, closed: bool) {
+    pub(super) async fn pool_detaches(
+        &mut self,
+        segment: &dyn Drains,
+        hub: bool,
+        closed: bool,
+        deadline: tokio::time::Instant,
+    ) {
         #[cfg(feature = "hub")]
         if let (Some(pool), Peers::Hub(session), true) = (&self.pool_drain, &mut self.peers, hub)
             && pool.detaches()
@@ -302,10 +332,9 @@ impl Launch {
                     return;
                 }
                 let asker = session.asker();
-                let asked = tokio::time::timeout(
-                    crate::dist::HubSession::poll() * 10,
-                    pool.senders_detached(&asker),
-                );
+                let bound = (tokio::time::Instant::now() + crate::dist::HubSession::poll() * 10)
+                    .min(deadline);
+                let asked = tokio::time::timeout_at(bound, pool.senders_detached(&asker));
                 if !matches!(asked.await, Ok(Ok(true))) {
                     return;
                 }
@@ -319,7 +348,9 @@ impl Launch {
             // say as much, so a hub that does not take it must not hold the
             // drain that waits here.
             self.detached = true;
-            let bound = tokio::time::Instant::now() + crate::dist::HubSession::poll() * 10;
+            // Within the stop's bound, as every wait of a stop is.
+            let bound =
+                (tokio::time::Instant::now() + crate::dist::HubSession::poll() * 10).min(deadline);
             let announced = async {
                 if pool.stalls() {
                     std::future::pending::<()>().await;
@@ -339,7 +370,7 @@ impl Launch {
             }
         }
         #[cfg(not(feature = "hub"))]
-        let _ = (segment, hub, closed);
+        let _ = (segment, hub, closed, deadline);
     }
 
     /// Resolves when this instance's pool begins to drain; never for an

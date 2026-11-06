@@ -48,7 +48,7 @@ pub(super) async fn list(
     let members = admission.members();
     let segments: BTreeSet<&str> = members
         .iter()
-        .map(|(_, segment, _)| segment.as_str())
+        .map(|(_, segment, _, _)| segment.as_str())
         .collect();
     // velo-hub keeps its service directory to itself, and serves one
     // service per read. The segments are read at once, and each segment's
@@ -91,14 +91,14 @@ pub(super) async fn list(
     let staying: HashSet<(InstanceId, Incarnation)> = admission
         .members()
         .into_iter()
-        .map(|(incarnation, _, peer)| (peer.instance_id, incarnation))
+        .map(|(incarnation, _, peer, _)| (peer.instance_id, incarnation))
         .collect();
     let mut loads = feed.loads(Instant::now());
     let requested = feed.retire_requests();
     let instances = members
         .into_iter()
-        .filter(|(incarnation, _, peer)| staying.contains(&(peer.instance_id, *incarnation)))
-        .map(|(incarnation, segment, peer)| {
+        .filter(|(incarnation, _, peer, _)| staying.contains(&(peer.instance_id, *incarnation)))
+        .map(|(incarnation, segment, peer, leave_by)| {
             let phase = phases
                 .get(&peer.instance_id)
                 .copied()
@@ -115,6 +115,7 @@ pub(super) async fn list(
                 load,
                 incarnation: Some(incarnation),
                 retire_requested: requested.contains(&(peer.instance_id, incarnation)),
+                leave_by,
                 addresses: addresses(&peer),
                 segment,
                 peer,

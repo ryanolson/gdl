@@ -29,7 +29,7 @@ use gdl::{
     FollowedPools, HomeFirstAt, HubRecords, InstanceKv, InstanceProperties, Lifecycle, OfferGate,
     PoolPolicies, Selectors,
 };
-use gdl_model::{Layout, RequestRouter};
+use gdl_model::{Layout, LeaveBy, RequestRouter};
 
 /// Runtime settings for one segment instance.
 ///
@@ -142,6 +142,16 @@ pub struct RuntimeConfig {
     /// operator's `drainBound`: a hold that ends by itself exits a
     /// container, which its pod then starts again.
     pub hold: Option<Duration>,
+    /// When this instance must be gone, if it knows, as a batch job knows
+    /// its walltime: `leave_by`, in milliseconds since the Unix epoch, and
+    /// `leave_margin_ms`, by default [`LeaveBy::DEFAULT_MARGIN`], which is
+    /// read only with it. At its start the instance maps it onto its
+    /// monotonic clock as it maps a request's deadline, with
+    /// `clock_skew`, refuses to start when that leaves no more than the
+    /// drain's bound and the margin, and stops itself that long before
+    /// it, as a first stop signal does. Under a hub its registration
+    /// carries it. `None`, the default, changes nothing.
+    pub leave_by: Option<LeaveBy>,
     /// Where the runtime records what each request does in this segment:
     /// its request path, the response streams it sends on, and, at the
     /// source, the request end to end; `None` records nothing. Not a
@@ -277,6 +287,15 @@ impl RuntimeConfig {
     pub fn call_permits(&self) -> usize {
         self.call_limit.unwrap_or(self.admission_limit)
     }
+
+    /// This instance's wall clock, in Unix nanoseconds: what a deadline
+    /// from another segment, and the leave point, are read against.
+    pub(crate) fn wall_now(&self) -> u64 {
+        let now = gdl::__runtime::wall_now_nanos();
+        #[cfg(feature = "fault-injection")]
+        let now = now.saturating_add_signed(self.faults.clock_offset_nanos);
+        now
+    }
 }
 
 impl Default for RuntimeConfig {
@@ -296,7 +315,7 @@ impl Default for RuntimeConfig {
             decompressed_max: Self::DEFAULT_DECOMPRESSED_MAX,
             anchor_timeout: None,
             reservation_renew_interval: Duration::from_secs(30),
-            clock_skew: Duration::from_millis(50),
+            clock_skew: gdl_model::DEFAULT_CLOCK_SKEW,
             default_deadline: gdl_model::DEFAULT_DEADLINE,
             call_timeout: Self::DEFAULT_CALL_TIMEOUT,
             call_reply_max: Self::DEFAULT_CALL_REPLY_MAX,
@@ -308,6 +327,7 @@ impl Default for RuntimeConfig {
             leave: None,
             leave_after: None,
             hold: None,
+            leave_by: None,
             metrics: None,
             selectors: Selectors::new(),
             pool_policies: PoolPolicies::new(),
@@ -355,6 +375,8 @@ struct Settings {
     leave_ms: Option<u64>,
     leave_after_ms: Option<u64>,
     hold_ms: Option<u64>,
+    leave_by: Option<u64>,
+    leave_margin_ms: Option<u64>,
 }
 
 impl Default for Settings {
@@ -389,6 +411,8 @@ impl Default for Settings {
             leave_ms: config.leave.map(ms),
             leave_after_ms: config.leave_after.map(ms),
             hold_ms: config.hold.map(ms),
+            leave_by: config.leave_by.map(|leave| leave.unix_ms),
+            leave_margin_ms: config.leave_by.map(|leave| ms(leave.margin)),
         }
     }
 }
@@ -397,6 +421,21 @@ impl TryFrom<Settings> for RuntimeConfig {
     type Error = Error;
 
     fn try_from(s: Settings) -> Result<Self> {
+        let leave_by = match (s.leave_by, s.leave_margin_ms) {
+            (None, None) => None,
+            (None, Some(ms)) => {
+                return Err(Error::new(
+                    ErrorKind::Placement,
+                    format!(
+                        "runtime setting `leave_margin_ms` {ms} is read only with `leave_by`, which is not set"
+                    ),
+                ));
+            }
+            (Some(unix_ms), margin) => Some(LeaveBy {
+                unix_ms,
+                margin: margin.map_or(LeaveBy::DEFAULT_MARGIN, Duration::from_millis),
+            }),
+        };
         let config = Self {
             admission_limit: s.admission_limit,
             admission_wait: Duration::from_millis(s.admission_wait_ms),
@@ -427,6 +466,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             leave: s.leave_ms.map(Duration::from_millis),
             leave_after: s.leave_after_ms.map(Duration::from_millis),
             hold: s.hold_ms.map(Duration::from_millis),
+            leave_by,
             metrics: None,
             selectors: Selectors::new(),
             pool_policies: PoolPolicies::new(),
@@ -1648,14 +1688,6 @@ impl Runtime {
                 None => Within::Policy(Policy::RoundRobin),
             },
         }
-    }
-
-    /// This instance's wall clock, in Unix nanoseconds.
-    pub(crate) fn wall_now(&self) -> u64 {
-        let now = gdl::__runtime::wall_now_nanos();
-        #[cfg(feature = "fault-injection")]
-        let now = now.saturating_add_signed(self.config.faults.clock_offset_nanos);
-        now
     }
 
     /// Whether an arriving message belongs to this deployment.

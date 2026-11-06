@@ -103,6 +103,8 @@ fn a_pools_settings_are_read_from_the_environment() {
         jail.set_env("GDL_POOL__SUMMARY_MS", "2500");
         jail.set_env("GDL_POOL__DRAIN_ON_STOP", "true");
         jail.set_env("GDL_POOL__STOP_WAIT_MS", "90000");
+        jail.set_env("GDL_POOL__LEAVE_BY", "1800000000000");
+        jail.set_env("GDL_POOL__LEAVE_MARGIN_MS", "1500");
         assert_eq!(
             pool_from_env(&spec()).map_err(|e| e.to_string())?,
             Some(PoolSettings {
@@ -121,6 +123,10 @@ fn a_pools_settings_are_read_from_the_environment() {
                 summary: Duration::from_millis(2500),
                 timing: Default::default(),
                 drain_on_stop: Some(Duration::from_secs(90)),
+                leave_by: Some(gdl_model::LeaveBy {
+                    unix_ms: 1_800_000_000_000,
+                    margin: Duration::from_millis(1500),
+                }),
             })
         );
         Ok(())
@@ -459,6 +465,7 @@ fn settings(directory: DirectoryBackend) -> PoolSettings {
         summary: PoolSettings::DEFAULT_SUMMARY,
         timing: Default::default(),
         drain_on_stop: None,
+        leave_by: None,
     }
 }
 

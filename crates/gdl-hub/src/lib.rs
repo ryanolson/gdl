@@ -94,7 +94,14 @@ pub struct GraphAdmission {
 }
 #[derive(Clone, serde::Serialize)]
 struct Member {
+    /// What it registered with, less `leave_by`: `/members` shows it as a
+    /// hub of an earlier build did, since an instance of an earlier build
+    /// reads it with a type that refuses a field it does not know.
     registration: SegmentRegistration,
+    /// When it said it will be stopped, which the pool's list and watch
+    /// show, and `/members`, which instances route from, does not.
+    #[serde(skip)]
+    leave_by: Option<u64>,
     peer: PeerInfo,
     /// The registration's epoch, by which an instance tells that this hub
     /// still holds the registration it made. Bare `epoch` on this wire is
@@ -128,17 +135,22 @@ impl GraphAdmission {
     }
 
     /// The segment and the peer of the member `id`, as `/members` shows
-    /// them.
-    pub(crate) fn member(&self, id: InstanceId) -> Option<(String, PeerInfo)> {
+    /// them, and when it said it will be stopped.
+    pub(crate) fn member(&self, id: InstanceId) -> Option<(String, PeerInfo, Option<u64>)> {
         let members = self.members.lock().expect("membership lock");
         let (_, member) = members.get(&id)?;
-        Some((member.registration.segment.clone(), member.peer.clone()))
+        Some((
+            member.registration.segment.clone(),
+            member.peer.clone(),
+            member.leave_by,
+        ))
     }
 
     /// Every member, with its segment and peer, as `/members` shows them,
-    /// and the incarnation of its registration, which a later registration
-    /// of the same instance does not share.
-    pub(crate) fn members(&self) -> Vec<(Incarnation, String, PeerInfo)> {
+    /// the incarnation of its registration, which a later registration of
+    /// the same instance does not share, and when it said it will be
+    /// stopped.
+    pub(crate) fn members(&self) -> Vec<(Incarnation, String, PeerInfo, Option<u64>)> {
         let members = self.members.lock().expect("membership lock");
         members
             .values()
@@ -147,6 +159,7 @@ impl GraphAdmission {
                     *incarnation,
                     member.registration.segment.clone(),
                     member.peer.clone(),
+                    member.leave_by,
                 )
             })
             .collect()
@@ -176,13 +189,15 @@ impl Extension for GraphAdmission {
     ) -> Result<SegmentRegistration, Rejection> {
         payload.ok_or_else(|| Rejection::bad_request("GDL segment registration is required"))
     }
-    fn commit(&self, registration: SegmentRegistration, committed: &Committed<'_>) {
+    fn commit(&self, mut registration: SegmentRegistration, committed: &Committed<'_>) {
+        let leave_by = registration.leave_by.take();
         self.members.lock().expect("membership lock").insert(
             committed.owner,
             (
                 committed.incarnation,
                 Member {
                     registration,
+                    leave_by,
                     peer: committed.peer.clone(),
                     registration_epoch: committed.epoch,
                 },

@@ -143,6 +143,25 @@ A stop during the barrier retires the instance too, without running the serving 
 
 Under a hub, a lost lease stops the instance as a stop does. It skips (A) and (B), because the hub that would answer them is gone. It still waits for its own ledger. The process exits with the lease's error, and the deployment must start it again. [Discovery: rosters and the hub](hub.md) describes the lease.
 
+### A known leave time
+
+An instance that knows when it will be stopped, such as one in a batch job with a walltime, sets `[runtime] leave_by`, in milliseconds since the Unix epoch (`GDL_RUNTIME__LEAVE_BY`). It then stops itself early enough to drain before that time.
+
+```mermaid
+flowchart LR
+    S[start] --> P[leave point: a first stop]
+    P -->|drain_ms| E[the drain has ended]
+    E -->|leave_margin_ms| L[leave_by]
+```
+
+- **The leave point.** At its start, the instance maps `leave_by` onto its monotonic clock as it maps a deadline from another segment: less `clock_skew_ms`. The leave point is that time less `drain_ms` and `leave_margin_ms` (30 s by default). The margin covers the exit after the drain: velo's shutdown and leaving the hub can take up to about 8.5 s past the drain's bound ([The bound](#the-bound)), which the default covers. A start with no time left before the leave point is refused before anything binds, in one line that names `leave_by`, `drain_ms`, and the margin.
+- **One path.** At the leave point, the instance stops as a first SIGTERM stops it: the same retirement, drain, leave hooks (with the cause `Stop`), and exit. Before the instance serves, the leave point ends its start, as a stop while starting does.
+- **A first stop, never a second.** A signal before the leave point leaves it nothing to do. A signal after it, such as the batch system's own SIGTERM, is the first signal, and does not cut the drain. A second signal does. The leave point also ends a hold ([Retired on request](#retired-on-request)), as a stop does.
+- **No drain past it.** No stop runs past the end of the leave point's drain, `leave_by` less the margin: not its drain, and not its leave hooks. A stop the instance takes after the leave point, as when its serving body starts late, has only the time left before then. An interior instance that its pool's drain stopped counts its bound from when the pool's entry instances have drained ([Pools](#pools)). With a leave time, it is cut off at that end too, whatever the entry instances still hold.
+- **Listed, not routed.** Under a hub, the registration carries `leave_by`. The pool's hub lists it in `GET /instances`, and on the `ready` of an entry instance on its pool's watch ([Hub API](../appendix/hub-api.md)). Nothing routes by it: `/v1/ext/gdl/members`, which instances route from, and the relay that choosers read do not carry it. A registration that carries it needs a hub at least as new as the segment, since an earlier hub refuses a field it does not know: roll the hub first. Unset, the registration is sent as before.
+
+The instance reads `leave_by` once, at its start. A walltime that the batch system extends later, as `scontrol` can, only makes the instance leave early, which costs capacity, not correctness. A pool's hub has a leave time of its own ([Draining when the hub stops](pools.md#draining-when-the-hub-stops)).
+
 ### Leaving
 
 A node can register a leave hook ([Write nodes](../guides/write-nodes.md#run-code-when-the-instance-leaves)). Every hook starts at the stop, on every way to it, and runs beside the serving body's shutdown, the retirement, and the drain. The process exits only when the hooks and the drain are done or out of time. The first `Launch::serve` call closes registration. A stop before that, while the nodes load or the instances meet, starts no hook: the instance has served nothing. A barrier that fails is not a stop, and exits as a crash does.

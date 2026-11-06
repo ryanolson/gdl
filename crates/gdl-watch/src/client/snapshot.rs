@@ -49,6 +49,7 @@ fn ready() -> PoolWatchEvent {
             WorkerAddress::from_encoded(b"tcp://127.0.0.1:1".to_vec()),
         ),
         joined: 1,
+        leave_by: None,
     }
 }
 

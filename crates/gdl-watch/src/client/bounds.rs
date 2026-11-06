@@ -165,6 +165,7 @@ fn the_default_limit_takes_the_largest_peer_a_hub_admits() {
         segment: "s".repeat(64),
         peer,
         joined: u64::MAX,
+        leave_by: Some(u64::MAX),
     };
     let sent = format!(
         "data: {}\n\n",

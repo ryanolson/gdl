@@ -14,16 +14,37 @@ const SECOND: Duration = Duration::from_secs(1);
 async fn the_hooks_end_with_the_stops_bound_at_the_latest() {
     let at = Instant::now();
     assert_eq!(
-        StopTimes::new(at, SECOND * 20, None).hooks,
+        StopTimes::new(at, SECOND * 20, None, None).hooks,
         at + SECOND * 20
     );
     assert_eq!(
-        StopTimes::new(at, SECOND * 20, Some(SECOND * 5)).hooks,
+        StopTimes::new(at, SECOND * 20, Some(SECOND * 5), None).hooks,
         at + SECOND * 5
     );
     assert_eq!(
-        StopTimes::new(at, SECOND * 20, Some(SECOND * 50)).hooks,
+        StopTimes::new(at, SECOND * 20, Some(SECOND * 50), None).hooks,
         at + SECOND * 20
+    );
+}
+
+/// A stop of an instance with a leave point ends with the leave point's
+/// drain, whenever it began: every bound of a later stop comes in to it,
+/// and an earlier stop keeps its own.
+#[tokio::test(start_paused = true)]
+async fn a_stop_ends_by_the_end_of_the_leave_points_drain() {
+    let at = Instant::now();
+    let end = Some(at + SECOND * 8);
+    let late = StopTimes::new(at, SECOND * 20, Some(SECOND * 10), end);
+    assert_eq!(late.drain, at + SECOND * 8);
+    assert_eq!(late.hooks, at + SECOND * 8);
+    assert_eq!(late.pending_until, at + SECOND * 4);
+    let early = StopTimes::new(at, SECOND * 6, None, end);
+    assert_eq!(early.drain, at + SECOND * 6);
+    let past = StopTimes::new(at + SECOND * 9, SECOND * 20, None, end);
+    assert_eq!(
+        past.drain,
+        at + SECOND * 9,
+        "no time left, never before the stop"
     );
 }
 
@@ -32,7 +53,7 @@ async fn the_hooks_end_with_the_stops_bound_at_the_latest() {
 #[tokio::test(start_paused = true)]
 async fn the_fallback_is_the_earlier_of_its_two_times() {
     let at = Instant::now();
-    let times = StopTimes::new(at, SECOND * 20, None);
+    let times = StopTimes::new(at, SECOND * 20, None, None);
     assert_eq!(times.fallback(at + SECOND, SECOND * 2), at + SECOND * 3);
     assert_eq!(times.fallback(at + SECOND, SECOND * 30), at + SECOND * 10);
     assert_eq!(times.fallback(at + SECOND * 15, SECOND), at + SECOND * 10);
@@ -44,14 +65,14 @@ async fn the_fallback_is_the_earlier_of_its_two_times() {
 #[tokio::test(start_paused = true)]
 async fn a_late_retirement_cannot_delay_the_fallback() {
     let at = Instant::now();
-    let times = StopTimes::new(at, SECOND * 20, None);
+    let times = StopTimes::new(at, SECOND * 20, None, None);
 
     let (_retired, retirement) = watch::channel(None);
     fallback(times, SECOND * 30, retirement).await;
     assert_eq!(Instant::now(), at + SECOND * 10, "with no retirement");
 
     let at = Instant::now();
-    let times = StopTimes::new(at, SECOND * 20, None);
+    let times = StopTimes::new(at, SECOND * 20, None, None);
     let (retired, retirement) = watch::channel(None);
     tokio::spawn(async move {
         tokio::time::sleep(SECOND * 9).await;
@@ -68,7 +89,7 @@ async fn a_late_retirement_cannot_delay_the_fallback() {
 #[tokio::test(start_paused = true)]
 async fn the_fallback_counts_from_a_timely_retirement() {
     let at = Instant::now();
-    let times = StopTimes::new(at, SECOND * 20, None);
+    let times = StopTimes::new(at, SECOND * 20, None, None);
     let (retired, retirement) = watch::channel(None);
     retired.send_replace(Some((at + SECOND, Retirement::Withdrawn)));
     fallback(times, SECOND * 2, retirement).await;

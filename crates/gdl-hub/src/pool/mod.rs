@@ -1344,7 +1344,7 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
             .admission
             .get()
             .and_then(|admission| admission.member(committed.owner));
-        if let Some((segment, peer)) = member {
+        if let Some((segment, peer, leave_by)) = member {
             self.drain
                 .joined(&segment, committed.owner, committed.incarnation);
             self.relay.joined(
@@ -1353,8 +1353,13 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
                 committed.incarnation,
                 committed.epoch,
             );
-            self.feed
-                .joined(&segment, committed.incarnation, committed.epoch, peer);
+            self.feed.joined(
+                &segment,
+                committed.incarnation,
+                committed.epoch,
+                peer,
+                leave_by,
+            );
         }
         // A member now, if it is one of the class's, before it stops
         // holding the drain as a registration under way.

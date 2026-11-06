@@ -99,6 +99,16 @@ async fn serve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let spec = DeploymentSpec::new(spec.graph, spec.placement)?;
     let pool = gdl_hub::pool_from_env(&spec)?;
     let drain_on_stop = pool.as_ref().and_then(|pool| pool.drain_on_stop);
+    // Refused before the hub serves: a hub that cannot run its stop
+    // before it must be gone must not start. Read only with
+    // `drain_on_stop`, which the pool's settings require for it.
+    let leave_at = match pool
+        .as_ref()
+        .and_then(|pool| pool.leave_by.zip(drain_on_stop))
+    {
+        Some((leave, wait)) => Some((leave_at(leave, wait)?, leave)),
+        None => None,
+    };
     let mut config = HubConfig::default();
     config.server.public_port = port("GDL_HUB__PUBLIC_PORT", HUB_PUBLIC_PORT)?;
     config.server.control_port = port("GDL_HUB__CONTROL_PORT", HUB_CONTROL_PORT)?;
@@ -117,22 +127,69 @@ async fn serve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         hub.public_addr(),
         hub.control_addr()
     );
-    tokio::select! {
-        _ = terminate.recv() => {}
-        _ = interrupt.recv() => {}
-    }
+    let left = async {
+        match leave_at {
+            Some((at, _)) => tokio::time::sleep_until(at).await,
+            None => std::future::pending().await,
+        }
+    };
+    // The leave point starts the stop a first signal starts, and is never
+    // a second signal: one after it, such as a batch system's own stop at
+    // the job's end, must not cut the stop it began.
+    let mut signals = tokio::select! {
+        _ = terminate.recv() => 1,
+        _ = interrupt.recv() => 1,
+        () = left => {
+            if let Some((_, leave)) = leave_at {
+                eprintln!(
+                    "gdl-hub: stopping: `pool.leave_by` {} is the stop's wait and the margin away",
+                    leave.unix_ms
+                );
+            }
+            0
+        }
+    };
     let stop = hub
         .extension::<gdl_hub::GraphAdmission>()
         .and_then(|admission| admission.pool_stop());
     match (drain_on_stop, stop) {
         (Some(wait), Some(stop)) => {
+            // A hub with a leave point ends its stop by the end that point
+            // set, its margin before `leave_by`, even when it takes the
+            // stop late: it has only the time left before then.
+            let wait = match leave_at {
+                Some((at, _)) => {
+                    wait.min((at + wait).saturating_duration_since(tokio::time::Instant::now()))
+                }
+                None => wait,
+            };
             eprintln!(
                 "gdl-hub: stopping: stopping the pool, for at most {wait:?}; a second signal stops the hub at once"
             );
-            tokio::select! {
-                stopped = stop.run(wait) => eprintln!("gdl-hub: stopped: {stopped}"),
-                _ = terminate.recv() => eprintln!("gdl-hub: a second signal cut the pool's stop"),
-                _ = interrupt.recv() => eprintln!("gdl-hub: a second signal cut the pool's stop"),
+            let run = stop.run(wait);
+            tokio::pin!(run);
+            loop {
+                tokio::select! {
+                    stopped = &mut run => {
+                        eprintln!("gdl-hub: stopped: {stopped}");
+                        break;
+                    }
+                    _ = async {
+                        tokio::select! {
+                            _ = terminate.recv() => {}
+                            _ = interrupt.recv() => {}
+                        }
+                    } => {
+                        signals += 1;
+                        if signals >= 2 {
+                            eprintln!("gdl-hub: a second signal cut the pool's stop");
+                            break;
+                        }
+                        eprintln!(
+                            "gdl-hub: a first signal, after the leave point began the stop; a second stops the hub at once"
+                        );
+                    }
+                }
             }
         }
         (Some(_), None) => eprintln!("gdl-hub: stopping at once: the hub runs no pool to stop"),
@@ -167,4 +224,29 @@ async fn resolve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             std::process::exit(1);
         }
     }
+}
+
+/// When a hub that must be gone by `leave` starts its stop, on the
+/// monotonic clock: by the one rule an instance uses
+/// ([`gdl_model::LeaveBy::begin_in`]), with the default clock skew, since a
+/// hub has no setting for it, and the stop's `wait` in place of a drain.
+fn leave_at(
+    leave: gdl_model::LeaveBy,
+    wait: std::time::Duration,
+) -> Result<tokio::time::Instant, gdl_model::Error> {
+    let before = tokio::time::Instant::now();
+    let wall = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|wall| u64::try_from(wall.as_nanos()).ok())
+        .unwrap_or(0);
+    let now = tokio::time::Instant::now();
+    let begin = leave.begin_in(
+        gdl_model::LeaveBy::wall_since(wall, now - before),
+        gdl_model::DEFAULT_CLOCK_SKEW,
+        wait,
+        "pool",
+        "stop_wait_ms",
+    )?;
+    Ok(now + begin)
 }

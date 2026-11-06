@@ -32,8 +32,8 @@ fn a_segments_hub_services_are_named_by_phase_and_hex() {
     );
 }
 
-#[test]
-fn registration_must_match_graph_placement_and_segment() {
+/// A one-segment deployment, `s1`.
+fn spec() -> DeploymentSpec {
     let graph = Manifest {
         name: "test".into(),
         schema: 1,
@@ -64,7 +64,12 @@ fn registration_must_match_graph_placement_and_segment() {
         properties: Vec::new(),
     };
     let placement = Placement::new().segment("s1", ["Source", "Echo"]);
-    let spec = DeploymentSpec::new(graph, placement).expect("valid deployment");
+    DeploymentSpec::new(graph, placement).expect("valid deployment")
+}
+
+#[test]
+fn registration_must_match_graph_placement_and_segment() {
+    let spec = spec();
     let registration = spec.registration("s1").expect("segment");
     assert!(spec.validate_registration(&registration).is_ok());
     let mut wrong = registration.clone();
@@ -75,5 +80,42 @@ fn registration_must_match_graph_placement_and_segment() {
     assert!(spec.validate_registration(&wrong).is_err());
     let mut wrong = registration;
     wrong.segment = "unknown".into();
+    assert!(spec.validate_registration(&wrong).is_err());
+}
+
+/// A hub of an earlier build refuses a field it does not know, and the
+/// runtime reads the hub's `/members` with the same type, so a
+/// registration that says nothing of when it leaves is sent as it always
+/// was.
+#[test]
+fn a_registration_without_leave_by_is_sent_byte_for_byte_as_before() {
+    let registration = spec().registration("s1").expect("segment");
+    assert_eq!(
+        serde_json::to_string(&registration).expect("serializes"),
+        format!(
+            r#"{{"segment":"s1","contract":{},"placement":{}}}"#,
+            registration.contract, registration.placement
+        )
+    );
+}
+
+/// When an instance will leave is not part of what it was built for: the
+/// hub admits it whatever it says, and still refuses a binary built for
+/// another graph or placement.
+#[test]
+fn a_registration_that_says_when_it_leaves_is_checked_by_its_build_alone() {
+    let spec = spec();
+    let mut registration = spec.registration("s1").expect("segment");
+    registration.leave_by = Some(1_800_000_000_000);
+    assert!(spec.validate_registration(&registration).is_ok());
+    let sent = serde_json::to_string(&registration).expect("serializes");
+    assert!(sent.ends_with(r#","leave_by":1800000000000}"#), "{sent}");
+    let read: gdl_model::SegmentRegistration = serde_json::from_str(&sent).expect("reads");
+    assert_eq!(read, registration);
+    let mut wrong = registration.clone();
+    wrong.contract ^= 1;
+    assert!(spec.validate_registration(&wrong).is_err());
+    let mut wrong = registration;
+    wrong.placement ^= 1;
     assert!(spec.validate_registration(&wrong).is_err());
 }

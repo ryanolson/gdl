@@ -1003,3 +1003,207 @@ async fn response_at_drain_bound(withhold: bool) -> Vec<gdl::Result<Chunk>> {
     }
     received
 }
+
+/// A sink that its pool's drain stopped counts its drain's bound from when
+/// the entry instances have drained, which a response the entry still
+/// holds can put off; but an instance that must be gone by its leave point
+/// (`[runtime] leave_by`) is gone by then, its margin before it, whatever
+/// the entry holds. Its hook shows that the pool's drain stopped it, not
+/// its leave point. The leave point is a wall-clock time past the entry's
+/// bound of 3 s, so this test takes several seconds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sink_stopped_by_its_pools_drain_is_gone_by_its_leave_point() {
+    // Past the 1 s velo may take to stop once the drain has ended.
+    const MARGIN_MS: u64 = 1_500;
+    let now_ms = || {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("after the epoch")
+                .as_millis(),
+        )
+        .expect("fits")
+    };
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let events = Events::new();
+    let hub = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub, SEGMENTS).await;
+    let leave_by = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let causes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (given, heard) = (Arc::clone(&leave_by), Arc::clone(&causes));
+    let configure = move |segment: &str, config: &mut gdl_runtime::ProcessConfig<_>| {
+        config.runtime.heartbeat_interval = Some(Duration::from_millis(100));
+        if segment == "d" {
+            config.runtime.drain = Some(Duration::from_millis(100));
+            // Past the fleet's start and the entry's bound on a busy host.
+            let unix_ms = now_ms() + 100 + MARGIN_MS + 6_000;
+            given.store(unix_ms, std::sync::atomic::Ordering::SeqCst);
+            config.runtime.leave_by = Some(gdl_runtime::LeaveBy {
+                unix_ms,
+                margin: Duration::from_millis(MARGIN_MS),
+            });
+            let heard = Arc::clone(&heard);
+            config
+                .runtime
+                .lifecycle
+                .on_leave("cause", move |leave: gdl::Leave| {
+                    heard.lock().expect("lock").push(leave.cause());
+                    async { gdl::Handoff::Done }
+                })
+                .expect("registered");
+        }
+    };
+    let m1 = pool(
+        &spec,
+        &directory,
+        (SEGMENTS, &["d"], 1),
+        &configure,
+        &events,
+    )
+    .await;
+    let leave_by = leave_by.load(std::sync::atomic::Ordering::SeqCst);
+    following(&chooser, 1).await;
+    let plan = Plan {
+        tokens: 3,
+        hold_at_end: true,
+        ..Plan::default()
+    };
+    let (cx, held) = send(&chooser, "leave-point", plan, &[]);
+    events.wait_for("D:held:c(leave-point)#0", WAIT).await;
+    let sink = &m1.interior[0];
+    let mut serving = phase(&m1.hub, "d", SegmentPhase::Serving).await;
+
+    m1.readiness.drain().await.expect("the pool drains");
+    declining(&m1.entries[0]).await;
+    let left = tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(event) = serving.next().await {
+            if matches!(event, ServiceEvent::Removed(instance) if instance == id(sink)) {
+                return;
+            }
+        }
+    })
+    .await;
+    let gone_at = now_ms();
+    assert!(left.is_ok(), "the sink stayed past its leave point");
+    assert_eq!(
+        *causes.lock().expect("lock"),
+        [gdl::LeaveCause::PoolDrain],
+        "the pool's drain stopped the sink before its leave point"
+    );
+    assert!(
+        gone_at < leave_by,
+        "left {} ms after its leave point",
+        i128::from(gone_at) - i128::from(leave_by)
+    );
+    assert_eq!(
+        m1.entries[0].segment.admitted(),
+        1,
+        "the entry still held the response when the sink left"
+    );
+    cx.request_stop();
+    let _ = answer(held).await;
+    let Spread {
+        hub: model_hub,
+        entries,
+        interior,
+        ..
+    } = m1;
+    for instance in entries.into_iter().chain(interior) {
+        instance.process.stop();
+        instance.process.stop();
+        let _ = instance.ended(WAIT).await;
+    }
+    chooser.process.stop();
+    chooser.process.stop();
+    let _ = chooser.ended(WAIT).await;
+    for hub in [hub, model_hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// An entry instance with a leave point, whose serving body runs to its
+/// bound, is gone by its leave time even when its hub never answers its
+/// announcement that it detached: that wait ends with the stop's bound,
+/// as every wait of a stop does. Its control, a hub that answers, leaves
+/// the same way. The leave point is a wall-clock time a few seconds out,
+/// so this test takes several seconds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unanswered_detach_does_not_hold_an_instance_past_its_leave_time() {
+    let now_ms = || {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("after the epoch")
+                .as_millis(),
+        )
+        .expect("fits")
+    };
+    for stall in [false, true] {
+        let spec = spec_of(placement());
+        let directory = Resolving::new();
+        let events = Events::new();
+        let global = global_hub_of(&spec, &directory).await;
+        let chooser = chooser(&spec, &global, SEGMENTS).await;
+        let leaves = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let given = Arc::clone(&leaves);
+        let (started, mut stopped) = tokio::sync::mpsc::unbounded_channel();
+        let configure = move |segment: &str, config: &mut gdl_runtime::ProcessConfig<_>| {
+            if segment == "f" {
+                let unix_ms = now_ms() + 1_000 + 200 + 2_000;
+                given.store(unix_ms, std::sync::atomic::Ordering::SeqCst);
+                config.runtime.drain = Some(Duration::from_secs(1));
+                config.runtime.leave_by = Some(gdl_runtime::LeaveBy {
+                    unix_ms,
+                    margin: Duration::from_millis(200),
+                });
+                config.runtime.faults.stall_detached = stall;
+                let started = started.clone();
+                config
+                    .runtime
+                    .lifecycle
+                    .on_leave("observed", move |leave: gdl::Leave| {
+                        started.send(leave.deadline()).expect("the test listens");
+                        async { gdl::Handoff::Done }
+                    })
+                    .expect("registered");
+            }
+        };
+        let mut m1 = pool(
+            &spec,
+            &directory,
+            (SEGMENTS, &["d"], 1),
+            &configure,
+            &events,
+        )
+        .await;
+        following(&chooser, 1).await;
+        let entry = m1.entries.remove(0);
+        // Its serving body runs to the stop's bound.
+        entry.body.send_replace(true);
+        tokio::time::timeout(WAIT, stopped.recv())
+            .await
+            .expect("the leave point stopped it in time")
+            .expect("a deadline");
+        m1.readiness.drain().await.expect("the pool drains");
+        let _ = entry.ended(WAIT * 2).await;
+        let ended = now_ms();
+        let leave_by = leaves.load(std::sync::atomic::Ordering::SeqCst);
+        for instance in m1.interior.into_iter().chain(m1.entries) {
+            instance.process.stop();
+            instance.process.stop();
+            let _ = instance.ended(WAIT).await;
+        }
+        chooser.process.stop();
+        chooser.process.stop();
+        let _ = chooser.ended(WAIT).await;
+        for hub in [global, m1.hub] {
+            hub.shutdown().await.expect("valid test fixture");
+        }
+        assert!(
+            ended < leave_by,
+            "stalled {stall}: gone {} ms after its leave time",
+            i128::from(ended) - i128::from(leave_by)
+        );
+    }
+}

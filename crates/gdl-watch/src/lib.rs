@@ -581,6 +581,13 @@ pub enum PoolWatchEvent {
         /// build, which a reader takes as an unknown join order.
         #[serde(default, skip_serializing_if = "is_zero")]
         joined: u64,
+        /// When it said, as it registered, that it will be stopped, in
+        /// milliseconds since the Unix epoch ([`PoolInstance::leave_by`]).
+        /// For a person or a tool that reads the watch: a follower takes
+        /// nothing from it, and routes as before. Absent when it said
+        /// nothing, and from a hub of an earlier build.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        leave_by: Option<u64>,
     },
     /// An entry instance retired: no new work may be sent to it. Sent
     /// again, with `acknowledged`, once every pool that followed this one

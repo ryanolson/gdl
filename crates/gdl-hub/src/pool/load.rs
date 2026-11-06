@@ -568,7 +568,7 @@ mod first {
         );
         let id = peer.instance_id();
         let epoch = RegistrationEpoch::new();
-        feed.joined("f", Incarnation::from_u64(1), epoch, peer);
+        feed.joined("f", Incarnation::from_u64(1), epoch, peer, None);
         feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
         let lease = Lease {
             incarnation: Incarnation::from_u64(1),

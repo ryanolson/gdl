@@ -36,3 +36,16 @@ retries = 2
 filter = 'binary_id(gdl-hub::snapshot) & test(=a_real_hubs_snapshot_completes_well_inside_its_bounds)'
 test-group = 'timing'
 retries = 2
+
+[[profile.default.overrides]]
+# An instance or a hub with a leave point is gone before it: the entry
+# instance leaves its margin of 500 ms before it, a hub its margin of
+# 200 ms, the sink its pool's drain stopped within 1.5 s of the end of its
+# drain (the 1 s velo may take to stop, and some room), and an entry whose
+# hub does not answer its detach within 200 ms of the end of its drain.
+# The sink's test also needs its pool's drain to stop it within 6 s of its
+# start, before its own leave point does. None failed under load; their
+# claim is a wall-clock bound.
+filter = 'binary_id(gdl-runtime::leaveby) | (binary_id(gdl-hub::binary) & test(/leave_point/)) | (binary_id(gdl-runtime::detaching) & (test(=a_sink_stopped_by_its_pools_drain_is_gone_by_its_leave_point) | test(=an_unanswered_detach_does_not_hold_an_instance_past_its_leave_time)))'
+test-group = 'timing'
+retries = 2

@@ -82,6 +82,7 @@ async fn a_ready_instance_is_sent_once_its_peer_is_known() {
         Incarnation::from_u64(1),
         RegistrationEpoch::new(),
         early.clone(),
+        None,
     );
     assert_eq!(
         pending(&mut watch),
@@ -89,6 +90,7 @@ async fn a_ready_instance_is_sent_once_its_peer_is_known() {
             segment: "f".into(),
             peer: early,
             joined: 1,
+            leave_by: None,
         }]
     );
     feed.observe(
@@ -101,6 +103,7 @@ async fn a_ready_instance_is_sent_once_its_peer_is_known() {
         Incarnation::from_u64(1),
         RegistrationEpoch::new(),
         never,
+        None,
     );
     assert_eq!(pending(&mut watch), [], "it left `ready` before it joined");
 }
@@ -120,6 +123,7 @@ async fn a_departure_is_fenced_by_incarnation_and_final() {
         Incarnation::from_u64(2),
         RegistrationEpoch::new(),
         member.clone(),
+        None,
     );
     feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
     feed.removed(removal(id, 1));
@@ -131,6 +135,7 @@ async fn a_departure_is_fenced_by_incarnation_and_final() {
             segment: "f".into(),
             peer: member.clone(),
             joined: 2,
+            leave_by: None,
         }],
         "a stale removal is no departure"
     );
@@ -146,6 +151,7 @@ async fn a_departure_is_fenced_by_incarnation_and_final() {
         Incarnation::from_u64(3),
         RegistrationEpoch::new(),
         member,
+        None,
     );
     assert_eq!(
         pending(&mut watch),
@@ -174,6 +180,7 @@ async fn a_retirement_seen_before_the_peer_is_known_is_kept() {
         Incarnation::from_u64(1),
         RegistrationEpoch::new(),
         member,
+        None,
     );
     let retired = PoolWatchEvent::Retired {
         segment: "f".into(),
@@ -200,6 +207,7 @@ async fn a_departure_waits_for_what_the_loopback_holds_before_it() {
         Incarnation::from_u64(1),
         RegistrationEpoch::new(),
         member.clone(),
+        None,
     );
     feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
     feed.removed(removal(id, 1));
@@ -213,6 +221,7 @@ async fn a_departure_waits_for_what_the_loopback_holds_before_it() {
                 segment: "f".into(),
                 peer: member,
                 joined: 1,
+                leave_by: None,
             },
             PoolWatchEvent::Retired {
                 segment: "f".into(),
@@ -243,6 +252,7 @@ async fn a_retirement_delivered_after_the_withdrawal_and_the_departure_comes_bef
         Incarnation::from_u64(1),
         RegistrationEpoch::new(),
         member.clone(),
+        None,
     );
     feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
     feed.observe(0, Watched::Ready, &ServiceEvent::Removed(id));
@@ -256,6 +266,7 @@ async fn a_retirement_delivered_after_the_withdrawal_and_the_departure_comes_bef
                 segment: "f".into(),
                 peer: member,
                 joined: 1,
+                leave_by: None,
             },
             PoolWatchEvent::Retired {
                 segment: "f".into(),
@@ -284,6 +295,7 @@ async fn a_watch_opened_again_completes_a_departure() {
         Incarnation::from_u64(1),
         RegistrationEpoch::new(),
         member.clone(),
+        None,
     );
     feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
     feed.observe(
@@ -299,6 +311,7 @@ async fn a_watch_opened_again_completes_a_departure() {
         Incarnation::from_u64(1),
         RegistrationEpoch::new(),
         stranger,
+        None,
     );
     assert_eq!(
         pending(&mut watch),
@@ -307,6 +320,7 @@ async fn a_watch_opened_again_completes_a_departure() {
                 segment: "f".into(),
                 peer: member,
                 joined: 1,
+                leave_by: None,
             },
             PoolWatchEvent::Left {
                 segment: "f".into(),
@@ -330,12 +344,14 @@ async fn retirement_is_final_and_comes_before_readiness() {
         Incarnation::from_u64(1),
         RegistrationEpoch::new(),
         member,
+        None,
     );
     feed.joined(
         "f",
         Incarnation::from_u64(1),
         RegistrationEpoch::new(),
         idle.clone(),
+        None,
     );
     feed.observe(0, Watched::Retired, &ServiceEvent::Added(id));
     feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
@@ -366,6 +382,7 @@ async fn a_segment_no_other_class_reaches_is_not_watched() {
         Incarnation::from_u64(1),
         RegistrationEpoch::new(),
         member,
+        None,
     );
     feed.observe(1, Watched::Ready, &ServiceEvent::Added(id));
     feed.observe(1, Watched::Retired, &ServiceEvent::Added(id));
@@ -395,7 +412,7 @@ async fn a_report_does_not_outlive_its_registration() {
         let member = peer();
         let id = member.instance_id();
         let first = RegistrationEpoch::new();
-        feed.joined("f", Incarnation::from_u64(1), first, member.clone());
+        feed.joined("f", Incarnation::from_u64(1), first, member.clone(), None);
         feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
         let lease = Lease {
             incarnation: Incarnation::from_u64(1),
@@ -411,6 +428,7 @@ async fn a_report_does_not_outlive_its_registration() {
             Incarnation::from_u64(2),
             RegistrationEpoch::new(),
             member,
+            None,
         );
         feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
         assert_eq!(
@@ -472,8 +490,8 @@ fn a_property_drain_waits_for_a_report_from_a_renewed_registration() {
     let a_epoch = RegistrationEpoch::new();
     let b_epoch = RegistrationEpoch::new();
     let incarnation = Incarnation::from_u64(1);
-    feed.joined("f", incarnation, a_epoch, a);
-    feed.joined("f", incarnation, b_epoch, b.clone());
+    feed.joined("f", incarnation, a_epoch, a, None);
+    feed.joined("f", incarnation, b_epoch, b.clone(), None);
     feed.observe(0, Watched::Ready, &ServiceEvent::Added(a_id));
     feed.observe(0, Watched::Ready, &ServiceEvent::Added(b_id));
     let a_lease = Lease {
@@ -509,7 +527,13 @@ fn a_property_drain_waits_for_a_report_from_a_renewed_registration() {
         PropertyState::Draining
     );
 
-    feed.joined("f", Incarnation::from_u64(2), RegistrationEpoch::new(), b);
+    feed.joined(
+        "f",
+        Incarnation::from_u64(2),
+        RegistrationEpoch::new(),
+        b,
+        None,
+    );
     feed.report(a_id, a_lease, empty, now)
         .expect("the first instance finishes its drain");
     assert_eq!(
@@ -538,7 +562,7 @@ fn a_drain_reported_before_the_restart_snapshot_is_kept() {
     let id = member.instance_id();
     let epoch = RegistrationEpoch::new();
     let incarnation = Incarnation::from_u64(1);
-    feed.joined("f", incarnation, epoch, member);
+    feed.joined("f", incarnation, epoch, member, None);
     feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
     let lease = Lease { incarnation, epoch };
     let now = Instant::now();
@@ -651,6 +675,7 @@ async fn a_re_registration_keeps_the_first_join_stamp() {
         segment: "f".into(),
         peer: peer.clone(),
         joined,
+        leave_by: None,
     };
     for (peer, incarnation) in [(&first, 3), (&second, 5)] {
         feed.joined(
@@ -658,6 +683,7 @@ async fn a_re_registration_keeps_the_first_join_stamp() {
             Incarnation::from_u64(incarnation),
             RegistrationEpoch::new(),
             peer.clone(),
+            None,
         );
         feed.observe(0, Watched::Ready, &ServiceEvent::Added(peer.instance_id()));
     }
@@ -668,6 +694,7 @@ async fn a_re_registration_keeps_the_first_join_stamp() {
         Incarnation::from_u64(9),
         RegistrationEpoch::new(),
         first.clone(),
+        None,
     );
     feed.removed(removal(first.instance_id(), 3));
     assert_eq!(pending(&mut watch), [], "a renewal is no news");
@@ -692,6 +719,7 @@ async fn a_re_registration_keeps_the_first_join_stamp() {
         Incarnation::from_u64(12),
         RegistrationEpoch::new(),
         first.clone(),
+        None,
     );
     feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
     assert_eq!(
@@ -720,6 +748,7 @@ fn a_retire_request_ends_when_its_member_registers_outside_the_class() {
         Incarnation::from_u64(1),
         RegistrationEpoch::new(),
         member.clone(),
+        None,
     );
     feed.retire(id, 1, false).expect("held");
     assert_eq!(feed.retire_requests().len(), 1, "the control");
@@ -728,6 +757,7 @@ fn a_retire_request_ends_when_its_member_registers_outside_the_class() {
         Incarnation::from_u64(2),
         RegistrationEpoch::new(),
         member,
+        None,
     );
     assert!(feed.retire_requests().is_empty());
     assert_eq!(

@@ -17,6 +17,7 @@ mod diagram;
 mod encoding;
 mod fleet;
 mod hash;
+mod leave;
 mod manifest;
 mod metrics;
 mod placement;
@@ -32,8 +33,8 @@ use serde::{Deserialize, Serialize};
 pub use calls::check_calls;
 pub use config::{ConfigField, ConfigSchema, ConfigValue, GraphConfig, resolve_config};
 pub use deployment::{
-    DEFAULT_DEADLINE, DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, SEGMENT_NAME_LIMIT,
-    SegmentPhase, SegmentRegistration, segment_name_problem, segment_service,
+    DEFAULT_CLOCK_SKEW, DEFAULT_DEADLINE, DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT,
+    SEGMENT_NAME_LIMIT, SegmentPhase, SegmentRegistration, segment_name_problem, segment_service,
 };
 pub use diagram::Direction;
 pub use encoding::Encoding;
@@ -42,6 +43,7 @@ pub use fleet::{
     FleetMetrics, FleetTable, HUB, KubernetesCluster, PoolDgd, PoolResources, PoolSlurm,
     Quantities, Quantity, Resources, SlurmSite, Toleration,
 };
+pub use leave::LeaveBy;
 pub use manifest::{
     HopInfo, ItemInfo, Manifest, NodeInfo, PropertyInfo, PropertyNeed, TypeInfo, UnaryInfo,
 };

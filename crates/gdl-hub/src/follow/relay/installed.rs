@@ -189,6 +189,7 @@ impl Installed {
                     segment: ready.segment,
                     peer: ready.peer,
                     joined: ready.joined,
+                    leave_by: None,
                 },
                 &mut send,
             );
@@ -276,10 +277,13 @@ impl Installed {
                     load,
                 });
             }
+            // When the instance will leave is not relayed: choosers route
+            // as before, and routing by it is a later change.
             PoolWatchEvent::Ready {
                 segment,
                 peer,
                 joined,
+                leave_by: _,
             } => {
                 let id = peer.instance_id();
                 if self.retired.contains_key(&id) || self.ready.contains_key(&id) {

@@ -91,6 +91,7 @@ fn ready(peer: &PeerInfo) -> PoolWatchEvent {
         segment: "f".into(),
         peer: peer.clone(),
         joined: stamp(peer),
+        leave_by: None,
     }
 }
 

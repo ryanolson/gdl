@@ -196,6 +196,7 @@ fn a_pools_settings_have_its_quorum_resolved() {
             summary: PoolSettings::DEFAULT_SUMMARY,
             timing: Default::default(),
             drain_on_stop: None,
+            leave_by: None,
         }
     );
     assert!(larger.requires.is_empty(), "model_x requires nothing");

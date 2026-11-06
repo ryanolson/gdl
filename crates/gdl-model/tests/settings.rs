@@ -90,6 +90,7 @@ fn a_pools_settings_are_read_whole() {
             timing: Default::default(),
             properties: Vec::new(),
             drain_on_stop: None,
+            leave_by: None,
         }
     );
     let text = toml::to_string(&settings(MODEL)).expect("toml");
@@ -1110,6 +1111,68 @@ fn a_pools_hub_drains_on_stop_only_when_asked() {
         assert_eq!(
             (problem.table.as_deref(), problem.key.as_deref()),
             (Some("pool"), Some("stop_wait_ms")),
+            "{bad}: {problem}"
+        );
+        assert!(problem.message.contains(says), "{bad}: {problem}");
+    }
+}
+
+/// A pool's hub that knows when it will be stopped (`leave_by`, unix ms)
+/// starts its stop that long before it must be gone, so it is read only
+/// by a hub that drains on stop, and refused otherwise, as `stop_wait_ms`
+/// is; its margin (`leave_margin_ms`, by default 30 s) is read only with
+/// it. Unset, nothing is written out, so a generated `[pool]` table stays
+/// as it was.
+#[test]
+fn a_pools_hub_leaves_by_a_time_only_when_it_drains_on_stop() {
+    const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\ndrain_on_stop = true\n";
+    let unset = settings(LEAST);
+    assert_eq!(unset.leave_by, None);
+    let text = toml::to_string(&unset).expect("toml");
+    for key in ["leave_by", "leave_margin_ms"] {
+        assert!(!text.contains(key), "{key} in {text}");
+    }
+    let set = settings(&format!("{LEAST}leave_by = 1800000000000\n"));
+    assert_eq!(
+        set.leave_by,
+        Some(gdl_model::LeaveBy {
+            unix_ms: 1_800_000_000_000,
+            margin: gdl_model::LeaveBy::DEFAULT_MARGIN,
+        })
+    );
+    let text = toml::to_string(&set).expect("toml");
+    assert!(!text.contains("leave_margin_ms"), "{text}");
+    assert_eq!(settings(&text), set, "{text}");
+    let margined = settings(&format!(
+        "{LEAST}leave_by = 1800000000000\nleave_margin_ms = 500\n"
+    ));
+    assert_eq!(
+        margined.leave_by.map(|leave| leave.margin),
+        Some(Duration::from_millis(500))
+    );
+    let text = toml::to_string(&margined).expect("toml");
+    assert_eq!(settings(&text), margined, "{text}");
+    const OFF: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+    for (bad, key, says) in [
+        ("leave_by = 1800000000000\n", "leave_by", "drain_on_stop"),
+        (
+            "drain_on_stop = false\nleave_by = 1800000000000\n",
+            "leave_by",
+            "drain_on_stop",
+        ),
+        (
+            "drain_on_stop = true\nleave_margin_ms = 500\n",
+            "leave_margin_ms",
+            "leave_by",
+        ),
+    ] {
+        let value: toml::Value = toml::from_str(&format!("{OFF}{bad}")).expect("toml");
+        let problems = PoolSettings::read(value).expect_err(bad);
+        assert_eq!(problems.0.len(), 1, "{bad}: {problems}");
+        let problem = &problems.0[0];
+        assert_eq!(
+            (problem.table.as_deref(), problem.key.as_deref()),
+            (Some("pool"), Some(key)),
             "{bad}: {problem}"
         );
         assert!(problem.message.contains(says), "{bad}: {problem}");

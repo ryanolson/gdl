@@ -50,10 +50,10 @@ pub use gdl;
 pub use gdl::{message_encoding, message_pinned};
 pub use gdl_model::{
     CodecEntry, CrossingReport, DeploymentSpec, Direction, DirectoryBackend, EdgeCodec, Encoding,
-    GraphConfig, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, HopInfo, HopLayout, ItemInfo, Layout, Manifest,
-    NodeInfo, Placement, PlacementError, PlacementErrors, PoolSettings, PropertyInfo, PropertyNeed,
-    RequestRouter, Role, Run, SELECTORS, SegmentRegistration, SelectorInfo, TypeInfo, UnaryInfo,
-    WireReason, layout, resolve_config,
+    GraphConfig, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, HopInfo, HopLayout, ItemInfo, Layout, LeaveBy,
+    Manifest, NodeInfo, Placement, PlacementError, PlacementErrors, PoolSettings, PropertyInfo,
+    PropertyNeed, RequestRouter, Role, Run, SELECTORS, SegmentRegistration, SelectorInfo, TypeInfo,
+    UnaryInfo, WireReason, layout, resolve_config,
 };
 #[cfg(feature = "hub")]
 pub use gdl_pools::PoolState;

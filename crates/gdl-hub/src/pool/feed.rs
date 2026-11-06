@@ -349,6 +349,7 @@ impl Feed {
         incarnation: Incarnation,
         epoch: RegistrationEpoch,
         peer: PeerInfo,
+        leave_by: Option<u64>,
     ) {
         let mut shared = self.lock();
         let id = peer.instance_id();
@@ -370,6 +371,7 @@ impl Feed {
                 entry.incarnation = incarnation;
                 entry.epoch = epoch;
                 entry.peer = peer;
+                entry.leave_by = leave_by;
                 entry.departed = false;
             }
             None => {
@@ -381,6 +383,7 @@ impl Feed {
                         joined: incarnation,
                         epoch,
                         peer,
+                        leave_by,
                         ready: false,
                         retired: false,
                         acknowledged: false,
@@ -677,6 +680,9 @@ struct Entry {
     /// The registration committed for it, which fences its reports.
     epoch: RegistrationEpoch,
     peer: PeerInfo,
+    /// When it said, in its current registration, that it will be
+    /// stopped: the watch shows it, and nothing routes by it.
+    leave_by: Option<u64>,
     /// Whether it has announced `ready`.
     ready: bool,
     /// Whether it has retired.
@@ -883,6 +889,7 @@ impl Shared {
                     segment,
                     peer: entry.peer.clone(),
                     joined: entry.joined(),
+                    leave_by: entry.leave_by,
                 }
             }
             Watched::Retired if !entry.retired => {
@@ -945,16 +952,16 @@ impl Shared {
         #[cfg(test)]
         self.work.snapshot();
         let mut retired: Vec<(usize, InstanceId, bool)> = Vec::new();
-        let mut ready: Vec<(usize, InstanceId, &PeerInfo, u64)> = Vec::new();
+        let mut ready: Vec<(usize, InstanceId, &Entry)> = Vec::new();
         for (id, entry) in &self.entries {
             if entry.retired {
                 retired.push((entry.segment, *id, entry.acknowledged));
             } else if entry.ready {
-                ready.push((entry.segment, *id, &entry.peer, entry.joined()));
+                ready.push((entry.segment, *id, entry));
             }
         }
         retired.sort_by_key(|(segment, id, _)| (*segment, id.as_u128()));
-        ready.sort_by_key(|(segment, id, _, _)| (*segment, id.as_u128()));
+        ready.sort_by_key(|(segment, id, _)| (*segment, id.as_u128()));
         let mut events = Vec::with_capacity(retired.len() + ready.len() + 2);
         events.push(PoolWatchEvent::Pool {
             name: name.to_string(),
@@ -986,10 +993,11 @@ impl Shared {
         events.extend(
             ready
                 .into_iter()
-                .map(|(segment, _, peer, joined)| PoolWatchEvent::Ready {
+                .map(|(segment, _, entry)| PoolWatchEvent::Ready {
                     segment: self.segments[segment].0.clone(),
-                    peer: peer.clone(),
-                    joined,
+                    peer: entry.peer.clone(),
+                    joined: entry.joined(),
+                    leave_by: entry.leave_by,
                 }),
         );
         events.push(PoolWatchEvent::Synced);

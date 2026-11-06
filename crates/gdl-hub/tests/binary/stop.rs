@@ -351,3 +351,243 @@ async fn a_hub_whose_directory_hangs_exits_at_its_wait() {
     );
     drop(hang);
 }
+
+/// Milliseconds since the Unix epoch, now.
+fn now_ms() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_millis(),
+    )
+    .expect("fits")
+}
+
+/// The stop's wait of a hub with a leave point here.
+const WAIT_MS: u64 = 1_000;
+
+/// The margin of a hub with a leave point here.
+const MARGIN_MS: u64 = 200;
+
+/// How long after its start a hub here begins to leave: long enough for
+/// it to serve, and a member to join, on a busy host.
+const SERVES_FOR_MS: u64 = 1_500;
+
+/// The line the hub writes when its leave point starts the stop.
+const LEAVING: &str = "gdl-hub: stopping: `pool.leave_by`";
+
+/// A hub of the model pool that must be gone by `leave_by`.
+fn leaving(deployment: &Path, pools: &Path, leave_by: u64) -> Serving {
+    hub(
+        deployment,
+        pools,
+        ("model_x", MODEL),
+        &[
+            ("GDL_POOL__DRAIN_ON_STOP", "true"),
+            ("GDL_POOL__STOP_WAIT_MS", &WAIT_MS.to_string()),
+            ("GDL_POOL__LEAVE_BY", &leave_by.to_string()),
+            ("GDL_POOL__LEAVE_MARGIN_MS", &MARGIN_MS.to_string()),
+        ],
+    )
+}
+
+/// A hub that must be gone by `GDL_POOL__LEAVE_BY` runs, with no signal,
+/// the stop its first signal runs, its wait and its margin before then:
+/// the pool drains, a member holds it until it leaves, and the hub exits
+/// with 0 once the record is withdrawn, before it must be gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hub_drains_its_pool_by_itself_at_its_leave_point_and_exits_before_it() {
+    let (dir, deployment) = setup("leave");
+    let pools = dir.path().join("pools");
+    let pool = ("model_x", MODEL);
+    let leave_by = now_ms() + WAIT_MS + MARGIN_MS + SERVES_FOR_MS;
+    let mut hub = leaving(&deployment, &pools, leave_by);
+    until_written(&pools, pool, "a record", |_| true).await;
+    let instance = member(&hub, "d").await;
+
+    until_written(&pools, pool, "a draining record", draining).await;
+    let lines = tokio::task::block_in_place(|| {
+        hub.lines_until(Duration::from_secs(10), |line| line.starts_with(LEAVING))
+    });
+    assert!(
+        hub.running(),
+        "the hub exited with a member left: {lines:#?}"
+    );
+    instance.leave().await;
+    until_written(&pools, pool, "the withdrawal", withdrawn).await;
+    let (status, lines) = exited(&mut hub, Duration::from_secs(10));
+    assert!(status.success(), "{status:?}: {lines:#?}");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("gdl-hub: stopped") && line.contains("withdrawn")),
+        "{lines:#?}"
+    );
+    assert!(now_ms() < leave_by, "gone before its leave point");
+}
+
+/// A signal after the leave point has started the hub's stop is its first
+/// signal, not a second: the stop goes on until the pool is withdrawn, as
+/// a batch system's own stop signal at the job's end must not cut it. A
+/// second signal does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_signal_after_the_hubs_leave_point_does_not_cut_its_stop_and_two_do() {
+    for signals in [1, 2] {
+        let (dir, deployment) = setup("leave-signal");
+        let pools = dir.path().join("pools");
+        let pool = ("model_x", MODEL);
+        let leave_by = now_ms() + WAIT_MS * 10 + MARGIN_MS + SERVES_FOR_MS;
+        let mut hub = hub(
+            &deployment,
+            &pools,
+            pool,
+            &[
+                ("GDL_POOL__DRAIN_ON_STOP", "true"),
+                ("GDL_POOL__STOP_WAIT_MS", &(WAIT_MS * 10).to_string()),
+                ("GDL_POOL__LEAVE_BY", &leave_by.to_string()),
+                ("GDL_POOL__LEAVE_MARGIN_MS", &MARGIN_MS.to_string()),
+            ],
+        );
+        until_written(&pools, pool, "a record", |_| true).await;
+        let instance = member(&hub, "d").await;
+        tokio::task::block_in_place(|| {
+            hub.lines_until(Duration::from_secs(10), |line| line.starts_with(LEAVING))
+        });
+        until_written(&pools, pool, "a draining record", draining).await;
+        hub.signal("TERM");
+        if signals == 2 {
+            hub.signal("TERM");
+            let (status, lines) = exited(&mut hub, Duration::from_secs(5));
+            assert!(status.success(), "{status:?}: {lines:#?}");
+            assert!(
+                lines.iter().any(|line| line.contains("second signal")),
+                "{lines:#?}"
+            );
+            continue;
+        }
+        // The signal is taken before the member leaves: the hub says so.
+        tokio::task::block_in_place(|| {
+            hub.lines_until(Duration::from_secs(10), |line| {
+                line.contains("first signal")
+            })
+        });
+        assert!(
+            hub.running(),
+            "one signal after the leave point cut the stop"
+        );
+        assert!(instance.registered().await, "the member was dropped");
+        instance.leave().await;
+        until_written(&pools, pool, "the withdrawal", withdrawn).await;
+        let (status, lines) = exited(&mut hub, Duration::from_secs(10));
+        assert!(status.success(), "{status:?}: {lines:#?}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("gdl-hub: stopped") && line.contains("withdrawn")),
+            "{lines:#?}"
+        );
+    }
+}
+
+/// A hub started too late to run its stop before it must be gone is
+/// refused before it serves, in one line that names the leave point, the
+/// stop's wait, and the margin.
+#[test]
+fn a_hub_started_too_late_for_its_leave_point_is_refused_naming_the_three_numbers() {
+    let (dir, deployment) = setup("late");
+    let pools = dir.path().join("pools");
+    for (leave_by, says) in [
+        (now_ms() - 1_000, "is past"),
+        (now_ms() + WAIT_MS, "ms away"),
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_gdl-hub"))
+            .arg(&deployment)
+            .env("GDL_HUB__PUBLIC_PORT", "0")
+            .env("GDL_HUB__CONTROL_PORT", "0")
+            .env("GDL_POOL__NAME", MODEL)
+            .env("GDL_POOL__CLASS", "model_x")
+            .env("GDL_POOL__REGION", "us-east-1")
+            .env("GDL_POOL__HUB", "pool-hub:1337")
+            .env("GDL_POOL__DIRECTORY", "dir")
+            .env("GDL_POOL__DIR", &pools)
+            .env("GDL_POOL__DRAIN_ON_STOP", "true")
+            .env("GDL_POOL__STOP_WAIT_MS", WAIT_MS.to_string())
+            .env("GDL_POOL__LEAVE_BY", leave_by.to_string())
+            .env("GDL_POOL__LEAVE_MARGIN_MS", MARGIN_MS.to_string())
+            .output()
+            .expect("the binary runs");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "started with {leave_by}: {stderr}"
+        );
+        assert!(!stderr.contains("gdl-hub: serving"), "{stderr}");
+        let line = stderr
+            .lines()
+            .find(|line| line.contains("`pool.leave_by`"))
+            .unwrap_or_else(|| panic!("no line names it: {stderr}"));
+        for named in [
+            format!("`pool.leave_by` {leave_by} is"),
+            says.to_string(),
+            format!("`pool.stop_wait_ms` {WAIT_MS}"),
+            format!("`pool.leave_margin_ms` {MARGIN_MS}"),
+        ] {
+            assert!(line.contains(&named), "{named}: {line}");
+        }
+    }
+}
+
+/// A hub that takes its leave point late, here because it was suspended
+/// across it, still ends its stop by the end the leave point set, the
+/// margin before `leave_by`: its stop has only the time left before then,
+/// not its whole `stop_wait_ms`. The test holds the hub stopped until a
+/// second before that end.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hub_that_takes_its_leave_point_late_keeps_its_end() {
+    const WAIT: u64 = 3_000;
+    let (dir, deployment) = setup("late-leave");
+    let pools = dir.path().join("pools");
+    let pool = ("model_x", MODEL);
+    let leave_by = now_ms() + SERVES_FOR_MS + WAIT + MARGIN_MS;
+    let mut hub = hub(
+        &deployment,
+        &pools,
+        pool,
+        &[
+            ("GDL_POOL__DRAIN_ON_STOP", "true"),
+            ("GDL_POOL__STOP_WAIT_MS", &WAIT.to_string()),
+            ("GDL_POOL__LEAVE_BY", &leave_by.to_string()),
+            ("GDL_POOL__LEAVE_MARGIN_MS", &MARGIN_MS.to_string()),
+        ],
+    );
+    until_written(&pools, pool, "a record", |_| true).await;
+    // A member that never leaves holds the stop to its end.
+    let _member = member(&hub, "d").await;
+    hub.signal("STOP");
+    let status = format!("/proc/{}/status", hub.child.id());
+    let suspended = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let read = std::fs::read_to_string(&status).expect("the hub's status");
+            if read
+                .lines()
+                .any(|line| line.starts_with("State:") && line.contains("T (stopped)"))
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(suspended.is_ok(), "the hub was not suspended");
+    // Resumed a second before the end its leave point set, well past the
+    // leave point itself.
+    let resume_at = leave_by - MARGIN_MS - 1_000;
+    let suspended_for = Duration::from_millis(resume_at.saturating_sub(now_ms()));
+    tokio::time::sleep(suspended_for).await;
+    hub.signal("CONT");
+    let left = Duration::from_millis(leave_by.saturating_sub(now_ms()));
+    let (status, lines) = exited(&mut hub, left);
+    assert!(status.success(), "{status:?}: {lines:#?}");
+    assert!(now_ms() < leave_by, "gone after its leave time: {lines:#?}");
+}

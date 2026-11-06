@@ -91,6 +91,7 @@ fn ready(peer: PeerInfo, joined: u64) -> PoolWatchEvent {
         segment: "f".into(),
         peer,
         joined,
+        leave_by: None,
     }
 }
 

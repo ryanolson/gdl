@@ -188,8 +188,31 @@ impl Instance {
     /// control listeners have the ports `(public, control)`: a hub in
     /// another process.
     pub async fn try_join_at(
-        (public, control): (u16, u16),
+        ports: (u16, u16),
         spec: &DeploymentSpec,
+        segment: &'static str,
+    ) -> Result<Self, ClientError> {
+        let registration = spec.registration(segment).expect("valid test fixture");
+        Self::try_join_as(ports, registration, segment).await
+    }
+
+    /// Join as an instance of `segment` of [`spec`] that says it will be
+    /// stopped at `leave_by`, in milliseconds since the Unix epoch.
+    #[allow(dead_code, reason = "not every test binary says when it leaves")]
+    pub async fn join_by(hub: &Hub, segment: &'static str, leave_by: u64) -> Self {
+        let mut registration = spec().registration(segment).expect("valid test fixture");
+        registration.leave_by = Some(leave_by);
+        let ports = (hub.public_addr().port(), hub.control_addr().port());
+        Self::try_join_as(ports, registration, segment)
+            .await
+            .expect("the hub admits the instance")
+    }
+
+    /// Register with `registration` at the hub on loopback whose public
+    /// and control listeners have the ports `(public, control)`.
+    async fn try_join_as(
+        (public, control): (u16, u16),
+        registration: gdl_model::SegmentRegistration,
         segment: &'static str,
     ) -> Result<Self, ClientError> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
@@ -213,7 +236,6 @@ impl Instance {
             .control_port(control)
             .build()
             .expect("valid test fixture");
-        let registration = spec.registration(segment).expect("valid test fixture");
         let payload = serde_json::to_value(&registration).expect("valid test fixture");
         client
             .register(

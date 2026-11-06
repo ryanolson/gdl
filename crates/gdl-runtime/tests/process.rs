@@ -513,6 +513,7 @@ fn a_pool_table_is_read_from_a_file() {
             summary: PoolSettings::DEFAULT_SUMMARY,
             timing: Default::default(),
             drain_on_stop: None,
+            leave_by: None,
         })
     );
     let pool = config.pool().expect("a pool");
@@ -551,6 +552,7 @@ fn a_pool_table_is_read_from_the_environment() {
                 summary: std::time::Duration::from_millis(1500),
                 timing: Default::default(),
                 drain_on_stop: None,
+                leave_by: None,
             })
         );
         Ok(())
@@ -654,6 +656,7 @@ fn a_fleet_bundles_variables_give_a_segment_its_hub_and_pool() {
                 summary: PoolSettings::DEFAULT_SUMMARY,
                 timing: Default::default(),
                 drain_on_stop: None,
+                leave_by: None,
             })
         );
         Ok(())

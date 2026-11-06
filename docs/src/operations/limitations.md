@@ -226,6 +226,28 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **When:** an instance in another job, started without a deadline that makes it leave first.
 - **Workaround:** stop the pool's instances by the same signal or earlier, or set `stop_wait_ms` to the time the batch system allows. See [Draining when the hub stops](../concepts/pools.md#draining-when-the-hub-stops).
 
+### A leave time is read once, at the start
+- **What:** an instance reads `[runtime] leave_by`, and a hub `[pool] leave_by`, only when it starts. A walltime that the batch system extends later, as `scontrol` can, only makes it leave early, which costs capacity, not correctness. A walltime made shorter is not seen.
+- **Why:** the registration that carries the value is made once, and no route changes it.
+- **Workaround:** keep the batch system's stop signal before the end of the job (for Slurm, `--signal`). It is the first stop of an instance whose leave point has not come. See [A known leave time](../concepts/lifecycle.md#a-known-leave-time).
+- **Lifts:** a route that updates `leave_by` after the start.
+
+### A registration that carries `leave_by` needs a hub at least as new
+- **What:** a hub of an earlier build refuses a registration with `leave_by`, so the instance does not start.
+- **Why:** the hub reads the registration with a type that refuses a field it does not know.
+- **Workaround:** roll the hub first. An instance without `leave_by` registers as before.
+
+### Nothing routes by when an instance will leave
+- **What:** a selector or a pool policy does not see `leave_by`, so a long session can land on an instance that will soon leave.
+- **Why:** the instance view that a selector reads does not carry it. Only `GET /instances` and the pool's watch do.
+- **Lifts:** that view carrying it.
+
+### An instance with a leave time cuts its pool's drain short
+- **What:** an interior instance that its pool's drain stopped leaves at the end of its leave point's drain, `leave_by` less its margin, even while the pool's entry instances still hold responses that cross it. Those responses fail.
+- **Why:** the instance must be gone by `leave_by`, and without a leave time its bound counts from when the entry instances have drained. See [A known leave time](../concepts/lifecycle.md#a-known-leave-time).
+- **Workaround:** give the pool's hub a leave time at least `stop_wait_ms` before its instances', so that the pool's drain starts early enough.
+- **Test:** `a_sink_stopped_by_its_pools_drain_is_gone_by_its_leave_point` in `crates/gdl-runtime/tests/detaching.rs`.
+
 ### The last instance of a segment is not avoided
 - **What:** when every instance of a segment stops, or the only one does, its peers keep routing to it, since nothing else serves. It drains once the sources that can reach it have drained, or at the drain's bound.
 - **Workaround:** start a new instance first. Once it is ready, the peers avoid the retired one, which then leaves.

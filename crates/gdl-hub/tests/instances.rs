@@ -251,3 +251,82 @@ async fn tcp_addresses_under_a_custom_transport_key_are_listed() {
     assert_eq!(instance.addresses, [listening]);
     hub.shutdown().await.expect("the hub stops");
 }
+
+/// When an instance says it will be stopped: a batch job's walltime.
+const LEAVE_BY: u64 = 1_800_000_000_000;
+
+/// An instance that says when it will be stopped is listed with it, and
+/// an entry instance's `ready` on the pool's watch carries it, in an event
+/// and in a snapshot. The members' list that instances route from shows
+/// every registration as before: an instance of an earlier build reads it
+/// with a type that refuses a field it does not know, and nothing routes
+/// by when an instance leaves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_instance_that_says_when_it_leaves_is_listed_with_it_and_routed_as_before() {
+    let (hub, readiness) = hub_of(
+        model(common::POOL, "us-east-1", "model-x-01-hub:1337"),
+        MemoryDirectory::new(),
+        common::timing(),
+    )
+    .await;
+    let mut events = watch(&readiness).await;
+    let mut leaving = Instance::join_by(&hub, "f", LEAVE_BY).await;
+    leaving.announce(SegmentPhase::Ready).await;
+    let mut staying = Instance::join(&hub, "f").await;
+    staying.announce(SegmentPhase::Ready).await;
+    let mut interior = Instance::join_by(&hub, "d", LEAVE_BY).await;
+    interior.announce(SegmentPhase::Ready).await;
+    let says = |event: &PoolWatchEvent| match event {
+        PoolWatchEvent::Ready { peer, leave_by, .. } => Some((peer.instance_id, *leave_by)),
+        _ => None,
+    };
+    let mut ready = HashMap::new();
+    until(&mut events, "both entry instances ready", |event| {
+        ready.extend(says(event));
+        ready.len() == 2
+    })
+    .await;
+    let expected = HashMap::from([(leaving.id(), Some(LEAVE_BY)), (staying.id(), None)]);
+    assert_eq!(ready, expected, "as events");
+    let mut snapshot = tokio::time::timeout(WAIT, readiness.watch())
+        .await
+        .expect("the watch begins in time")
+        .expect("the hub runs");
+    let mut shown = HashMap::new();
+    tokio::time::timeout(WAIT, async {
+        loop {
+            match snapshot.next().await.expect("the watch goes on") {
+                PoolWatchEvent::Synced => break,
+                event => shown.extend(says(&event)),
+            }
+        }
+    })
+    .await
+    .expect("the snapshot in time");
+    assert_eq!(shown, expected, "in a snapshot");
+
+    let listed = list(&hub).await;
+    assert_eq!(listed[&leaving.id()].leave_by, Some(LEAVE_BY));
+    assert_eq!(listed[&interior.id()].leave_by, Some(LEAVE_BY));
+    assert_eq!(listed[&staying.id()].leave_by, None);
+    let (status, body) = control_get(&hub, INSTANCES_ROUTE).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body.matches("\"leave_by\"").count(),
+        2,
+        "an unset one is not sent: {body}"
+    );
+
+    let (status, members) = common::get(&hub, "/v1/ext/gdl/members").await;
+    assert_eq!(status, 200, "{members}");
+    let members: Vec<serde_json::Value> = serde_json::from_str(&members).expect("members");
+    assert_eq!(members.len(), 3);
+    for member in &members {
+        let registration = member["registration"].as_object().expect("a registration");
+        let mut keys: Vec<&str> = registration.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["contract", "placement", "segment"], "{member}");
+        serde_json::from_value::<gdl_model::SegmentRegistration>(member["registration"].clone())
+            .expect("read as an instance reads it");
+    }
+}

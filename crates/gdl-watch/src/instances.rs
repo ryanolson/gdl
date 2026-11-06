@@ -58,6 +58,12 @@ pub struct PoolInstance {
     /// registration. False from a hub of an earlier build.
     #[serde(default)]
     pub retire_requested: bool,
+    /// When it said, as it registered, that it will be stopped, in
+    /// milliseconds since the Unix epoch: a batch job's walltime
+    /// (`[runtime] leave_by`). It stops itself before then. Not sent when
+    /// it said nothing; `None` from a hub of an earlier build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leave_by: Option<u64>,
 }
 
 /// The furthest phase a member has announced to its hub, as a service

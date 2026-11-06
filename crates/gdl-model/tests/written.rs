@@ -90,6 +90,10 @@ fn a_pools_settings_read_back_what_they_write() {
         summary: Duration::from_millis(2500),
         timing: Default::default(),
         drain_on_stop: Some(Duration::from_secs(90)),
+        leave_by: Some(gdl_model::LeaveBy {
+            unix_ms: 1_800_000_000_000,
+            margin: Duration::from_millis(1500),
+        }),
     };
     let text = toml::to_string(&every).expect("toml");
     let value: toml::Value = toml::from_str(&text).expect("toml");
@@ -103,6 +107,7 @@ fn a_pools_settings_read_back_what_they_write() {
         hub: None,
         summary: PoolSettings::DEFAULT_SUMMARY,
         drain_on_stop: None,
+        leave_by: None,
         ..every
     };
     let text = toml::to_string(&least).expect("toml");
@@ -115,6 +120,8 @@ fn a_pools_settings_read_back_what_they_write() {
         "hub",
         "drain_on_stop",
         "stop_wait_ms",
+        "leave_by",
+        "leave_margin_ms",
     ] {
         assert!(!text.contains(unsaid), "{unsaid} in:\n{text}");
     }

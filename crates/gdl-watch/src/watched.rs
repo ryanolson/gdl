@@ -192,6 +192,7 @@ mod tests {
                 segment: "f".into(),
                 peer: peer.clone(),
                 joined: 1,
+                leave_by: None,
             },
             PoolWatchEvent::Retired {
                 segment: "f".into(),
@@ -576,6 +577,7 @@ mod tests {
             segment: "f".into(),
             peer: peer.clone(),
             joined,
+            leave_by: None,
         };
         let exposed = |joined| FollowEvent::Exposed {
             class: "c".into(),

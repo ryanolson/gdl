@@ -54,14 +54,22 @@ pub(super) struct StopTimes {
 
 impl StopTimes {
     /// The times of a stop that began `at`, with `drain` to drain and
-    /// `leave`, if set, for the hooks.
-    pub(super) fn new(at: Instant, drain: Duration, leave: Option<Duration>) -> Self {
-        let bound = at + drain;
+    /// `leave`, if set, for the hooks. An instance with a leave point is
+    /// gone by `end`, the end of the leave point's drain: a stop it takes
+    /// later than the leave point, as when its serving body starts late,
+    /// has only the time left before then.
+    pub(super) fn new(
+        at: Instant,
+        drain: Duration,
+        leave: Option<Duration>,
+        end: Option<Instant>,
+    ) -> Self {
+        let bound = end.map_or(at + drain, |end| (at + drain).min(end.max(at)));
         Self {
             began: at,
             drain: bound,
             hooks: leave.map_or(bound, |leave| bound.min(at + leave)),
-            pending_until: at + drain / 2,
+            pending_until: at + (bound - at) / 2,
         }
     }
 
@@ -384,7 +392,12 @@ impl Launch {
         hooks: Vec<LeaveHook>,
         cause: LeaveCause,
     ) -> (Stopping, Leaving) {
-        let times = StopTimes::new(Instant::now(), self.drain, self.leave);
+        let times = StopTimes::new(
+            Instant::now(),
+            self.drain,
+            self.leave,
+            self.process.leave_end(),
+        );
         let (routes, routing) = watch::channel(Routing::Pending);
         let (drained, drains) = watch::channel(false);
         let (retired, retirement) = watch::channel(None);

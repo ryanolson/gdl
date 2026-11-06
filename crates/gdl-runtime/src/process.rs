@@ -34,7 +34,7 @@ use crate::dist::{
 };
 use gdl::Cx;
 use gdl::{Error, ErrorKind, Result};
-use gdl_model::PoolSettings;
+use gdl_model::{LeaveBy, PoolSettings};
 pub(crate) use reserved::Reserved;
 use system::{Health, Phase, SystemSettings};
 
@@ -512,12 +512,16 @@ impl<H> ProcessConfig<H> {
                 // meanwhile: on Kubernetes every pod starts at once, and
                 // one that exited would be restarted with a growing delay.
                 let health = &process.health;
+                // The hub lists when the instance will leave; nothing
+                // routes by it.
+                let mut registration = deployment.registration(segment)?;
+                registration.leave_by = self.runtime.leave_by.map(|leave| leave.unix_ms);
                 let mut session = HubSession::register_within(
                     host,
                     *public_port,
                     *control_port,
                     &node,
-                    deployment.registration(segment)?,
+                    registration,
                     Duration::from_millis(*heartbeat_ms),
                     Duration::from_millis(self.hub_wait_ms),
                     |waiting| health.waiting_for_hub(waiting),
@@ -1373,7 +1377,7 @@ impl Launch {
         loop {
             // Closed, it takes no more work: once no request it holds can
             // send work into its draining pool, it says so.
-            self.pool_detaches(segment, hub, true).await;
+            self.pool_detaches(segment, hub, true, deadline).await;
             if segment.admitted() == 0 || cutoff.is_terminated() {
                 break;
             }
@@ -1429,9 +1433,9 @@ const RETIREMENT_CAP: Duration = Duration::from_secs(5);
 /// while it starts. A clone shares the same process.
 #[derive(Clone)]
 pub struct Process {
-    /// How many stop signals have come.
-    stops: tokio::sync::watch::Receiver<u32>,
-    count: Arc<tokio::sync::watch::Sender<u32>>,
+    /// The stops that have come.
+    stops: tokio::sync::watch::Receiver<Stops>,
+    count: Arc<tokio::sync::watch::Sender<Stops>>,
     /// Whether the instance's pool hub has asked it to retire. A stop to
     /// [`asked_to_stop`](Self::asked_to_stop), and never counted in
     /// `stops`, which [`stops(2)`](Self::stops) reads as real signals.
@@ -1451,6 +1455,10 @@ pub struct Process {
     velo_metrics: Option<prometheus::Registry>,
     /// Whether [`registry`](Self::registry) made the registry.
     registry_made: Arc<std::sync::atomic::AtomicBool>,
+    /// When the drain the leave point begins must have ended: the leave
+    /// point plus the drain's bound, the margin before `leave_by`. No
+    /// stop's drain runs past it, whatever began the stop.
+    leave_end: Option<tokio::time::Instant>,
 }
 
 impl Process {
@@ -1458,19 +1466,41 @@ impl Process {
     /// for one, then bind the instance's velo node: the listener first,
     /// so that the process is live whatever velo does.
     pub async fn start<H>(config: &ProcessConfig<H>) -> Result<Self> {
+        // Refused before anything binds: an instance that cannot drain
+        // before it must be gone must not join.
+        let leave_at = config
+            .runtime
+            .leave_by
+            .map(|leave| leave_at(&config.runtime, leave))
+            .transpose()?;
         let mut signals = Signals::new()?;
-        let (count, stops) = tokio::sync::watch::channel(0u32);
+        let (count, stops) = tokio::sync::watch::channel(Stops::default());
         let count = Arc::new(count);
         let counting = Arc::clone(&count);
         tokio::spawn(async move {
             let count = counting;
             loop {
                 tokio::select! {
-                    () = signals.wait() => count.send_modify(|stops| *stops += 1),
+                    () = signals.wait() => count.send_modify(|stops| stops.signals += 1),
                     () = count.closed() => return,
                 }
             }
         });
+        if let Some((at, leave)) = leave_at {
+            let count = Arc::clone(&count);
+            tokio::spawn(async move {
+                tokio::select! {
+                    () = tokio::time::sleep_until(at) => {
+                        eprintln!(
+                            "stopping: `runtime.leave_by` {} is the drain's bound and the margin away",
+                            leave.unix_ms
+                        );
+                        count.send_modify(|stops| stops.left = true);
+                    }
+                    () = count.closed() => {}
+                }
+            });
+        }
         let health = Arc::new(Health::new());
         let system = system::listen(&config.system, Arc::clone(&health)).await?;
         if let Some(address) = system {
@@ -1500,6 +1530,7 @@ impl Process {
             metrics_prefix: config.system.metrics_prefix(),
             velo_metrics,
             registry_made: Arc::default(),
+            leave_end: leave_at.map(|(at, _)| at + config.runtime.drain_bound()),
         })
     }
 
@@ -1651,7 +1682,13 @@ impl Process {
     /// second ends the drain. For a process that embeds a segment and stops
     /// it itself.
     pub fn stop(&self) {
-        self.count.send_modify(|stops| *stops += 1);
+        self.count.send_modify(|stops| stops.signals += 1);
+    }
+
+    /// When the drain its leave point begins must have ended, for a
+    /// process with a leave point.
+    pub(crate) fn leave_end(&self) -> Option<tokio::time::Instant> {
+        self.leave_end
     }
 
     /// The system listener's address, if it has one.
@@ -1688,7 +1725,7 @@ impl Process {
     /// Whether a retire request has come and no signal has: the instance
     /// holds once it has drained.
     fn asked_to_retire(&self) -> bool {
-        *self.retire.borrow() && *self.stops.borrow() == 0
+        *self.retire.borrow() && self.stops.borrow().count() == 0
     }
 
     /// Resolves once `n` stop signals have come.
@@ -1697,10 +1734,60 @@ impl Process {
     }
 }
 
-/// Resolves once `n` stop signals have come, as `stops` counts them.
-async fn stopped(stops: &tokio::sync::watch::Receiver<u32>, n: u32) {
+/// The stops a process has taken: the signals, and [`Process::stop`]
+/// calls, and whether its leave point has passed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Stops {
+    signals: u32,
+    /// The leave point (`[runtime] leave_by`) has passed.
+    left: bool,
+}
+
+impl Stops {
+    /// How many stops have come, as a stop's drain counts them: the leave
+    /// point is a first stop, by the path a first signal takes, and never
+    /// a second. A signal before it leaves it nothing to do; and a signal
+    /// after it, such as a batch system's own stop at the job's end, is
+    /// the first signal, which must not cut the drain the leave point
+    /// began. A second signal still does.
+    fn count(self) -> u32 {
+        self.signals.max(u32::from(self.left))
+    }
+}
+
+/// When the instance whose runtime settings are `runtime` stops itself to
+/// be gone by `leave`, on the monotonic clock, by the one rule the pool's
+/// hub uses too ([`LeaveBy::begin_in`]), with `clock_skew`. Refused, in
+/// one line, when that leaves no time.
+fn leave_at(runtime: &RuntimeConfig, leave: LeaveBy) -> Result<(tokio::time::Instant, LeaveBy)> {
+    leave_at_with(runtime, leave, || runtime.wall_now())
+}
+
+/// [`leave_at`], reading the wall clock with `wall_now`.
+fn leave_at_with(
+    runtime: &RuntimeConfig,
+    leave: LeaveBy,
+    wall_now: impl FnOnce() -> u64,
+) -> Result<(tokio::time::Instant, LeaveBy)> {
+    let before = tokio::time::Instant::now();
+    let wall = wall_now();
+    let now = tokio::time::Instant::now();
+    let wait = leave
+        .begin_in(
+            LeaveBy::wall_since(wall, now - before),
+            runtime.clock_skew,
+            runtime.drain_bound(),
+            "runtime",
+            "drain_ms",
+        )
+        .map_err(|e| placement(e.to_string()))?;
+    Ok((now + wait, leave))
+}
+
+/// Resolves once `n` stops have come, as [`Stops::count`] counts them.
+async fn stopped(stops: &tokio::sync::watch::Receiver<Stops>, n: u32) {
     let mut stops = stops.clone();
-    if stops.wait_for(|stops| *stops >= n).await.is_err() {
+    if stops.wait_for(|stops| stops.count() >= n).await.is_err() {
         // The signal task is gone only with the runtime.
         std::future::pending::<()>().await;
     }
@@ -1802,5 +1889,91 @@ mod tests {
             retirement_bound(Duration::from_secs(600)),
             Duration::from_secs(5)
         );
+    }
+}
+
+#[cfg(test)]
+mod stops {
+    use super::Stops;
+
+    /// The stops in the order they come, applied one after another.
+    fn after(order: &[&str]) -> u32 {
+        let mut stops = Stops::default();
+        for stop in order {
+            match *stop {
+                "signal" => stops.signals += 1,
+                "leave" => stops.left = true,
+                other => panic!("{other}"),
+            }
+        }
+        stops.count()
+    }
+
+    /// The leave point is a first stop and never a second: in whichever
+    /// order it and one signal come, one stop has come, and the drain
+    /// either began is not cut; two signals cut it whenever it passes.
+    #[test]
+    fn the_leave_point_is_a_first_stop_and_never_a_second() {
+        assert_eq!(after(&[]), 0);
+        assert_eq!(after(&["leave"]), 1);
+        assert_eq!(after(&["signal", "leave"]), 1);
+        assert_eq!(after(&["leave", "signal"]), 1);
+        assert_eq!(after(&["leave", "signal", "signal"]), 2);
+        assert_eq!(after(&["signal", "leave", "signal"]), 2);
+        assert_eq!(after(&["signal", "signal", "leave"]), 2);
+    }
+}
+
+#[cfg(test)]
+mod leave_point {
+    use std::time::Duration;
+
+    use futures::FutureExt;
+    use gdl_model::LeaveBy;
+
+    use super::{RuntimeConfig, leave_at_with};
+
+    /// When the wall clock reads: 150 ms before the leave time.
+    const WALL: u64 = 1_800_000_000_000 * 1_000_000 - 150 * 1_000_000;
+
+    fn settings() -> (RuntimeConfig, LeaveBy) {
+        let runtime = RuntimeConfig {
+            clock_skew: Duration::from_millis(50),
+            drain: Some(Duration::from_millis(20)),
+            ..RuntimeConfig::default()
+        };
+        let leave = LeaveBy {
+            unix_ms: 1_800_000_000_000,
+            margin: Duration::from_millis(10),
+        };
+        (runtime, leave)
+    }
+
+    /// The leave point is the time left less the skew, the drain, and the
+    /// margin, after the monotonic clock read before the wall clock.
+    #[tokio::test(start_paused = true)]
+    async fn the_leave_point_counts_from_before_the_wall_clock_is_read() {
+        let (runtime, leave) = settings();
+        let before = tokio::time::Instant::now();
+        let (at, _) = leave_at_with(&runtime, leave, || WALL).expect("in time");
+        assert_eq!(at, before + Duration::from_millis(150 - 50 - 20 - 10));
+    }
+
+    /// A stall between the clock reads that leaves the leave point behind
+    /// is a start with no time left: refused, as it was before the stall.
+    #[tokio::test(start_paused = true)]
+    async fn a_leave_point_passed_while_the_wall_clock_was_read_is_refused() {
+        let (runtime, leave) = settings();
+        let before = tokio::time::Instant::now();
+        let started = leave_at_with(&runtime, leave, || {
+            let _ = tokio::time::advance(Duration::from_millis(100)).now_or_never();
+            WALL
+        });
+        assert_eq!(
+            tokio::time::Instant::now() - before,
+            Duration::from_millis(100)
+        );
+        let refused = started.expect_err("no time left").to_string();
+        assert!(refused.contains("too close"), "{refused}");
     }
 }

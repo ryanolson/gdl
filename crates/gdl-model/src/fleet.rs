@@ -995,6 +995,7 @@ impl Fleet {
             // Compose and Kubernetes stop a hub at once; a site that drains
             // pools on stop sets it in its own render.
             drain_on_stop: None,
+            leave_by: None,
         })
     }
 

@@ -1209,7 +1209,7 @@ where
         // anything, and every wait below ends at its deadline.
         let wire = std::mem::take(&mut envelope.cx);
         let root = wire.root();
-        let mut cx = wire.arrive(rt.config.clock_skew, || rt.wall_now())?;
+        let mut cx = wire.arrive(rt.config.clock_skew, || rt.config.wall_now())?;
         // Before admission, so that an offer the instance cannot serve
         // takes no permit and waits for none; after a drain's refusal,
         // which says more, since it holds for every request. The version
@@ -1301,7 +1301,9 @@ where
         let rt = &self.rt;
         rt.check_identity(open.version, open.identity)?;
         let root = open.cx.root();
-        let cx = open.cx.arrive(rt.config.clock_skew, || rt.wall_now())?;
+        let cx = open
+            .cx
+            .arrive(rt.config.clock_skew, || rt.config.wall_now())?;
         let mut share = setup(
             &cx,
             rt.config.setup_timeout,

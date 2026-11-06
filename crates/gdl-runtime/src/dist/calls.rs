@@ -559,7 +559,10 @@ async fn answer(
             .map(|figures| (figures, tokio::time::Instant::now())),
     );
     let root = call.cx.root();
-    let cx = match call.cx.arrive(rt.config.clock_skew, || rt.wall_now()) {
+    let cx = match call
+        .cx
+        .arrive(rt.config.clock_skew, || rt.config.wall_now())
+    {
         Ok(cx) => cx,
         Err(error) => return refused(error),
     };

@@ -16,6 +16,12 @@ pub const HUB_CONTROL_PORT: u16 = 8337;
 /// margin before Docker kills a stopped container.
 pub const DEFAULT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// The assumed largest difference between two hosts' clocks when nothing
+/// sets it: an instance's `[runtime] clock_skew_ms` by default, and what a
+/// pool's hub, which has no such setting, allows when it maps its leave
+/// time ([`crate::LeaveBy::begin_in`]).
+pub const DEFAULT_CLOCK_SKEW: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// The longest a segment name may be: a hub names a segment's readiness
 /// services `gdl-loaded-<hex>` and `gdl-serving-<hex>`, two characters
 /// per byte of the name, within velo-hub's 128.
@@ -122,12 +128,16 @@ impl DeploymentSpec {
             segment: segment.into(),
             contract: layout.contract_hash(),
             placement: layout.placement_hash(),
+            leave_by: None,
         })
     }
 
-    /// Refuse a binary built for a different graph or placement.
+    /// Refuse a binary built for a different graph or placement. When the
+    /// instance says it will leave is not checked: it is not part of what
+    /// the binary was built for.
     pub fn validate_registration(&self, registration: &SegmentRegistration) -> Result<(), Error> {
-        if self.registration(&registration.segment)? != *registration {
+        let built = self.registration(&registration.segment)?;
+        if (built.contract, built.placement) != (registration.contract, registration.placement) {
             return Err(Error::new(format!(
                 "segment `{}` has a different graph contract or placement",
                 registration.segment
@@ -148,4 +158,11 @@ pub struct SegmentRegistration {
     /// Hash of node assignments, routing policies, classes, and pool
     /// policies.
     pub placement: u64,
+    /// When the instance will be stopped, in milliseconds since the Unix
+    /// epoch, if it knows: a batch job's walltime. The hub lists it; nothing
+    /// routes by it. Unset, the field is not sent, so a hub of an earlier
+    /// build, which refuses a field it does not know, takes the
+    /// registration as before; a set one needs a hub at least as new.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leave_by: Option<u64>,
 }

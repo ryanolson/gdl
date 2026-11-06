@@ -426,7 +426,7 @@ async fn a_directory_retirement_suppresses_load_before_the_feed_observes_it() {
         incarnation: Incarnation::from_u64(1),
         epoch: registration.epoch,
     };
-    feed.joined("f", lease.incarnation, lease.epoch, node.peer_info());
+    feed.joined("f", lease.incarnation, lease.epoch, node.peer_info(), None);
     let ready = client
         .register_service(&segment_service("f", SegmentPhase::Ready))
         .await

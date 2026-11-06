@@ -18,6 +18,7 @@ fn instance(phase: InstancePhase, address: &str, load: Option<InstanceLoad>) -> 
         load,
         incarnation: Some(7),
         retire_requested: phase == InstancePhase::Retired,
+        leave_by: None,
     }
 }
 
