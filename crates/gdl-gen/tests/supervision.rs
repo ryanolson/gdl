@@ -32,7 +32,7 @@ fn killing_run_does_not_orphan_its_segments() {
         Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
             .current_dir(common::root())
             .args(["run", "--spec", "examples/chat/gdl.toml", "--target-dir"])
-            .arg(common::target("examples"))
+            .arg(common::chat_target())
             .env("TMPDIR", scratch.path())
             .env("CARGO_NET_OFFLINE", "true")
             .env_remove("RUST_LOG")
@@ -49,7 +49,8 @@ fn killing_run_does_not_orphan_its_segments() {
     writeln!(input, r#"{{"text":"hello","max_words":1}}"#).expect("request");
     // The first answer waits for `run`'s check and for a build with nothing
     // to do: nested cargo, which waits for the package cache lock that
-    // every cargo on the host shares.
+    // every cargo on the host shares. It waits for no other test's compile:
+    // the chat example has a target directory of its own.
     output.find(r#"{"done":null}"#, Duration::from_secs(120));
     let children = std::fs::read_to_string(format!("/proc/{0}/task/{0}/children", run.0.0.id()))
         .expect("children")

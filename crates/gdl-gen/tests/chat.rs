@@ -420,7 +420,7 @@ fn run_group(mut command: Command) -> Group {
             "examples/chat/gdl.toml",
             "--target-dir",
         ])
-        .arg(target("examples"))
+        .arg(common::chat_target())
         .env("CARGO_NET_OFFLINE", "true")
         .env_remove("RUST_LOG")
         .stdin(Stdio::piped())
@@ -457,7 +457,9 @@ impl Group {
         writeln!(stdin, "{request}").expect("the request");
         // The first line waits for `run`'s check and for a build with
         // nothing to do: nested cargo, which waits for the package cache
-        // lock that every cargo on the host shares.
+        // lock that every cargo on the host shares. The build waits for no
+        // other test's compile: the chat example has a target directory of
+        // its own (`common::chat_target`), and `chat_build` has built it.
         let mut lines = vec![self.stdout.next(Duration::from_secs(120))];
         while lines.len() < answer.len() {
             lines.push(self.stdout.next(Duration::from_secs(5)));

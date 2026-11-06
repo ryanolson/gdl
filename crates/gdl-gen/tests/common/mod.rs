@@ -79,6 +79,16 @@ pub fn target(purpose: &str) -> PathBuf {
         .join(purpose)
 }
 
+/// Where the chat example builds, for [`chat_build`] and for the tests
+/// whose `cargo gdl run` builds it again. The other examples build in
+/// `target("examples")`, one at a time: gdl's build lock and Cargo's lock
+/// on the target directory are both per directory. There, the rebuild by
+/// `run`, which has nothing to do, waited behind other tests' full compiles
+/// under a loaded full run, for longer than its wait for a first answer.
+pub fn chat_target() -> PathBuf {
+    target("chat")
+}
+
 pub fn cargo() -> Command {
     Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
 }
@@ -101,11 +111,11 @@ pub struct Built {
 
 /// The chat example built once for the test binary, offline: the local
 /// cache holds every crate. Test binaries that build it at once share its
-/// target directory, where one build waits for the other.
+/// target directory, [`chat_target`], where one build waits for the other.
 pub fn chat_build() -> &'static Built {
     static BUILT: OnceLock<Built> = OnceLock::new();
     BUILT.get_or_init(|| {
-        let target = target("examples");
+        let target = chat_target();
         let bin = target.join("chat-bin");
         let build = Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
             .args(["gdl", "build", "--spec"])
