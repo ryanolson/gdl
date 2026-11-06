@@ -18,7 +18,7 @@
 //! table in one region would make a regional table there, and that region
 //! a directory of its own.
 
-use gdl_model::{Cluster, Fleet, FleetDirectory, Problem, Resources, dynamodb_tables};
+use gdl_model::{Fleet, FleetDirectory, KubernetesCluster, Problem, Resources, dynamodb_tables};
 use serde_json::{Value, json};
 
 use super::objects::{place, resources};
@@ -92,7 +92,7 @@ fn labels(fleet: &str, cluster: &str, name: &str) -> Value {
 }
 
 /// The pod's placement and account, as a pool's pods have them.
-fn pod(fleet: &str, cluster: &Cluster, container: Value, restart: Option<&str>) -> Value {
+fn pod(fleet: &str, cluster: &KubernetesCluster, container: Value, restart: Option<&str>) -> Value {
     let mut pod = json!({
         "serviceAccountName": fleet,
         "enableServiceLinks": false,
@@ -112,7 +112,7 @@ fn pod(fleet: &str, cluster: &Cluster, container: Value, restart: Option<&str>) 
 pub(super) fn local(
     fleet: &str,
     name: &str,
-    cluster: &Cluster,
+    cluster: &KubernetesCluster,
     requests: Option<&Resources>,
 ) -> Vec<Value> {
     let labels = labels(fleet, name, LOCAL);
@@ -166,7 +166,7 @@ pub(super) fn local(
 pub(super) fn tables_job(
     fleet: &str,
     name: &str,
-    cluster: &Cluster,
+    cluster: &KubernetesCluster,
     directory: &FleetDirectory,
     image: &str,
     requests: Option<&Resources>,
@@ -208,7 +208,7 @@ pub(super) fn tables_job(
 pub(super) fn tables_json(fleet: &Fleet, directory: &FleetDirectory) -> String {
     let regions: std::collections::BTreeSet<&str> = fleet
         .clusters()
-        .map(|(_, cluster)| cluster.region.as_str())
+        .map(|(_, cluster)| cluster.region())
         .collect();
     let key = |name: &str| json!({"name": name, "type": "S"});
     let (class, pool) = dynamodb_tables::RECORDS_KEYS;

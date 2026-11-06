@@ -618,3 +618,5 @@ fn check_names_a_shared_pool_that_relay_refuses() {
 
 #[path = "check/dgd.rs"]
 mod dgd;
+#[path = "check/slurm.rs"]
+mod slurm;

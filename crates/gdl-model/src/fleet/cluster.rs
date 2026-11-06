@@ -1,19 +1,169 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::placement::{self, ClusterResources, Toleration};
+use super::slurm::{SlurmSite, check_site};
+use super::written::Written;
 use super::{FleetError, FleetTable};
 use crate::pool::{check_label, check_region_name};
+use crate::problem::{nested, segments};
 
-/// A Kubernetes cluster that runs pools: `[cluster.<name>]` in the fleet
-/// file. A pool that names it takes its region. The fleet holds no
-/// credential and no secret value: the kube context's credentials stay in
-/// the user's kubeconfig, and `secrets` names Kubernetes Secrets that
-/// already exist.
+/// A place that runs pools: `[cluster.<name>]` in the fleet file. Its
+/// `kind` says which: `"kubernetes"`, the default, or `"slurm"`. A pool
+/// that names it takes its region. Each kind has keys of its own, and a
+/// key of the other kind is refused by name.
+///
+/// Written, a Kubernetes cluster has no `kind`, so that a fleet file from
+/// before the tag reads and writes as it did; a Slurm site writes
+/// `kind = "slurm"` first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cluster {
+    /// A Kubernetes cluster.
+    Kubernetes(KubernetesCluster),
+    /// A Slurm cluster that runs pools as jobs through srt-slurm.
+    Slurm(SlurmSite),
+}
+
+impl Cluster {
+    /// The `kind` of a Kubernetes cluster, which a table may leave unsaid.
+    pub const KUBERNETES: &str = "kubernetes";
+    /// The `kind` of a Slurm site.
+    pub const SLURM: &str = "slurm";
+
+    /// Its `kind`, as the fleet file names it.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Kubernetes(_) => Self::KUBERNETES,
+            Self::Slurm(_) => Self::SLURM,
+        }
+    }
+
+    /// The region of every pool it runs.
+    pub fn region(&self) -> &str {
+        match self {
+            Self::Kubernetes(cluster) => &cluster.region,
+            Self::Slurm(site) => &site.region,
+        }
+    }
+
+    /// The registry it pulls images from, if it names one.
+    pub fn registry(&self) -> Option<&str> {
+        match self {
+            Self::Kubernetes(cluster) => cluster.registry.as_deref(),
+            Self::Slurm(site) => site.registry.as_deref(),
+        }
+    }
+
+    /// Its nodes' platform, if it names one: `linux/amd64`.
+    pub fn platform(&self) -> Option<&str> {
+        match self {
+            Self::Kubernetes(cluster) => cluster.platform.as_deref(),
+            Self::Slurm(site) => site.platform.as_deref(),
+        }
+    }
+
+    /// The Kubernetes cluster, if it is one.
+    pub fn kubernetes(&self) -> Option<&KubernetesCluster> {
+        match self {
+            Self::Kubernetes(cluster) => Some(cluster),
+            Self::Slurm(_) => None,
+        }
+    }
+
+    /// The Slurm site, if it is one.
+    pub fn slurm(&self) -> Option<&SlurmSite> {
+        match self {
+            Self::Slurm(site) => Some(site),
+            Self::Kubernetes(_) => None,
+        }
+    }
+}
+
+impl Serialize for Cluster {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        /// A Slurm site, with its tag first.
+        #[derive(Serialize)]
+        #[serde(tag = "kind", rename_all = "lowercase")]
+        enum Tagged<'a> {
+            Slurm(&'a SlurmSite),
+        }
+        match self {
+            Self::Kubernetes(cluster) => cluster.serialize(serializer),
+            Self::Slurm(site) => Tagged::Slurm(site).serialize(serializer),
+        }
+    }
+}
+
+// serde's own tagged enums neither default a missing tag nor keep the path
+// of an error inside the table, so the table is read whole, as written
+// ([`Written`]), its `kind` taken out, and the rest read as that kind, with
+// the path inside it carried in the message for the problem's table and
+// key ([`nested`]). The parser's line of a problem inside the table is
+// lost.
+impl<'de> Deserialize<'de> for Cluster {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let kinds = format!("`{}`, the default, or `{}`", Self::KUBERNETES, Self::SLURM);
+        let at_kind = |message: &str| D::Error::custom(nested(&["kind".into()], message));
+        let entries = match Written::deserialize(deserializer)? {
+            Written::Map(entries) => entries,
+            other => {
+                let message = format!("invalid type: {}, expected a table", shown(&other));
+                return Err(D::Error::custom(message));
+            }
+        };
+        let (kind, rest): (Vec<_>, Vec<_>) =
+            entries.into_iter().partition(|(key, _)| key == "kind");
+        let kind = match kind.as_slice() {
+            [] => Self::KUBERNETES.to_string(),
+            [(_, Written::Str(kind))] => kind.clone(),
+            [(_, other)] => {
+                return Err(at_kind(&format!(
+                    "is {}, not a string: {kinds}",
+                    shown(other)
+                )));
+            }
+            [_, _, ..] => return Err(at_kind("duplicate field `kind`")),
+        };
+        let rest = Written::Map(rest);
+        let read = match kind.as_str() {
+            Self::KUBERNETES => serde_path_to_error::deserialize(rest).map(Self::Kubernetes),
+            Self::SLURM => serde_path_to_error::deserialize(rest).map(Self::Slurm),
+            other => {
+                return Err(at_kind(&format!(
+                    "`{other}` is not a kind of cluster: {kinds}"
+                )));
+            }
+        };
+        read.map_err(|error| {
+            let keys = segments(error.path());
+            D::Error::custom(nested(&keys, &error.into_inner().to_string()))
+        })
+    }
+}
+
+/// A `kind` that is not a string, as a refusal shows it.
+fn shown(value: &Written) -> String {
+    match value {
+        Written::Unit => "null".into(),
+        Written::Bool(value) => value.to_string(),
+        Written::I64(value) => value.to_string(),
+        Written::U64(value) => value.to_string(),
+        Written::F64(value) => value.to_string(),
+        Written::Str(value) => format!("{value:?}"),
+        Written::Seq(_) => "an array".into(),
+        Written::Map(_) => "a table".into(),
+    }
+}
+
+/// A Kubernetes cluster that runs pools: `[cluster.<name>]` with no `kind`,
+/// or `kind = "kubernetes"`. The fleet holds no credential and no secret
+/// value: the kube context's credentials stay in the user's kubeconfig,
+/// and `secrets` names Kubernetes Secrets that already exist.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Cluster {
+pub struct KubernetesCluster {
     /// The kube context that reaches the cluster.
     pub context: String,
     /// The namespace the fleet's objects go in: no two clusters of a fleet
@@ -30,8 +180,8 @@ pub struct Cluster {
     pub platform: Option<String>,
     /// Whether the cluster's pin table runs in a DynamoDB Local of its own.
     #[serde(
-        default = "Cluster::pins_local_default",
-        skip_serializing_if = "Cluster::pins_local_is_default"
+        default = "KubernetesCluster::pins_local_default",
+        skip_serializing_if = "KubernetesCluster::pins_local_is_default"
     )]
     pub pins_local: bool,
     /// Annotations of the pools' service account, for a cloud role.
@@ -63,7 +213,7 @@ pub struct Cluster {
     pub operator: bool,
 }
 
-impl Cluster {
+impl KubernetesCluster {
     /// `pins_local` when unsaid: the cluster's pin table is not in a Local
     /// of its own.
     pub const DEFAULT_PINS_LOCAL: bool = false;
@@ -102,9 +252,10 @@ impl Header {
 }
 
 /// What is wrong with the fleet's clusters, each at its own table: their
-/// names, contexts, regions, namespaces, annotation keys, Secret names,
-/// and variables, and two that
-/// share a context and a namespace, reported at the later in name order.
+/// names and regions; a Kubernetes cluster's context, namespace,
+/// annotation keys, Secret names, and variables, and two that share a
+/// context and a namespace, reported at the later in name order; and what
+/// a Slurm site cannot run ([`check_site`]).
 pub(super) fn check_clusters(clusters: &BTreeMap<String, Cluster>, errors: &mut Vec<FleetError>) {
     let mut first: BTreeMap<(&str, &str), &str> = BTreeMap::new();
     for (name, cluster) in clusters {
@@ -114,15 +265,22 @@ pub(super) fn check_clusters(clusters: &BTreeMap<String, Cluster>, errors: &mut 
                 reason,
             });
         }
-        if cluster.context.is_empty() {
-            errors.push(FleetError::EmptyContext {
-                cluster: name.clone(),
-            });
-        }
-        if let Err(reason) = check_region_name(&cluster.region) {
+        if let Err(reason) = check_region_name(cluster.region()) {
             errors.push(FleetError::InvalidRegion {
                 table: FleetTable::Cluster(name.clone()),
                 reason,
+            });
+        }
+        let cluster = match cluster {
+            Cluster::Kubernetes(cluster) => cluster,
+            Cluster::Slurm(site) => {
+                check_site(name, site, errors);
+                continue;
+            }
+        };
+        if cluster.context.is_empty() {
+            errors.push(FleetError::EmptyContext {
+                cluster: name.clone(),
             });
         }
         if !namespace_name(&cluster.namespace) {

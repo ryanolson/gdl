@@ -678,6 +678,30 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** drop the table for that image. Or move the build image's flags into its own `RUSTC_WRAPPER` or `RUSTC_WORKSPACE_WRAPPER`, which the build trusts, as it trusts `RUSTC` and the image's Cargo configuration.
 - **Lifts:** a way to read rustc's flags as rustc does, before the build.
 
+### A fleet with a Slurm site is checked, and nothing runs it yet
+- **What:** `cargo gdl check` reads and judges a `[cluster.<name>]` table with `kind = "slurm"`, and the pools that name it. `cargo gdl k8s`, `images`, `deploy`, and `down` refuse a fleet with a Slurm site, and name the site, before they run kubectl or Docker. Compose reads only a site's region.
+- **Why:** the fleet file's model of a Slurm site comes first, so that a fleet's shape is settled before the render of srt-slurm recipes and the commands that submit and stop the jobs are built on it.
+- **Workaround:** run the fleet's pools on Kubernetes clusters, or compose them on one host.
+- **Lifts:** a Slurm render and a Slurm driver for `deploy` and `down`.
+
+### A Slurm site refuses a `[deployment.codegen]` table for its architecture
+- **What:** `check` refuses a `[deployment.codegen.<arch>]` table when a Slurm site's `platform` is of that architecture, at the site's `platform`.
+- **Why:** no Slurm site's images are built yet, so none would be built with the table's target features. A table the build would not apply is refused, never ignored.
+- **Workaround:** leave the table out, or run that architecture's pools on Kubernetes clusters.
+- **Lifts:** Slurm images built by the same path as a Kubernetes cluster's, which applies the table of the image's architecture.
+
+### A Slurm site cannot ask gdl for a time limit over a year
+- **What:** `check` refuses a Slurm site's or a pool's `time_limit` above 365 days (`SlurmSite::MAX_TIME_LIMIT_S`), naming the limit and the cap.
+- **Why:** Slurm counts a time limit in 32-bit integers and wraps past them in more than one step of its parser, its rounding to minutes included, so a very long limit can run as a short or a negative one. A year is far below every one of those steps.
+- **Workaround:** a limit of at most 365 days, or leave `time_limit` out for the partition's.
+- **Lifts:** a need for jobs longer than a year, with a parser checked against Slurm's own at each step.
+
+### A problem in a `[cluster.<name>]` table that does not read has the table's line
+- **What:** a fleet file's problem in a cluster table that does not read, such as an unknown or a missing key, names the table and the key with the line of the table, not of the key.
+- **Why:** the table's `kind` says which keys it takes, and may come after them, so the table is read whole before its keys are, and the parser's place of the key is lost.
+- **Workaround:** the table and the key the problem names.
+- **Lifts:** a reader that keeps the place of each key of a table it reads whole.
+
 ### Under `--local`, a change to any file of the sources moves every image's tag
 - **What:** `k8s`, `images`, `deploy`, and `compose` with `--local` build every image from one tree: gdl's workspace and each crate the spec names by path, with every crate those reach by path and each one's workspace, as Git holds them. Each image's tag covers the whole tree. A change to any file in it, a document or another crate of the workspace included, moves every tag, so the next run builds and pushes every image again. An untracked file is not built. A directory that Git cannot archive, a submodule, a link to an absolute path or out of the tree, a manifest that names a path absolutely or out of the tree, and any Cargo configuration (`.cargo/config.toml` or `.cargo/config`) that the build would read with a key other than `[net] git-fetch-with-cli` are each refused, naming it. So a project whose build needs Cargo configuration, such as a registry, a source replacement, or another `[net]` key, does not build with `--local`. A file whose only key is `[net] git-fetch-with-cli` is accepted and left out of the tree.
 - **Why:** each image copies the whole tree into its build, and a tag that covered less could name an image built from other sources. Git decides what is in the tree, since a walk of the working tree filtered by hand let files through that Git ignores ([Build from local sources](../guides/kubernetes.md#build-from-local-sources)).

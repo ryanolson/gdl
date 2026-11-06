@@ -69,6 +69,8 @@ cluster = "use1"                  # region = "us-east-1", from the cluster
 
 `check` refuses a cluster that the fleet does not have, a pool `region` that is not its cluster's, and two clusters with the same context and namespace. The bundle uses only each cluster's region. So this fleet writes the same bundle as one whose pools write `region = "us-east-1"`. `cargo gdl k8s` reads the rest of a cluster's table and writes the fleet's Kubernetes objects, and `cargo gdl images` builds and pushes their images ([Deploy a fleet on Kubernetes](kubernetes.md)).
 
+A cluster table is a Kubernetes cluster unless it says `kind = "slurm"`. Then it is a Slurm site, which runs each pool as a job through srt-slurm, and takes its own keys: `region`, `srtctl`, `run_dir`, `registry`, `platform`, and optional ones such as `signal_lead_s` and `time_limit`. A pool on the site may add `slurm = { partition, time_limit, spare_nodes }`. `check` judges a site, and refuses a Kubernetes key on it by name. No command runs a Slurm site yet: `cargo gdl k8s`, `images`, `deploy`, and `down` refuse a fleet with one, and Compose reads only its region ([Limitations](../operations/limitations.md#a-fleet-with-a-slurm-site-is-checked-and-nothing-runs-it-yet)). Every key and its default is in [Spec and fleet reference](../appendix/spec-reference.md#fleettoml).
+
 A fleet on Kubernetes can also ask for a PodMonitor in each cluster, for the Prometheus operator, with `[metrics] pod_monitor = true` ([Metrics](kubernetes.md#metrics)). Compose does not read `[metrics]`.
 
 ## 3. Check and write the bundle

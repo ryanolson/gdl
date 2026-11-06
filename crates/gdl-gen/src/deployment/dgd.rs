@@ -63,7 +63,8 @@ pub(crate) fn problems(fleet: &Fleet, fleet_file: &Path) -> Vec<Problem> {
                 continue;
             }
         };
-        let Some((_, cluster)) = fleet.cluster_of(pool) else {
+        // A DGD on a Slurm site is refused by [`Fleet::check`].
+        let Some(cluster) = fleet.cluster_of(pool).and_then(|(_, c)| c.kubernetes()) else {
             continue;
         };
         let placed: Vec<(&str, &str)> = dgd

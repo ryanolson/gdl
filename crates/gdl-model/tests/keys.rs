@@ -103,9 +103,23 @@ fn a_fleet_refuses_an_unknown_key_in_every_table() {
             "[cluster.a]\ncontext = 'c'\nnamespace = 'n'\n",
             "line 1: [cluster.a] region: missing field `region`",
         ),
+        // A cluster's table is read whole before its `kind` says which
+        // keys it takes, so a problem in it has the table's line.
         (
             "[cluster.a]\ncontext = 'c'\nnamespace = 'n'\nregion = 'r'\nzone = 'a'\n",
-            "line 5: [cluster.a] zone: unknown field `zone`",
+            "line 1: [cluster.a] zone: unknown field `zone`",
+        ),
+        (
+            "[cluster.a]\nkind = 'slurm'\nregion = 'r'\nsrtctl = '/s'\nrun_dir = '/r'\ncontext = 'c'\n",
+            "line 1: [cluster.a] context: unknown field `context`",
+        ),
+        (
+            "[cluster.a]\nkind = 'nomad'\nregion = 'r'\n",
+            "line 1: [cluster.a] kind: `nomad` is not a kind of cluster",
+        ),
+        (
+            "[cluster.a]\nkind = 'slurm'\nregion = 'r'\nrun_dir = '/r'\n",
+            "line 1: [cluster.a] srtctl: missing field `srtctl`",
         ),
         (
             "[fleet]\nname = 'f'\nzone = 'a'\n",

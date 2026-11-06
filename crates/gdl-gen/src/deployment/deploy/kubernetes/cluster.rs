@@ -21,26 +21,34 @@ impl Clusters {
         let fleet_name = fleet.name().ok_or_else(|| {
             Error::new("the fleet has no `[fleet] name`, which labels its objects")
         })?;
-        Ok(Self(
-            fleet
-                .clusters()
-                .map(|(cluster, settings)| Cluster {
-                    name: cluster.to_string(),
-                    context: settings.context.clone(),
-                    namespace: settings.namespace.clone(),
-                    selector: format!(
-                        "{FLEET_LABEL}={},{CLUSTER_LABEL}={}",
-                        label_value(fleet_name),
-                        label_value(cluster)
+        let mut clusters = Vec::new();
+        for (cluster, settings) in fleet.clusters() {
+            let Some(settings) = settings.kubernetes() else {
+                return Err(Error::new(format!(
+                    "[cluster.{cluster}]: {}",
+                    crate::deployment::k8s::slurm_refused(
+                        cluster,
+                        "`cargo gdl deploy` and `cargo gdl down` run"
                     ),
-                    unowned: format!("{FLEET_LABEL}={},!{CLUSTER_LABEL}", label_value(fleet_name)),
-                    monitors: false,
-                    operator: settings.operator,
-                    scalers: false,
-                    pools: false,
-                })
-                .collect(),
-        ))
+                )));
+            };
+            clusters.push(Cluster {
+                name: cluster.to_string(),
+                context: settings.context.clone(),
+                namespace: settings.namespace.clone(),
+                selector: format!(
+                    "{FLEET_LABEL}={},{CLUSTER_LABEL}={}",
+                    label_value(fleet_name),
+                    label_value(cluster)
+                ),
+                unowned: format!("{FLEET_LABEL}={},!{CLUSTER_LABEL}", label_value(fleet_name)),
+                monitors: false,
+                operator: settings.operator,
+                scalers: false,
+                pools: false,
+            });
+        }
+        Ok(Self(clusters))
     }
 
     pub(super) fn get(&self, name: &str) -> &Cluster {

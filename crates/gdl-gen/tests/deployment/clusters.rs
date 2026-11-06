@@ -42,3 +42,25 @@ fn a_fleet_with_clusters_composes_the_same_bundle() {
     let (files, _) = fleet_bundle(&mirror, &placed(&mirror, SPLIT), &fleet);
     assert_pinned(&pinned(&mirror, &files), Path::new(FLEET_PIN));
 }
+
+/// Compose reads only a Slurm site's region, as it reads a Kubernetes
+/// cluster's: the same fleet with its region in a Slurm site, every key of
+/// the site set, writes the pinned bundle unchanged.
+#[test]
+fn a_fleet_on_a_slurm_site_composes_the_same_bundle() {
+    let sited = format!(
+        "[fleet]\nname = \"api\"\n\
+         [cluster.lab]\nkind = \"slurm\"\nregion = \"us-east-1\"\nsrtctl = \"/shared/srt-slurm\"\nrun_dir = \"/shared/gdl-runs\"\n\
+         registry = \"registry.example/gdl\"\nplatform = \"linux/amd64\"\nbase_image = \"debian:bookworm\"\n\
+         network_interface = \"ib0\"\nsignal_lead_s = 1200\ntime_limit = \"08:00:00\"\n{}",
+        ONE_FLEET.replace("region = \"us-east-1\"", "cluster = \"lab\"")
+    );
+    let mirror = Mirror::new();
+    let fleet = gdl_model::Fleet::from_toml(&sited).expect("a fleet");
+    assert_eq!(
+        fleet.cluster("lab").map(gdl_model::Cluster::kind),
+        Some("slurm")
+    );
+    let (files, _) = fleet_bundle(&mirror, &placed(&mirror, SPLIT), &fleet);
+    assert_pinned(&pinned(&mirror, &files), Path::new(FLEET_PIN));
+}

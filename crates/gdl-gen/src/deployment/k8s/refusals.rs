@@ -49,6 +49,17 @@ pub(super) fn fleet(fleet: &Fleet, settings: &Settings) -> Vec<Problem> {
     }
     for (name, cluster) in fleet.clusters() {
         let table = || Some(format!("cluster.{name}"));
+        let Some(cluster) = cluster.kubernetes() else {
+            problems.push(Problem::at(
+                table(),
+                None,
+                super::slurm_refused(
+                    name,
+                    "`cargo gdl k8s` and `cargo gdl images` render and build for",
+                ),
+            ));
+            continue;
+        };
         match &cluster.registry {
             None => problems.push(Problem::at(
                 table(),

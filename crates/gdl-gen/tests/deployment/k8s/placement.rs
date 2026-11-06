@@ -44,7 +44,11 @@ fn every_pod_template_carries_its_clusters_placement() {
             .expect("a cluster")
             .to_string_lossy()
             .to_string();
-        let settings = fleet.cluster(&cluster).expect("the cluster");
+        let settings = fleet
+            .cluster(&cluster)
+            .expect("the cluster")
+            .kubernetes()
+            .expect("a Kubernetes cluster");
         for object in documents(text) {
             let mut found = Vec::new();
             templates(&object, &mut found);

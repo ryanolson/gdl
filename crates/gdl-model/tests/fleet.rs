@@ -11,8 +11,12 @@ use gdl_model::{
 
 #[path = "fleet/clusters.rs"]
 mod clusters;
+#[path = "fleet/files.rs"]
+mod files;
 #[path = "fleet/placement.rs"]
 mod placement;
+#[path = "fleet/slurm.rs"]
+mod slurm;
 
 /// The graph of a model served in pools (docs/src/concepts/pools.md),
 /// `Http => Pre { Route { Model { Engine => Detok } } }`.
@@ -919,3 +923,5 @@ fn a_pools_dgd_table_names_its_file_and_components() {
         .to_string();
     assert!(error.contains("image"), "{error}");
 }
+#[path = "fleet/reader.rs"]
+mod reader;

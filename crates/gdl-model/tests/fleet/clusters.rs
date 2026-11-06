@@ -3,13 +3,13 @@
 
 use std::collections::BTreeMap;
 
-use gdl_model::{Cluster, Fleet};
+use gdl_model::{Cluster, Fleet, KubernetesCluster};
 
 use super::{FLEET, fleet, laid, problems};
 
 /// The design's fleet with each region a cluster, every key of a cluster
 /// set in the first.
-const CLUSTERED: &str = r#"
+pub(super) const CLUSTERED: &str = r#"
 [fleet]
 name = "llm-proof"
 
@@ -109,7 +109,7 @@ fn a_fleets_clusters_are_read_whole() {
     let use1 = fleet.cluster("use1").expect("a cluster");
     assert_eq!(
         use1,
-        &Cluster {
+        &Cluster::Kubernetes(KubernetesCluster {
             context: "kind-use1".into(),
             namespace: "gdl-llm".into(),
             region: "us-east-1".into(),
@@ -126,13 +126,13 @@ fn a_fleets_clusters_are_read_whole() {
             tolerations: Vec::new(),
             resources: None,
             operator: true,
-        }
+        })
     );
     // Every key but the three that place it is optional.
     let usw2 = fleet.cluster("usw2").expect("a cluster");
     assert_eq!(
         usw2,
-        &Cluster {
+        &Cluster::Kubernetes(KubernetesCluster {
             context: "kind-usw2".into(),
             namespace: "gdl-llm".into(),
             region: "us-west-2".into(),
@@ -146,7 +146,7 @@ fn a_fleets_clusters_are_read_whole() {
             tolerations: Vec::new(),
             resources: None,
             operator: false,
-        }
+        })
     );
     let names: Vec<&str> = fleet.clusters().map(|(name, _)| name).collect();
     assert_eq!(names, ["euw1", "use1", "usw2"]);

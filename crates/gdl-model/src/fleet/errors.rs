@@ -288,6 +288,15 @@ pub enum FleetError {
         /// Its cluster, if it names one.
         cluster: Option<String>,
     },
+    /// What a Slurm site, or a pool on one, cannot run.
+    Slurm {
+        /// The site's or the pool's table.
+        table: FleetTable,
+        /// The key, when it is one key's.
+        key: Option<String>,
+        /// Why it is refused.
+        reason: String,
+    },
     /// A key of a pool's `dgd.components` is not a segment of its class.
     DgdNotInClass {
         /// The pool.
@@ -627,6 +636,7 @@ impl FleetError {
                     ),
                 )
             }
+            Self::Slurm { table, key, reason } => (Some(table.path()), key.clone(), reason.clone()),
             Self::DgdNotInClass {
                 pool: name,
                 segment,

@@ -74,6 +74,13 @@ impl Problem {
     /// (`[messages] crates[0].rev`).
     pub(crate) fn from_path(path: &serde_path_to_error::Path, message: String) -> Self {
         let mut keys = segments(path);
+        let message = match unnest(&message) {
+            Some((inner, rest)) => {
+                keys.extend(inner);
+                rest.to_string()
+            }
+            None => message,
+        };
         let missing = message
             .strip_prefix("missing field `")
             .and_then(|rest| rest.split_once('`'))
@@ -230,7 +237,48 @@ fn surroundings(text: &str, offset: usize) -> (Option<String>, Option<String>) {
 
 /// The keys of a reader's path, each array element written after the key
 /// that holds it (`crates[0]`), as TOML addresses it.
-fn segments(path: &serde_path_to_error::Path) -> Vec<String> {
+/// The message of an error met at `keys` inside a value its reader took
+/// whole before it read it, as a tagged table is: the outer reader's path
+/// stops at the value, so the path inside goes before the message, in
+/// words (``in `resources`.`default`: invalid type``), and
+/// [`Problem::from_path`] puts it back as the table and the key. Each key
+/// is quoted with its own backticks doubled, so that any key reads back.
+pub(crate) fn nested(keys: &[String], message: &str) -> String {
+    if keys.is_empty() {
+        return message.to_string();
+    }
+    let quoted: Vec<String> = keys
+        .iter()
+        .map(|key| format!("`{}`", key.replace('`', "``")))
+        .collect();
+    format!("in {}: {message}", quoted.join("."))
+}
+
+/// The keys and the message, from what [`nested`] wrote; `None` for any
+/// other message.
+fn unnest(message: &str) -> Option<(Vec<String>, &str)> {
+    let mut rest = message.strip_prefix("in `")?;
+    let mut keys = Vec::new();
+    let mut key = String::new();
+    loop {
+        let tick = rest.find('`')?;
+        key.push_str(&rest[..tick]);
+        rest = &rest[tick + 1..];
+        if let Some(after) = rest.strip_prefix('`') {
+            key.push('`');
+            rest = after;
+            continue;
+        }
+        keys.push(std::mem::take(&mut key));
+        if let Some(after) = rest.strip_prefix(".`") {
+            rest = after;
+        } else {
+            return Some((keys, rest.strip_prefix(": ")?));
+        }
+    }
+}
+
+pub(crate) fn segments(path: &serde_path_to_error::Path) -> Vec<String> {
     use serde_path_to_error::Segment;
     let mut keys: Vec<String> = Vec::new();
     for segment in path.iter() {

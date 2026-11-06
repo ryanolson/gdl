@@ -288,8 +288,8 @@ pub(super) fn plan(prepared: &Prepared, fleet: &Fleet) -> Result<Vec<Image>, Err
     // registry and a platform share each image.
     let mut images = BTreeMap::new();
     let mut add = |cluster: &gdl_model::Cluster, repository: &str, context: &Source| {
-        let registry = cluster.registry.clone().unwrap_or_default();
-        let platform = cluster.platform.clone().unwrap_or_default();
+        let registry = cluster.registry().unwrap_or_default().to_string();
+        let platform = cluster.platform().unwrap_or_default().to_string();
         images
             .entry((registry.clone(), repository.to_string(), platform.clone()))
             .or_insert_with(|| Image {
@@ -321,7 +321,7 @@ pub(super) fn plan(prepared: &Prepared, fleet: &Fleet) -> Result<Vec<Image>, Err
                 }
                 // By architecture: `[deployment.codegen.<arch>]` reaches
                 // the Dockerfile of its own architecture's images only.
-                let arch = arch(cluster.platform.as_deref().unwrap_or_default());
+                let arch = arch(cluster.platform().unwrap_or_default());
                 let context = contexts.entry((segment, arch)).or_insert_with(|| {
                     let package = laid.package(graph, segment);
                     let crate_dir = laid.dir().join(segment);
@@ -560,7 +560,7 @@ fn dockerfile(builder: &str, base: &str, copies: bool, build: &str) -> String {
 
 /// The architecture of `platform`, `<os>/<arch>[/<variant>]`, as Docker
 /// names it in `TARGETARCH`: `arm64` for `linux/arm64/v8`.
-fn arch(platform: &str) -> &str {
+pub(super) fn arch(platform: &str) -> &str {
     platform.split('/').nth(1).unwrap_or_default()
 }
 

@@ -1451,3 +1451,6 @@ mod namespace;
 
 #[path = "deploy/operator.rs"]
 mod operator;
+
+#[path = "deploy/slurm.rs"]
+mod slurm;

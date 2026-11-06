@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use gdl_k8s::{Env, LABEL_LIMIT, LABEL_PREFIX, Pool, Port, Protocol, Settings, fnv, label_value};
-use gdl_model::{Cluster, Fleet, PoolSettings, Resources};
+use gdl_model::{Fleet, KubernetesCluster, PoolSettings, Resources};
 use serde_json::{Map, Value, json};
 
 use crate::Error;
@@ -70,7 +70,7 @@ pub(super) struct Pod<'a> {
     pub(super) pool: &'a PoolSettings,
     /// The fleet's name for the cluster.
     pub(super) cluster_name: &'a str,
-    pub(super) cluster: &'a Cluster,
+    pub(super) cluster: &'a KubernetesCluster,
     pub(super) naming: &'a super::Naming<'a>,
     /// The fleet, for each pod's requests and limits.
     pub(super) model: &'a Fleet,
@@ -206,7 +206,7 @@ impl Pod<'_> {
 /// The PodMonitor of `fleet`'s pods in `cluster`, which the fleet names
 /// `name`, for a cluster that runs the Prometheus operator
 /// ([`gdl_k8s::pod_monitor`]).
-pub(super) fn pod_monitor(fleet: &str, name: &str, cluster: &Cluster) -> Value {
+pub(super) fn pod_monitor(fleet: &str, name: &str, cluster: &KubernetesCluster) -> Value {
     gdl_k8s::pod_monitor(
         &pod_monitor_name(fleet, name),
         &cluster.namespace,
@@ -253,7 +253,7 @@ pub(in crate::deployment) fn image(
 /// platform's OS and architecture, without a variant (`linux/arm64/v8`
 /// runs on `arm64` nodes), as the nodes' `kubernetes.io/os` and
 /// `kubernetes.io/arch` labels name them.
-fn node_selector(cluster: &Cluster) -> BTreeMap<String, String> {
+fn node_selector(cluster: &KubernetesCluster) -> BTreeMap<String, String> {
     let platform = cluster.platform.as_deref().unwrap_or_default();
     let mut parts = platform.split('/');
     let os = parts.next().unwrap_or_default();
@@ -272,7 +272,7 @@ fn node_selector(cluster: &Cluster) -> BTreeMap<String, String> {
 /// placed: on the cluster's nodes ([`node_selector`]), with its
 /// tolerations. Every pod the render writes is placed so, so that none is
 /// left off a node group of the fleet's own.
-pub(super) fn place(pod: &mut Value, cluster: &Cluster) {
+pub(super) fn place(pod: &mut Value, cluster: &KubernetesCluster) {
     let tolerations: Vec<gdl_k8s::Toleration> =
         cluster.tolerations.iter().map(Into::into).collect();
     gdl_k8s::place(pod, &node_selector(cluster), &tolerations);
@@ -286,7 +286,7 @@ pub(super) fn resources(container: &mut Value, resources: Option<&Resources>) {
 /// The Namespace of `cluster`, which the fleet names `name`, and the
 /// fleet's ServiceAccount in it, which carries the cluster's annotations,
 /// for a cloud role.
-pub(super) fn base(fleet: &str, name: &str, cluster: &Cluster) -> Vec<Value> {
+pub(super) fn base(fleet: &str, name: &str, cluster: &KubernetesCluster) -> Vec<Value> {
     let labels = json!({
         "gdl.dev/fleet": label_value(fleet),
         "gdl.dev/cluster": label_value(name),
@@ -347,7 +347,7 @@ fn dns_label(name: &str) -> bool {
 
 /// Refuse a platform that is not `<os>/<arch>[/<variant>]`, from which a
 /// pod's node selector is read.
-pub(super) fn check_platform(platform: &str) -> Result<(), String> {
+pub(in crate::deployment) fn check_platform(platform: &str) -> Result<(), String> {
     let parts: Vec<&str> = platform.split('/').collect();
     let word = |part: &&str| {
         !part.is_empty()
@@ -367,7 +367,7 @@ pub(super) fn check_platform(platform: &str) -> Result<(), String> {
 /// port if it has one, and then path components, or path components alone,
 /// which name a Docker Hub namespace. A scheme, a tag, or a digest would
 /// make every image name one that Docker refuses.
-pub(super) fn check_registry(registry: &str) -> Result<(), String> {
+pub(in crate::deployment) fn check_registry(registry: &str) -> Result<(), String> {
     let mut parts = registry.trim_end_matches('/').split('/').peekable();
     let first = parts.peek().copied().unwrap_or_default();
     let host = first.contains(['.', ':']) || first == "localhost";
@@ -468,7 +468,7 @@ pub(super) fn readme(fleet: &Fleet) -> String {
          One directory per cluster. `base.yaml` holds the cluster's Namespace and the fleet's ServiceAccount; `pools/<pool>.yaml` holds each pool's ConfigMap, its hub's Deployment and Service, a Deployment for each segment of its class, and a Service for each segment that publishes ports. Every object is labelled `gdl.dev/fleet={name}`.\n\n\
          Apply the base first, since every other object is in its Namespace. Where a cluster's namespace already exists, leave its Namespace out of the apply and label the namespace instead, with `kubectl label namespace/<namespace> gdl.dev/fleet=<fleet> gdl.dev/cluster=<cluster>`: an apply would take over the fields its owner set, and drop the labels and annotations this Namespace does not list. `cargo gdl deploy` does so itself.\n"
     );
-    for (cluster, settings) in fleet.clusters() {
+    for (cluster, settings) in super::kube_clusters(fleet) {
         text.push_str(&format!(
             "\n```bash\nkubectl --context {context} apply --server-side -f {cluster}/base.yaml\nkubectl --context {context} apply --server-side -R -f {cluster}/pools\n```\n",
             context = settings.context
@@ -507,7 +507,7 @@ pub(super) fn readme(fleet: &Fleet) -> String {
     text.push_str("\nEach image must be in its cluster's registry before its pods start: `cargo gdl images --push` builds and pushes them. A pool's hub's Service is named for the pool, and its segments' objects `<pool>-<segment>`.\n");
     text.push_str("\nEvery pod says where it serves its metrics, in its `prometheus.io/scrape`, `prometheus.io/port`, and `prometheus.io/path` annotations.");
     if fleet.metrics().pod_monitor {
-        if fleet.clusters().any(|(_, cluster)| cluster.operator) {
+        if super::kube_clusters(fleet).any(|(_, cluster)| cluster.operator) {
             text.push_str(&format!(" Each `base.yaml` of a cluster the gdl operator does not run also holds a PodMonitor `{name}-<cluster>-<hash>` of the fleet's pods in its cluster, and in a cluster it runs each pool has a PodMonitor named after it. Both need the Prometheus operator's CRD (`monitoring.coreos.com/v1`) there: apply them where the operator runs."));
         } else {
             text.push_str(&format!(" Each `base.yaml` also holds a PodMonitor `{name}-<cluster>-<hash>` of the fleet's pods in its cluster, which needs the Prometheus operator's CRD (`monitoring.coreos.com/v1`) there: apply it where the operator runs."));

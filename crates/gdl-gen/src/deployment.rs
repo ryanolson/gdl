@@ -366,7 +366,7 @@ impl Codegen {
 struct Secret {
     file: String,
 }
-fn validate_image(image: &str) -> Result<(), Error> {
+pub(crate) fn validate_image(image: &str) -> Result<(), Error> {
     if image.is_empty()
         || image.starts_with('-')
         || !image
@@ -392,6 +392,7 @@ mod images;
 mod k8s;
 pub(crate) mod locks;
 mod pools;
+pub(crate) mod slurm;
 mod tree;
 mod variables;
 

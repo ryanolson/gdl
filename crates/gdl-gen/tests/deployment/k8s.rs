@@ -653,6 +653,12 @@ fn a_fleet_that_cannot_run_on_kubernetes_is_refused() {
             base.replace("platform = \"linux/arm64\"", "platform = \"arm64\""),
             &["[cluster.euw1]", "`arm64`"],
         ),
+        (
+            format!(
+                "{base}\n[cluster.lab]\nkind = \"slurm\"\nregion = \"slurm-lab\"\nsrtctl = \"/s\"\nrun_dir = \"/r\"\nregistry = \"registry.example/gdl\"\nplatform = \"linux/amd64\"\n"
+            ),
+            &["[cluster.lab]", "`lab` is a Slurm site", "`cargo gdl k8s`"],
+        ),
     ];
     for (fleet, named) in cases {
         let checked = gdl_model::Fleet::from_toml(&fleet)

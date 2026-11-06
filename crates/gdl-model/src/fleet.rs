@@ -10,14 +10,18 @@ use crate::{
 mod cluster;
 mod errors;
 mod placement;
+mod slurm;
+mod written;
 
-pub use cluster::Cluster;
+pub use cluster::{Cluster, KubernetesCluster};
 pub use errors::{FleetError, FleetErrors, FleetTable};
 pub use placement::{
     ClusterResources, HUB, PoolResources, Quantities, Quantity, Resources, Toleration,
 };
+pub use slurm::{PoolSlurm, SlurmSite};
 
 use cluster::{Header, check_clusters};
+use slurm::check_time_limit;
 
 /// A deployment's pools: `fleet.toml`. Not part of the placement's
 /// identity: pools are runtime topology, like replicas. It says what each
@@ -30,7 +34,7 @@ use cluster::{Header, check_clusters};
 /// [fleet]
 /// name = "llm"                       # optional: labels the objects the fleet deploys
 ///
-/// [cluster.use1]                     # optional: a Kubernetes cluster ([`Cluster`])
+/// [cluster.use1]                     # optional: a Kubernetes cluster ([`KubernetesCluster`]), `kind = "kubernetes"` unsaid
 /// context = "kind-use1"
 /// namespace = "gdl-llm"
 /// region = "us-east-1"
@@ -42,6 +46,14 @@ use cluster::{Header, check_clusters};
 /// limits = { cpu = "1", memory = "1Gi" }
 /// [cluster.use1.resources.segment.e] # a segment's own, or `hub`, over the default
 /// limits = { memory = "4Gi" }
+///
+/// [cluster.lab]                      # optional: a Slurm site ([`SlurmSite`]); no command runs one yet
+/// kind = "slurm"
+/// region = "slurm-lab"
+/// srtctl = "/shared/srt-slurm"       # the srt-slurm checkout on the login node
+/// run_dir = "/shared/gdl-runs"       # shared by the login node and the compute nodes
+/// registry = "registry.example/gdl"
+/// platform = "linux/arm64"
 ///
 /// [class.global]
 /// ready = { a = 2, b = 2, c = 2 }   # default quorum of a pool of this class, per segment
@@ -56,6 +68,7 @@ use cluster::{Header, check_clusters};
 /// # parents = "global"               # or, in place of `home`, the parent class: every pool of it follows this one
 /// ready = { e = 8 }                  # optional: overrides the class's default
 /// resources.segment.e = { limits = { memory = "8Gi" } }   # optional: over its cluster's
+/// # slurm = { partition = "gpu" }   # on a Slurm site, in place of `resources`: its job's partition, time limit, and spare nodes ([`PoolSlurm`])
 ///
 /// [pool.model-x-01-us-east-1.dgd]   # optional: a DynamoGraphDeployment the pool owns ([`PoolDgd`])
 /// file = "dynamo/dgd.yaml"           # relative to the fleet file
@@ -186,6 +199,9 @@ struct PoolSpec {
     /// segments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dgd: Option<PoolDgd>,
+    /// How the pool's job runs, on a Slurm site.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    slurm: Option<PoolSlurm>,
 }
 
 /// A pool's `dgd` table: the DynamoGraphDeployment (DGD) it owns, which
@@ -346,7 +362,7 @@ impl Fleet {
                 .flat_map(|classes| classes.segments.values().flatten().copied())
                 .collect();
             for (name, cluster) in &self.clusters {
-                if let Some(resources) = &cluster.resources {
+                if let Some(resources) = cluster.kubernetes().and_then(|c| c.resources.as_ref()) {
                     placement::check_segments(
                         FleetTable::Cluster(name.clone()),
                         resources.segment.keys(),
@@ -418,14 +434,21 @@ impl Fleet {
                     }),
                 },
             }
+            let site = pool
+                .cluster
+                .as_ref()
+                .and_then(|cluster| self.clusters.get(cluster))
+                .and_then(Cluster::slurm);
+            self.slurm_problems(name, pool, site, &mut errors);
             if let Some(dgd) = &pool.dgd {
                 self.dgd_problems(name, pool, dgd, runs, laid.as_ref(), &mut errors);
             }
-            if let Some(resources) = &pool.resources {
+            if let Some(resources) = pool.resources.as_ref().filter(|_| site.is_none()) {
                 let cluster = pool
                     .cluster
                     .as_ref()
                     .and_then(|cluster| self.clusters.get(cluster))
+                    .and_then(Cluster::kubernetes)
                     .and_then(|cluster| cluster.resources.as_ref());
                 placement::check_pool(name, resources, cluster, &mut errors);
                 if let Some(members) = runs
@@ -450,6 +473,11 @@ impl Fleet {
                 });
             }
         }
+        for (name, site) in &self.clusters {
+            if let Cluster::Slurm(site) = site {
+                errors.extend(self.lead_problem(name, site));
+            }
+        }
         // A class's table is judged in each layout with the class, and
         // what is wrong in all of them alike is one problem.
         let mut unique: Vec<FleetError> = Vec::with_capacity(errors.len());
@@ -462,6 +490,115 @@ impl Fleet {
             Ok(())
         } else {
             Err(FleetErrors(unique))
+        }
+    }
+
+    /// Slurm site `name`'s `signal_lead_s`, when it is shorter than the
+    /// longest stop wait of a pool on the site plus
+    /// [`SlurmSite::SIGNAL_MARGIN_S`]: Slurm signals each job that long
+    /// before its time limit, and the pool's hub, which drains the pool on
+    /// that signal, waits up to its stop wait before it stops. A pool's
+    /// stop wait is its settings' `stop_wait_ms`, else
+    /// [`PoolSettings::DEFAULT_STOP_WAIT`].
+    fn lead_problem(&self, name: &str, site: &SlurmSite) -> Option<FleetError> {
+        let (wait, pool) = self
+            .pools
+            .iter()
+            .filter(|(_, pool)| pool.cluster.as_deref() == Some(name))
+            .filter_map(|(pool, _)| {
+                let settings = self.pool(pool)?;
+                let wait = settings
+                    .drain_on_stop
+                    .unwrap_or(PoolSettings::DEFAULT_STOP_WAIT);
+                Some((wait, pool))
+            })
+            // On a tie, the first pool in name order.
+            .max_by_key(|(wait, pool)| (*wait, std::cmp::Reverse(*pool)))?;
+        // Whole seconds, rounded up: a wait of 660.5 s needs a lead of 781.
+        let wait = u64::try_from(wait.as_millis().div_ceil(1000)).unwrap_or(u64::MAX);
+        let floor = wait.saturating_add(SlurmSite::SIGNAL_MARGIN_S);
+        (site.signal_lead_s < floor).then(|| FleetError::Slurm {
+            table: FleetTable::Cluster(name.to_string()),
+            key: Some("signal_lead_s".into()),
+            reason: format!(
+                "is {} s, below pool `{pool}`'s stop wait of {wait} s plus {} s, {floor} s: Slurm signals a job that long before its time limit, and the pool's hub drains the pool and waits up to its stop wait before it stops. Raise it to at least {floor}",
+                site.signal_lead_s,
+                SlurmSite::SIGNAL_MARGIN_S,
+            ),
+        })
+    }
+
+    /// What pool `name` asks of Slurm that it cannot have: a `slurm` table
+    /// on a pool of no Slurm site, which nothing would read, or one whose
+    /// partition or time limit Slurm would not take; and, on Slurm site
+    /// `site`, a `dgd` table, which only dynamo's operator on Kubernetes
+    /// runs, or Kubernetes requests and limits, which nothing would apply.
+    fn slurm_problems(
+        &self,
+        name: &str,
+        pool: &PoolSpec,
+        site: Option<&SlurmSite>,
+        errors: &mut Vec<FleetError>,
+    ) {
+        let mut refuse = |key: &str, reason: String| {
+            errors.push(FleetError::Slurm {
+                table: FleetTable::Pool(name.to_string()),
+                key: Some(key.to_string()),
+                reason,
+            });
+        };
+        if let Some(slurm) = &pool.slurm {
+            match (site, &pool.cluster) {
+                (None, None) => refuse(
+                    "slurm",
+                    "the pool names no cluster, so no Slurm site reads it: name the Slurm site that runs the pool, or leave the table out".into(),
+                ),
+                (None, Some(cluster)) => {
+                    if let Some(placed) = self.clusters.get(cluster) {
+                        refuse(
+                            "slurm",
+                            format!(
+                                "cluster `{cluster}` is a {} cluster, which does not read it: leave the table out, or run the pool on a Slurm site",
+                                placed.kind()
+                            ),
+                        );
+                    }
+                }
+                (Some(site), _) => {
+                    if let Some(partition) = &slurm.partition
+                        && (partition.is_empty() || partition.contains(char::is_whitespace))
+                    {
+                        refuse(
+                            "slurm.partition",
+                            format!("`{partition}` is not a partition's name"),
+                        );
+                    }
+                    if let Some(limit) = &slurm.time_limit {
+                        check_time_limit(limit, site.signal_lead_s, &mut |key, reason| {
+                            refuse(&format!("slurm.{key}"), reason)
+                        });
+                    }
+                }
+            }
+        }
+        let (Some(_), Some(cluster)) = (site, &pool.cluster) else {
+            return;
+        };
+        if pool.dgd.is_some() {
+            refuse(
+                "dgd",
+                format!(
+                    "cluster `{cluster}` is a Slurm site: a DynamoGraphDeployment runs only under dynamo's operator on Kubernetes. Run the pool on a Kubernetes cluster, or leave the table out"
+                ),
+            );
+        }
+        if pool.resources.is_some() {
+            refuse(
+                "resources",
+                format!(
+                    "cluster `{cluster}` is a Slurm site, where each segment instance takes its nodes whole, and no pod's requests and limits apply: leave the table out"
+                ),
+            );
         }
     }
 
@@ -480,12 +617,15 @@ impl Fleet {
         laid: Option<&Laid<'_>>,
         errors: &mut Vec<FleetError>,
     ) {
-        let operated = pool
+        let placed = pool
             .cluster
             .as_ref()
-            .and_then(|cluster| self.clusters.get(cluster))
+            .and_then(|cluster| self.clusters.get(cluster));
+        let operated = placed
+            .and_then(Cluster::kubernetes)
             .is_some_and(|cluster| cluster.operator);
-        if !operated {
+        // A DGD on a Slurm site is that pool's Slurm problem.
+        if !operated && placed.and_then(Cluster::slurm).is_none() {
             errors.push(FleetError::DgdWithoutOperator {
                 pool: name.to_string(),
                 cluster: pool.cluster.clone(),
@@ -539,13 +679,13 @@ impl Fleet {
         };
         // A region that is no region's name is already its problem.
         if let Some(region) = pool.region.as_ref().filter(|_| shaped)
-            && *region != placed.region
+            && region != placed.region()
         {
             errors.push(FleetError::RegionNotCluster {
                 pool: name.into(),
                 region: region.clone(),
                 cluster: cluster.clone(),
-                cluster_region: placed.region.clone(),
+                cluster_region: placed.region().to_string(),
             });
         }
     }
@@ -823,7 +963,7 @@ impl Fleet {
         ready.extend(pool.ready.iter().map(|(s, n)| (s.clone(), *n)));
         let region = self
             .cluster_of(name)
-            .map(|(_, cluster)| cluster.region.clone())
+            .map(|(_, cluster)| cluster.region().to_string())
             .or_else(|| pool.region.clone())
             .unwrap_or_default();
         Some(PoolSettings {
@@ -874,7 +1014,12 @@ impl Fleet {
         pool: Option<&str>,
         pod: Option<&str>,
     ) -> Option<Resources> {
-        let resources = self.clusters.get(cluster)?.resources.as_ref()?;
+        let resources = self
+            .clusters
+            .get(cluster)?
+            .kubernetes()?
+            .resources
+            .as_ref()?;
         let mut merged = resources.default.clone()?;
         if let Some(pod) = pod {
             if let Some(own) = resources.segment.get(pod) {
@@ -889,6 +1034,12 @@ impl Fleet {
             }
         }
         Some(merged)
+    }
+
+    /// The `slurm` table of pool `pool`, if the fleet has the pool and it
+    /// has one.
+    pub fn slurm(&self, pool: &str) -> Option<&PoolSlurm> {
+        self.pools.get(pool)?.slurm.as_ref()
     }
 
     /// The `dgd` table of pool `pool`, if the fleet has the pool and it

@@ -39,8 +39,8 @@ pub use diagram::Direction;
 pub use encoding::Encoding;
 pub use fleet::{
     Cluster, ClusterResources, Fleet, FleetBackend, FleetDirectory, FleetError, FleetErrors,
-    FleetMetrics, FleetTable, HUB, PoolDgd, PoolResources, Quantities, Quantity, Resources,
-    Toleration,
+    FleetMetrics, FleetTable, HUB, KubernetesCluster, PoolDgd, PoolResources, PoolSlurm,
+    Quantities, Quantity, Resources, SlurmSite, Toleration,
 };
 pub use manifest::{
     HopInfo, ItemInfo, Manifest, NodeInfo, PropertyInfo, PropertyNeed, TypeInfo, UnaryInfo,

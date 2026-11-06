@@ -1,0 +1,659 @@
+## crates/gdl-gen/tests/fixtures/k8s/fleet.toml
+[fleet]
+name = "api"
+
+[cluster.euw1]
+context = "kind-euw1"
+namespace = "gdl-api"
+region = "eu-west-1"
+registry = "registry.example/gdl-eu"
+platform = "linux/arm64"
+
+[cluster.euw1.secrets]
+fingerprint = "api-fingerprint-eu"
+
+[cluster.use1]
+context = "kind-use1"
+namespace = "gdl-api"
+region = "us-east-1"
+registry = "registry.example/gdl"
+platform = "linux/amd64"
+operator = true
+
+[cluster.use1.service_account_annotations]
+"eks.amazonaws.com/role-arn" = "arn:aws:iam::000000000000:role/gdl-api"
+
+[cluster.use1.secrets]
+fingerprint = "api-fingerprint"
+
+[cluster.use1.env]
+RUST_LOG = "info"
+
+[class.global.ready]
+front = 2
+
+[class.model_x.ready]
+engine = 1
+
+[pool.global-eu]
+class = "global"
+cluster = "euw1"
+
+[pool.global-us]
+class = "global"
+cluster = "use1"
+
+[pool.model-x-eu]
+class = "model_x"
+cluster = "euw1"
+home = "global-eu"
+
+[pool.model-x-us]
+class = "model_x"
+cluster = "use1"
+home = "global-us"
+
+[pool.model-x-us.ready]
+engine = 2
+
+[metrics]
+pod_monitor = true
+
+{"fleet":{"name":"api"},"cluster":{"euw1":{"context":"kind-euw1","namespace":"gdl-api","region":"eu-west-1","registry":"registry.example/gdl-eu","platform":"linux/arm64","secrets":{"fingerprint":"api-fingerprint-eu"}},"use1":{"context":"kind-use1","namespace":"gdl-api","region":"us-east-1","registry":"registry.example/gdl","platform":"linux/amd64","service_account_annotations":{"eks.amazonaws.com/role-arn":"arn:aws:iam::000000000000:role/gdl-api"},"secrets":{"fingerprint":"api-fingerprint"},"env":{"RUST_LOG":"info"},"operator":true}},"class":{"global":{"ready":{"front":2}},"model_x":{"ready":{"engine":1}}},"pool":{"global-eu":{"class":"global","cluster":"euw1"},"global-us":{"class":"global","cluster":"use1"},"model-x-eu":{"class":"model_x","cluster":"euw1","home":"global-eu"},"model-x-us":{"class":"model_x","cluster":"use1","home":"global-us","ready":{"engine":2}}},"metrics":{"pod_monitor":true}}
+
+## crates/gdl-gen/tests/fixtures/k8s/dynamodb/fleet.toml
+[fleet]
+name = "api"
+
+[cluster.euw1]
+context = "kind-euw1"
+namespace = "gdl-api"
+region = "eu-west-1"
+registry = "registry.example/gdl-eu"
+platform = "linux/arm64"
+
+[cluster.euw1.secrets]
+fingerprint = "api-fingerprint-eu"
+
+[cluster.euw1.node_selector]
+"gdl.dev/node-group" = "gdl-api"
+
+[[cluster.euw1.tolerations]]
+key = "dedicated"
+operator = "Exists"
+effect = "NoSchedule"
+
+[cluster.euw1.resources.default.requests]
+cpu = "100m"
+memory = "128Mi"
+
+[cluster.euw1.resources.default.limits]
+cpu = "500m"
+memory = "512Mi"
+
+[cluster.use1]
+context = "kind-use1"
+namespace = "gdl-api"
+region = "us-east-1"
+registry = "registry.example/gdl"
+platform = "linux/amd64"
+
+[cluster.use1.secrets]
+fingerprint = "api-fingerprint"
+
+[cluster.use1.node_selector]
+"gdl.dev/node-group" = "gdl-api"
+
+[[cluster.use1.tolerations]]
+key = "dedicated"
+operator = "Equal"
+value = "gdl-api"
+effect = "NoSchedule"
+
+[cluster.use1.resources.default.requests]
+cpu = "100m"
+memory = "128Mi"
+
+[cluster.use1.resources.default.limits]
+cpu = "500m"
+memory = "512Mi"
+
+[cluster.use1.resources.segment.engine.requests]
+cpu = "250m"
+
+[cluster.use1.resources.segment.engine.limits]
+cpu = "1"
+memory = "1Gi"
+
+[class.global.ready]
+front = 2
+
+[class.model_x.ready]
+engine = 1
+
+[pool.global-eu]
+class = "global"
+cluster = "euw1"
+
+[pool.global-us]
+class = "global"
+cluster = "use1"
+
+[pool.model-x-shared]
+class = "model_x"
+cluster = "euw1"
+parents = "global"
+
+[pool.model-x-shared.resources.segment.engine.limits]
+memory = "2Gi"
+
+[pool.model-x-us]
+class = "model_x"
+cluster = "use1"
+home = "global-us"
+
+[directory]
+backend = "dynamodb"
+records_table = "gdl-pools"
+lists_table = "gdl-pool-lists"
+local = true
+cluster = "use1"
+
+{"fleet":{"name":"api"},"cluster":{"euw1":{"context":"kind-euw1","namespace":"gdl-api","region":"eu-west-1","registry":"registry.example/gdl-eu","platform":"linux/arm64","secrets":{"fingerprint":"api-fingerprint-eu"},"node_selector":{"gdl.dev/node-group":"gdl-api"},"tolerations":[{"key":"dedicated","operator":"Exists","effect":"NoSchedule"}],"resources":{"default":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"500m","memory":"512Mi"}}}},"use1":{"context":"kind-use1","namespace":"gdl-api","region":"us-east-1","registry":"registry.example/gdl","platform":"linux/amd64","secrets":{"fingerprint":"api-fingerprint"},"node_selector":{"gdl.dev/node-group":"gdl-api"},"tolerations":[{"key":"dedicated","operator":"Equal","value":"gdl-api","effect":"NoSchedule"}],"resources":{"default":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"500m","memory":"512Mi"}},"segment":{"engine":{"requests":{"cpu":"250m"},"limits":{"cpu":"1","memory":"1Gi"}}}}}},"class":{"global":{"ready":{"front":2}},"model_x":{"ready":{"engine":1}}},"pool":{"global-eu":{"class":"global","cluster":"euw1"},"global-us":{"class":"global","cluster":"use1"},"model-x-shared":{"class":"model_x","cluster":"euw1","parents":"global","resources":{"segment":{"engine":{"limits":{"memory":"2Gi"}}}}},"model-x-us":{"class":"model_x","cluster":"use1","home":"global-us"}},"directory":{"backend":"dynamodb","records_table":"gdl-pools","lists_table":"gdl-pool-lists","local":true,"cluster":"use1"}}
+
+## crates/gdl-gen/tests/fixtures/k8s/dgd/fleet.toml
+[fleet]
+name = "api"
+
+[cluster.use1]
+context = "kind-use1"
+namespace = "gdl-api"
+region = "us-east-1"
+registry = "registry.example/gdl"
+platform = "linux/amd64"
+operator = true
+
+[cluster.use1.secrets]
+fingerprint = "api-fingerprint"
+
+[class.global.ready]
+front = 1
+
+[class.model_x.ready]
+engine = 1
+
+[pool.dgd-use1]
+class = "model_x"
+cluster = "use1"
+home = "global-us"
+
+[pool.dgd-use1.dgd]
+file = "dynamo/dgd.yaml"
+
+[pool.dgd-use1.dgd.components]
+engine = "Frontend"
+
+[pool.global-us]
+class = "global"
+cluster = "use1"
+
+[pool.model-x-us]
+class = "model_x"
+cluster = "use1"
+home = "global-us"
+
+{"fleet":{"name":"api"},"cluster":{"use1":{"context":"kind-use1","namespace":"gdl-api","region":"us-east-1","registry":"registry.example/gdl","platform":"linux/amd64","secrets":{"fingerprint":"api-fingerprint"},"operator":true}},"class":{"global":{"ready":{"front":1}},"model_x":{"ready":{"engine":1}}},"pool":{"dgd-use1":{"class":"model_x","cluster":"use1","home":"global-us","dgd":{"file":"dynamo/dgd.yaml","components":{"engine":"Frontend"}}},"global-us":{"class":"global","cluster":"use1"},"model-x-us":{"class":"model_x","cluster":"use1","home":"global-us"}}}
+
+## docs/src/guides/fleet.md block 1
+[class.global.ready]
+front = 1
+
+[class.model_x.ready]
+engine = 1
+
+[pool.global-us]
+class = "global"
+region = "us-east-1"
+
+[pool.model-x-01]
+class = "model_x"
+region = "us-east-1"
+home = "global-us"
+
+[pool.model-x-02]
+class = "model_x"
+region = "us-east-1"
+home = "global-us"
+
+[pool.model-x-02.ready]
+engine = 2
+
+{"class":{"global":{"ready":{"front":1}},"model_x":{"ready":{"engine":1}}},"pool":{"global-us":{"class":"global","region":"us-east-1"},"model-x-01":{"class":"model_x","region":"us-east-1","home":"global-us"},"model-x-02":{"class":"model_x","region":"us-east-1","home":"global-us","ready":{"engine":2}}}}
+
+## docs/src/guides/fleet.md block 2
+[fleet]
+name = "api"
+
+[cluster.use1]
+context = "kind-use1"
+namespace = "gdl-api"
+region = "us-east-1"
+
+[pool.global-us]
+class = "global"
+cluster = "use1"
+
+{"fleet":{"name":"api"},"cluster":{"use1":{"context":"kind-use1","namespace":"gdl-api","region":"us-east-1"}},"pool":{"global-us":{"class":"global","cluster":"use1"}}}
+
+## docs/src/guides/fleet.md block 3
+[directory]
+backend = "dynamodb"
+records_table = "gdl-pools"
+lists_table = "gdl-pool-lists"
+local = true
+
+{"directory":{"backend":"dynamodb","records_table":"gdl-pools","lists_table":"gdl-pool-lists","local":true}}
+
+## docs/src/guides/kubernetes.md block 0
+[fleet]
+name = "api"
+
+[cluster.euw1]
+context = "kind-euw1"
+namespace = "gdl-api"
+region = "eu-west-1"
+registry = "registry.example/gdl-eu"
+platform = "linux/arm64"
+
+[cluster.euw1.secrets]
+fingerprint = "api-fingerprint-eu"
+
+[cluster.use1]
+context = "kind-use1"
+namespace = "gdl-api"
+region = "us-east-1"
+registry = "registry.example/gdl"
+platform = "linux/amd64"
+
+[cluster.use1.service_account_annotations]
+"eks.amazonaws.com/role-arn" = "arn:aws:iam::000000000000:role/gdl-api"
+
+[cluster.use1.secrets]
+fingerprint = "api-fingerprint"
+
+[cluster.use1.env]
+RUST_LOG = "info"
+
+[class.global.ready]
+front = 2
+
+[class.model_x.ready]
+engine = 1
+
+[pool.global-eu]
+class = "global"
+cluster = "euw1"
+
+[pool.global-us]
+class = "global"
+cluster = "use1"
+
+[pool.model-x-eu]
+class = "model_x"
+cluster = "euw1"
+home = "global-eu"
+
+[pool.model-x-us]
+class = "model_x"
+cluster = "use1"
+home = "global-us"
+
+[pool.model-x-us.ready]
+engine = 2
+
+[metrics]
+pod_monitor = true
+
+{"fleet":{"name":"api"},"cluster":{"euw1":{"context":"kind-euw1","namespace":"gdl-api","region":"eu-west-1","registry":"registry.example/gdl-eu","platform":"linux/arm64","secrets":{"fingerprint":"api-fingerprint-eu"}},"use1":{"context":"kind-use1","namespace":"gdl-api","region":"us-east-1","registry":"registry.example/gdl","platform":"linux/amd64","service_account_annotations":{"eks.amazonaws.com/role-arn":"arn:aws:iam::000000000000:role/gdl-api"},"secrets":{"fingerprint":"api-fingerprint"},"env":{"RUST_LOG":"info"}}},"class":{"global":{"ready":{"front":2}},"model_x":{"ready":{"engine":1}}},"pool":{"global-eu":{"class":"global","cluster":"euw1"},"global-us":{"class":"global","cluster":"use1"},"model-x-eu":{"class":"model_x","cluster":"euw1","home":"global-eu"},"model-x-us":{"class":"model_x","cluster":"use1","home":"global-us","ready":{"engine":2}}},"metrics":{"pod_monitor":true}}
+
+## docs/src/guides/operator.md block 0
+[cluster.use1]
+context = "kind-use1"
+namespace = "gdl-api"
+region = "us-east-1"
+registry = "registry.example/gdl"
+platform = "linux/amd64"
+operator = true
+
+{"cluster":{"use1":{"context":"kind-use1","namespace":"gdl-api","region":"us-east-1","registry":"registry.example/gdl","platform":"linux/amd64","operator":true}}}
+
+## scripts/kind-fleet.sh
+[fleet]
+name = "api"
+
+[cluster.kind]
+context = "x"
+namespace = "gdl-api"
+region = "local"
+registry = "x/gdl"
+platform = "linux/x"
+
+[cluster.kind.node_selector]
+"gdl.dev/node-group" = "gdl-api"
+
+[[cluster.kind.tolerations]]
+key = "dedicated"
+operator = "Equal"
+value = "gdl-api"
+effect = "NoSchedule"
+
+[cluster.kind.resources.default.requests]
+cpu = "50m"
+memory = "64Mi"
+
+[cluster.kind.resources.default.limits]
+cpu = "1"
+memory = "512Mi"
+
+[class.global.ready]
+front = 1
+
+[class.model.ready]
+engine = 1
+
+[pool.global]
+class = "global"
+cluster = "kind"
+
+[pool.model-a]
+class = "model"
+cluster = "kind"
+home = "global"
+
+[pool.model-a.resources.segment.engine.limits]
+memory = "768Mi"
+
+[pool.model-b]
+class = "model"
+cluster = "kind"
+home = "global"
+
+{"fleet":{"name":"api"},"cluster":{"kind":{"context":"x","namespace":"gdl-api","region":"local","registry":"x/gdl","platform":"linux/x","node_selector":{"gdl.dev/node-group":"gdl-api"},"tolerations":[{"key":"dedicated","operator":"Equal","value":"gdl-api","effect":"NoSchedule"}],"resources":{"default":{"requests":{"cpu":"50m","memory":"64Mi"},"limits":{"cpu":"1","memory":"512Mi"}}}}},"class":{"global":{"ready":{"front":1}},"model":{"ready":{"engine":1}}},"pool":{"global":{"class":"global","cluster":"kind"},"model-a":{"class":"model","cluster":"kind","home":"global","resources":{"segment":{"engine":{"limits":{"memory":"768Mi"}}}}},"model-b":{"class":"model","cluster":"kind","home":"global"}}}
+
+## scripts/kind-operator.sh
+[fleet]
+name = "api"
+
+[cluster.kind]
+context = "x"
+namespace = "x"
+region = "local"
+registry = "x/gdl"
+platform = "linux/x"
+operator = true
+
+[class.global.ready]
+front = 1
+
+[class.model.ready]
+engine = 1
+
+[pool.global]
+class = "global"
+cluster = "kind"
+
+[pool.model-a]
+class = "model"
+cluster = "kind"
+home = "global"
+
+{"fleet":{"name":"api"},"cluster":{"kind":{"context":"x","namespace":"x","region":"local","registry":"x/gdl","platform":"linux/x","operator":true}},"class":{"global":{"ready":{"front":1}},"model":{"ready":{"engine":1}}},"pool":{"global":{"class":"global","cluster":"kind"},"model-a":{"class":"model","cluster":"kind","home":"global"}}}
+
+## scripts/images-local.sh
+[fleet]
+name = "api"
+
+[cluster.local]
+context = "unused"
+namespace = "gdl-api"
+region = "local"
+registry = "x/gdl"
+platform = "x"
+
+[class.global.ready]
+front = 1
+
+[class.model.ready]
+engine = 1
+
+[pool.global]
+class = "global"
+cluster = "local"
+
+[pool.model]
+class = "model"
+cluster = "local"
+home = "global"
+
+{"fleet":{"name":"api"},"cluster":{"local":{"context":"unused","namespace":"gdl-api","region":"local","registry":"x/gdl","platform":"x"}},"class":{"global":{"ready":{"front":1}},"model":{"ready":{"engine":1}}},"pool":{"global":{"class":"global","cluster":"local"},"model":{"class":"model","cluster":"local","home":"global"}}}
+
+## tests/fleet.rs FLEET
+[class.global.ready]
+a = 2
+b = 2
+c = 2
+
+[class.global.requires]
+model_x = 1
+
+[class.model_x.ready]
+d = 1
+e = 4
+f = 2
+
+[pool.global-eu-west-1]
+class = "global"
+region = "eu-west-1"
+
+[pool.global-us-east-1]
+class = "global"
+region = "us-east-1"
+
+[pool.global-us-west-2]
+class = "global"
+region = "us-west-2"
+
+[pool.model-x-01-eu-west-1]
+class = "model_x"
+region = "eu-west-1"
+home = "global-eu-west-1"
+
+[pool.model-x-01-us-east-1]
+class = "model_x"
+region = "us-east-1"
+home = "global-us-east-1"
+
+[pool.model-x-01-us-west-2]
+class = "model_x"
+region = "us-west-2"
+home = "global-us-west-2"
+
+[pool.model-x-02-us-east-1]
+class = "model_x"
+region = "us-east-1"
+home = "global-us-east-1"
+
+[pool.model-x-02-us-east-1.ready]
+e = 8
+
+{"class":{"global":{"ready":{"a":2,"b":2,"c":2},"requires":{"model_x":1}},"model_x":{"ready":{"d":1,"e":4,"f":2}}},"pool":{"global-eu-west-1":{"class":"global","region":"eu-west-1"},"global-us-east-1":{"class":"global","region":"us-east-1"},"global-us-west-2":{"class":"global","region":"us-west-2"},"model-x-01-eu-west-1":{"class":"model_x","region":"eu-west-1","home":"global-eu-west-1"},"model-x-01-us-east-1":{"class":"model_x","region":"us-east-1","home":"global-us-east-1"},"model-x-01-us-west-2":{"class":"model_x","region":"us-west-2","home":"global-us-west-2"},"model-x-02-us-east-1":{"class":"model_x","region":"us-east-1","home":"global-us-east-1","ready":{"e":8}}}}
+
+## tests/fleet.rs SHARED
+[pool.global-ap-south-1]
+class = "global"
+region = "ap-south-1"
+
+[pool.global-eu-west-1]
+class = "global"
+region = "eu-west-1"
+
+[pool.global-us-east-1]
+class = "global"
+region = "us-east-1"
+
+[pool.model-x-shared]
+class = "model_x"
+region = "eu-west-1"
+parents = "global"
+
+{"pool":{"global-ap-south-1":{"class":"global","region":"ap-south-1"},"global-eu-west-1":{"class":"global","region":"eu-west-1"},"global-us-east-1":{"class":"global","region":"us-east-1"},"model-x-shared":{"class":"model_x","region":"eu-west-1","parents":"global"}}}
+
+## tests/fleet/clusters.rs CLUSTERED
+[fleet]
+name = "llm-proof"
+
+[cluster.euw1]
+context = "kind-euw1"
+namespace = "gdl-llm"
+region = "eu-west-1"
+
+[cluster.use1]
+context = "kind-use1"
+namespace = "gdl-llm"
+region = "us-east-1"
+registry = "registry.example/gdl"
+platform = "linux/amd64"
+pins_local = true
+operator = true
+
+[cluster.use1.service_account_annotations]
+"eks.amazonaws.com/role-arn" = "arn:aws:iam::0:role/gdl"
+
+[cluster.use1.secrets]
+sequence-key = "llm-sequence-key"
+
+[cluster.use1.env]
+SET_RECORDS_TABLE = "llm-pins-use1"
+
+[cluster.usw2]
+context = "kind-usw2"
+namespace = "gdl-llm"
+region = "us-west-2"
+
+[class.global.ready]
+a = 2
+b = 2
+c = 2
+
+[class.global.requires]
+model_x = 1
+
+[class.model_x.ready]
+d = 1
+e = 4
+f = 2
+
+[pool.global-eu-west-1]
+class = "global"
+cluster = "euw1"
+
+[pool.global-us-east-1]
+class = "global"
+cluster = "use1"
+
+[pool.global-us-west-2]
+class = "global"
+cluster = "usw2"
+
+[pool.model-x-01-eu-west-1]
+class = "model_x"
+cluster = "euw1"
+home = "global-eu-west-1"
+
+[pool.model-x-01-us-east-1]
+class = "model_x"
+cluster = "use1"
+region = "us-east-1"
+home = "global-us-east-1"
+
+[pool.model-x-01-us-west-2]
+class = "model_x"
+cluster = "usw2"
+home = "global-us-west-2"
+
+[pool.model-x-02-us-east-1]
+class = "model_x"
+cluster = "use1"
+home = "global-us-east-1"
+
+[pool.model-x-02-us-east-1.ready]
+e = 8
+
+{"fleet":{"name":"llm-proof"},"cluster":{"euw1":{"context":"kind-euw1","namespace":"gdl-llm","region":"eu-west-1"},"use1":{"context":"kind-use1","namespace":"gdl-llm","region":"us-east-1","registry":"registry.example/gdl","platform":"linux/amd64","pins_local":true,"service_account_annotations":{"eks.amazonaws.com/role-arn":"arn:aws:iam::0:role/gdl"},"secrets":{"sequence-key":"llm-sequence-key"},"env":{"SET_RECORDS_TABLE":"llm-pins-use1"},"operator":true},"usw2":{"context":"kind-usw2","namespace":"gdl-llm","region":"us-west-2"}},"class":{"global":{"ready":{"a":2,"b":2,"c":2},"requires":{"model_x":1}},"model_x":{"ready":{"d":1,"e":4,"f":2}}},"pool":{"global-eu-west-1":{"class":"global","cluster":"euw1"},"global-us-east-1":{"class":"global","cluster":"use1"},"global-us-west-2":{"class":"global","cluster":"usw2"},"model-x-01-eu-west-1":{"class":"model_x","cluster":"euw1","home":"global-eu-west-1"},"model-x-01-us-east-1":{"class":"model_x","cluster":"use1","region":"us-east-1","home":"global-us-east-1"},"model-x-01-us-west-2":{"class":"model_x","cluster":"usw2","home":"global-us-west-2"},"model-x-02-us-east-1":{"class":"model_x","cluster":"use1","home":"global-us-east-1","ready":{"e":8}}}}
+
+## tests/fleet/placement.rs PLACED
+[fleet]
+name = "llm"
+
+[cluster.use1]
+context = "kind-use1"
+namespace = "gdl-llm"
+region = "us-east-1"
+
+[cluster.use1.node_selector]
+"gdl.dev/node-group" = "demo"
+
+[[cluster.use1.tolerations]]
+key = "dedicated"
+operator = "Equal"
+value = "gdl"
+effect = "NoSchedule"
+
+[[cluster.use1.tolerations]]
+key = "spot"
+operator = "Exists"
+effect = "NoExecute"
+toleration_seconds = 30
+
+[cluster.use1.resources.default.requests]
+cpu = "250m"
+memory = "256Mi"
+
+[cluster.use1.resources.default.limits]
+cpu = "1"
+memory = "1Gi"
+
+[cluster.use1.resources.segment.e.requests]
+cpu = "1"
+
+[cluster.use1.resources.segment.e.limits]
+cpu = "2"
+memory = "2Gi"
+
+[cluster.use1.resources.segment.hub.limits]
+memory = "512Mi"
+
+[class.global.ready]
+a = 1
+b = 1
+c = 1
+
+[class.model_x.ready]
+d = 1
+e = 1
+f = 1
+
+[pool.global-us]
+class = "global"
+cluster = "use1"
+
+[pool.model-x-us]
+class = "model_x"
+cluster = "use1"
+home = "global-us"
+
+[pool.model-x-us.resources.segment.e.limits]
+memory = "4Gi"
+
+{"fleet":{"name":"llm"},"cluster":{"use1":{"context":"kind-use1","namespace":"gdl-llm","region":"us-east-1","node_selector":{"gdl.dev/node-group":"demo"},"tolerations":[{"key":"dedicated","operator":"Equal","value":"gdl","effect":"NoSchedule"},{"key":"spot","operator":"Exists","effect":"NoExecute","toleration_seconds":30}],"resources":{"default":{"requests":{"cpu":"250m","memory":"256Mi"},"limits":{"cpu":"1","memory":"1Gi"}},"segment":{"e":{"requests":{"cpu":"1"},"limits":{"cpu":"2","memory":"2Gi"}},"hub":{"limits":{"memory":"512Mi"}}}}}},"class":{"global":{"ready":{"a":1,"b":1,"c":1}},"model_x":{"ready":{"d":1,"e":1,"f":1}}},"pool":{"global-us":{"class":"global","cluster":"use1"},"model-x-us":{"class":"model_x","cluster":"use1","home":"global-us","resources":{"segment":{"e":{"limits":{"memory":"4Gi"}}}}}}}
+

@@ -11,7 +11,7 @@ use super::{fleet, laid, problems};
 
 /// One cluster that places its pods, a global pool and a model pool in it,
 /// and the model pool's `e` given more memory than the cluster gives `e`.
-const PLACED: &str = r#"
+pub(super) const PLACED: &str = r#"
 [fleet]
 name = "llm"
 
@@ -63,7 +63,11 @@ fn resources(cpu: (&str, &str), memory: (&str, &str)) -> Resources {
 fn a_cluster_places_every_pod_it_runs() {
     let fleet = fleet(PLACED);
     fleet.check(Some(&laid())).expect("a sound fleet");
-    let cluster = fleet.cluster("use1").expect("a cluster");
+    let cluster = fleet
+        .cluster("use1")
+        .expect("a cluster")
+        .kubernetes()
+        .expect("a Kubernetes cluster");
     assert_eq!(
         cluster.node_selector,
         BTreeMap::from([("gdl.dev/node-group".to_string(), "demo".to_string())])
@@ -124,7 +128,11 @@ class = "global"
 cluster = "use1"
 "#;
     let fleet = fleet(bare);
-    let cluster = fleet.cluster("use1").expect("a cluster");
+    let cluster = fleet
+        .cluster("use1")
+        .expect("a cluster")
+        .kubernetes()
+        .expect("a Kubernetes cluster");
     assert!(cluster.node_selector.is_empty() && cluster.tolerations.is_empty());
     assert_eq!(fleet.pod_resources("use1", Some("g"), Some("a")), None);
 }

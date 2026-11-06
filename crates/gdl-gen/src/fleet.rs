@@ -16,31 +16,34 @@ use crate::{Offers, Spec};
 /// what needs none.
 pub fn check_files(spec: &Path, fleet: Option<&Path>, target: &Path) -> Problems {
     let mut problems = Vec::new();
-    let layouts = match Spec::load(spec) {
+    let (loaded, layouts) = match Spec::load(spec) {
         Err(error) => {
             problems.extend(error.in_file(spec.display()).0);
-            None
+            (None, None)
         }
         Ok(loaded) => {
             let (checked, layouts) = crate::checked(&loaded, target, Offers::Read);
             if let Err(error) = checked {
                 problems.extend(error.in_file(spec.display()).0);
             }
-            Some(layouts)
+            (Some(loaded), Some(layouts))
         }
     };
     if let Some(fleet) = fleet {
-        problems.extend(check_fleet(fleet, layouts.as_ref()).0);
+        let with = loaded.as_ref().zip(layouts.as_ref());
+        problems.extend(check_fleet(fleet, with).0);
     }
     Problems(problems)
 }
 
-/// Every problem with the fleet file at `path`, against the spec's
-/// `layouts` when the spec reads, and with each DGD file it names, read
-/// beside it ([`crate::deployment::dgd`]), and one note when a pool's
+/// Every problem with the fleet file at `path`, against the spec and its
+/// `layouts` when the spec reads, with each DGD file it names, read
+/// beside it ([`crate::deployment::dgd`]), and with what the spec asks of
+/// its Slurm sites ([`crate::deployment::slurm`]), and one note when a pool's
 /// children could not be judged for want of its layout. The note comes only with a spec
 /// that has problems of its own, so it never fails a check alone.
-fn check_fleet(path: &Path, layouts: Option<&BTreeMap<String, Option<Layout>>>) -> Problems {
+fn check_fleet(path: &Path, spec: Option<(&Spec, &BTreeMap<String, Option<Layout>>)>) -> Problems {
+    let layouts = spec.map(|(_, layouts)| layouts);
     let located = |problems: Problems| problems.in_file(path.display());
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -57,6 +60,10 @@ fn check_fleet(path: &Path, layouts: Option<&BTreeMap<String, Option<Layout>>>) 
             problems
                 .0
                 .extend(crate::deployment::dgd::problems(&fleet, path));
+            let spec = spec.map(|(spec, _)| spec);
+            problems
+                .0
+                .extend(crate::deployment::slurm::problems(&fleet, spec));
             located(problems)
         }
     }

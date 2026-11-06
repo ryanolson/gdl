@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use gdl_model::{Fleet, PoolSettings, Problem};
+use gdl_model::{Fleet, KubernetesCluster, PoolSettings, Problem};
 
 use super::images::{self, Digests, Image};
 use super::{Bundle, Dgds, Published, Sources, check_segment_name, io, pools, stdin_source};
@@ -30,7 +30,35 @@ mod relay;
 pub(super) use dynamodb::{LOCAL, PLACEHOLDER, TABLES};
 pub(super) use gdl_k8s::label_value;
 use objects::{Names, Pod, Segment};
+pub(super) use objects::{check_platform, check_registry};
 pub(super) use objects::{image, stream};
+
+/// Every Kubernetes cluster of `fleet`, by its name, in name order. The
+/// Kubernetes commands refuse a fleet with a Slurm site before they read
+/// its clusters ([`slurm_refused`]), so this passes over none they need.
+pub(super) fn kube_clusters(fleet: &Fleet) -> impl Iterator<Item = (&str, &KubernetesCluster)> {
+    fleet
+        .clusters()
+        .filter_map(|(name, cluster)| Some((name, cluster.kubernetes()?)))
+}
+
+/// The Kubernetes cluster that runs pool `pool`, by its name, as
+/// [`Fleet::cluster_of`] gives it.
+pub(super) fn kube_of<'a>(
+    fleet: &'a Fleet,
+    pool: &str,
+) -> Option<(&'a str, &'a KubernetesCluster)> {
+    let (name, cluster) = fleet.cluster_of(pool)?;
+    Some((name, cluster.kubernetes()?))
+}
+
+/// Why `command` refuses Slurm site `name`: it renders or runs Kubernetes
+/// clusters only, and no command renders or runs a Slurm site yet.
+pub(super) fn slurm_refused(name: &str, command: &str) -> String {
+    format!(
+        "`{name}` is a Slurm site: {command} only Kubernetes clusters, and no command renders or runs a Slurm site yet. Run the fleet's pools on Kubernetes clusters, or leave the site out of the fleet"
+    )
+}
 
 /// The objects of `fleet`'s pools, which run `spec`, by path from the
 /// output directory: `<cluster>/base.yaml`, `<cluster>/pools/<pool>.yaml`
@@ -377,7 +405,7 @@ impl Render<'_> {
             }
         }
         let fleet_name = self.fleet.name().expect("refusals::fleet requires a name");
-        for (name, cluster) in self.fleet.clusters() {
+        for (name, cluster) in kube_clusters(self.fleet) {
             let mut base = objects::base(fleet_name, name, cluster);
             // Under the operator, each pool has a PodMonitor of its own.
             if self.fleet.metrics().pod_monitor && !cluster.operator {
@@ -509,10 +537,8 @@ impl Render<'_> {
         hub_repository: &str,
         naming: &Naming<'_>,
     ) -> Result<(), Error> {
-        let (cluster_name, cluster) = self
-            .fleet
-            .cluster_of(&pool.name)
-            .expect("refusals::fleet requires every pool's cluster");
+        let (cluster_name, cluster) = kube_of(self.fleet, &pool.name)
+            .expect("refusals::fleet requires every pool's cluster, and refuses a Slurm site");
         let pod = Pod {
             fleet: self.fleet.name().expect("refusals::fleet requires a name"),
             pool,

@@ -1161,7 +1161,8 @@ fn a_segment_name_is_short_enough_for_its_hub_services() {
 /// as the table writes it.
 fn defaults() -> Vec<(&'static str, String)> {
     use gdl_model::{
-        Cluster, DirectoryBackend, HubTiming, PoolPolicy, PoolSettings, RequestRouter, WatchCaps,
+        DirectoryBackend, HubTiming, KubernetesCluster, PoolPolicy, PoolSettings, RequestRouter,
+        SlurmSite, WatchCaps,
     };
     let millis = |d: std::time::Duration| d.as_millis().to_string();
     let directory = match DirectoryBackend::DEFAULT {
@@ -1204,8 +1205,20 @@ fn defaults() -> Vec<(&'static str, String)> {
             PoolSettings::DEFAULT_REQUIRES.to_string(),
         ),
         (
-            "Cluster::DEFAULT_PINS_LOCAL",
-            Cluster::DEFAULT_PINS_LOCAL.to_string(),
+            "KubernetesCluster::DEFAULT_PINS_LOCAL",
+            KubernetesCluster::DEFAULT_PINS_LOCAL.to_string(),
+        ),
+        (
+            "SlurmSite::DEFAULT_BASE_IMAGE",
+            format!("{:?}", SlurmSite::DEFAULT_BASE_IMAGE),
+        ),
+        (
+            "SlurmSite::DEFAULT_SIGNAL_LEAD_S",
+            SlurmSite::DEFAULT_SIGNAL_LEAD_S.to_string(),
+        ),
+        (
+            "SlurmSite::DEFAULT_NO_KILL",
+            SlurmSite::DEFAULT_NO_KILL.to_string(),
         ),
         ("DirectoryBackend::DEFAULT", format!("{directory:?}")),
         (

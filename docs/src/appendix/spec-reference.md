@@ -137,6 +137,7 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 | Key | Meaning | Default |
 |---|---|---|
 | `[fleet] name` | the fleet's name, which labels the objects it deploys | none |
+| `[cluster.<name>] kind` | which kind of cluster runs the pools: `"kubernetes"` or `"slurm"`. Each kind takes only its own keys, below, and refuses the other kind's by name. A Kubernetes cluster is written without it | `"kubernetes"` |
 | `[cluster.<name>] context` | the kube context that reaches the cluster, not empty | required |
 | `[cluster.<name>] namespace` | the namespace the fleet's objects go in | required |
 | `[cluster.<name>] region` | the region of every pool in the cluster | required |
@@ -151,6 +152,17 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 | `[cluster.<name>] tolerations` | the taints every pod of the cluster tolerates, each `{ key, operator, value, effect, toleration_seconds }` as Kubernetes reads one | none |
 | `[cluster.<name>.resources.default]` | every pod's `requests` and `limits`, each `{ cpu, memory }` as Kubernetes quantities in quotes (`"250m"`, `"512Mi"`): all four. Required when the cluster has `resources` | none: no pod gets resources |
 | `[cluster.<name>.resources.segment.<segment>]` | the requests and limits of the pods of `<segment>`, a segment of the spec, or `hub` for the hubs, over the default, field by field | the default |
+| `[cluster.<name>] region`, on a Slurm site | the region of every pool on the site | required |
+| `[cluster.<name>] srtctl`, on a Slurm site | the srt-slurm checkout that submits the jobs, an absolute path on the login node. Its `srtslurm.yaml` holds the account, the default partition, and the network interface, which stay out of the fleet file | required |
+| `[cluster.<name>] run_dir`, on a Slurm site | the directory of the rendered recipes and settings, an absolute path on a file system the login node and the compute nodes share | required |
+| `[cluster.<name>] registry`, on a Slurm site | the registry the site's nodes pull images from, as a Kubernetes cluster's | required: `check` refuses a site without it |
+| `[cluster.<name>] platform`, on a Slurm site | the platform of the site's nodes, as a Kubernetes cluster's. `check` refuses a `[deployment.codegen.<arch>]` table for its architecture, since no Slurm site's images are built with target features yet | required: `check` refuses a site without it |
+| `[cluster.<name>] base_image`, on a Slurm site | the image the site's segment images are built on, in place of `[deployment] base_image`: srt-slurm runs each command under `bash -c`, so it must hold bash. An image reference, as the spec's images are | `"debian:bookworm-slim"` |
+| `[cluster.<name>] hub_image`, on a Slurm site | the image the site's hub image is built on | its `base_image` |
+| `[cluster.<name>] network_interface`, on a Slurm site | the compute nodes' interface for traffic between nodes, which must match `srtslurm.yaml`'s: at most 15 characters, without `/`, `:`, or white space | `srtslurm.yaml`'s |
+| `[cluster.<name>] signal_lead_s`, on a Slurm site | how long before a job's time limit Slurm sends it SIGTERM, in seconds (`sbatch --signal=TERM@<lead>`). At most 65535, the longest lead `sbatch` takes. `check` refuses less than the longest stop wait of a pool on the site (its `stop_wait_ms`, 660 s by default) plus 120 s, naming both | `900` |
+| `[cluster.<name>] no_kill`, on a Slurm site | a job keeps running when one of its nodes fails (`sbatch --no-kill`), so its pool degrades rather than ends | `true` |
+| `[cluster.<name>] time_limit`, on a Slurm site | every job's time limit, in Slurm's format: minutes, `minutes:seconds`, `hours:minutes:seconds`, `days-hours`, `days-hours:minutes`, or `days-hours:minutes:seconds`, above 0, at most 365 days, and longer than `signal_lead_s` | the partition's |
 | `[pool.<name>.resources.segment.<segment>]` | the pool's own pods of `<segment>` or `hub`, over its cluster's, field by field. Refused when its cluster has no `resources` | its cluster's |
 | `[metrics] pod_monitor` | each cluster's objects include a PodMonitor of the fleet's pods, for the Prometheus operator. Compose does not read it | `false` |
 | `[class.<name>] ready` | segment to the usable instances a pool of the class needs to be ready | 1 per segment |
@@ -164,6 +176,10 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 | `[pool.<name>] ready` | overrides the class's quorum for a segment | the class's, else 1 |
 | `[pool.<name>.dgd] file` | the DynamoGraphDeployment (DGD) the pool owns, YAML or JSON, relative to the fleet file. Only for a pool of a cluster with `operator = true`. Compose refuses it ([A pool with a DGD](../guides/operator.md#a-pool-with-a-dgd)) | no DGD |
 | `[pool.<name>.dgd] components` | segment of the pool's class to the DGD component that runs it. A segment it does not name stays one of gdl's own Deployments | required with `file` |
+| `[pool.<name>] slurm` | how the pool's job runs on its Slurm site: `{ partition, time_limit, spare_nodes }`. Refused on a pool of any other cluster | none |
+| `[pool.<name>] slurm.partition` | the partition the pool's job runs in | `srtslurm.yaml`'s |
+| `[pool.<name>] slurm.time_limit` | the pool's job's time limit, over its site's, in the same format | its site's `time_limit` |
+| `[pool.<name>] slurm.spare_nodes` | nodes the pool's job holds beyond its segments, for segments that join it later inside the job | `0` |
 | `[directory] backend` | where every pool's hub publishes its record: `dynamodb`, the one value. Without the table, each child's hub reports to its parent's (`relay`) | no table |
 | `[directory] records_table`, `lists_table` | the DynamoDB tables' names: 3 to 255 letters, digits, `_`, `-`, and `.` | required |
 | `[directory] local` | the deployment runs one DynamoDB Local for the tables, which every hub uses. Compose requires it | `false` |
@@ -173,7 +189,8 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 - An explicit `requires` replaces the default whole. It can raise a count or name a subset of the classes sent to. A count of 0, and a class that the class does not send to, are refused.
 - A pool or region name is a DNS label: lowercase letters, digits, and `-`, starting with a letter, ending with a letter or digit, at most 63 characters. So are the fleet's name and a cluster's name. A cluster's `namespace` is a Kubernetes namespace, an RFC 1123 label: lowercase letters, digits, and `-`, starting and ending with a letter or digit, at most 63 characters.
 - A pool's `cluster` names a `[cluster.<name>]` table, and the pool takes the cluster's region. A pool may still write `region`, and then it must be the cluster's. A pool without a cluster writes its `region`.
-- No two clusters have the same `context` and `namespace`.
+- No two Kubernetes clusters have the same `context` and `namespace`.
+- A Slurm site (`kind = "slurm"`) is checked by `cargo gdl check`, and no command renders or runs one yet: `cargo gdl k8s`, `images`, `deploy`, and `down` refuse a fleet with a Slurm site, naming it. Compose reads only a site's region, as it reads a Kubernetes cluster's. A pool on a Slurm site takes no `dgd` table, which only dynamo's operator on Kubernetes runs, and no `resources`, since each instance takes its nodes whole. Every gdl job on a Slurm site takes its nodes whole, so a site has no key to share them: a pool's record carries only its hub's public port, and two jobs on one node would bind the same ports. A problem in a `[cluster.<name>]` table that does not read names the table and the key, with the table's line: the table is read whole, since its `kind` says which keys it takes.
 - The fleet file holds no secret value and no credential. A cluster's `secrets` holds only Kubernetes Secret names: lowercase letters, digits, `-`, and `.`, starting and ending with a letter or digit, at most 253 characters. `check` does not judge its keys against the spec's `[deployment.secrets]` tables. `cargo gdl k8s` refuses a key that no such table declares, and a secret that a pool's segment mounts and the pool's cluster does not map. A kube context's credentials stay in the kubeconfig. Do not put a secret value in `env`. An `env` key is letters, digits, and `_`, not starting with a digit.
 - A `service_account_annotations` key is a Kubernetes annotation key: an optional DNS subdomain and `/`, then at most 63 letters, digits, `-`, `_`, and `.`, starting and ending with a letter or digit.
 - A cluster's placement is checked as Kubernetes checks it. A `node_selector` key is a label key, as an annotation key is, and a value a label value: at most 63 letters, digits, `-`, `_`, and `.`, starting and ending with a letter or digit. `kubernetes.io/os` and `kubernetes.io/arch` are refused: the cluster's `platform` sets them. A toleration's `operator` is `Equal` or `Exists`, `Equal` when unsaid; `Exists` takes no `value`, and an empty `key` needs `Exists`. Its `effect` is `NoSchedule`, `PreferNoSchedule`, `NoExecute`, or unsaid, for every effect, and `toleration_seconds` goes with `NoExecute` only.
@@ -242,7 +259,10 @@ Every default of the spec's placement and deployment tables, the fleet file, and
 | spec `[binary] allocator` | `"system"` | `Allocator::DEFAULT` |
 | fleet `ready.<segment>`, `[pool] ready.<segment>` | `1` | `PoolSettings::DEFAULT_QUORUM` |
 | fleet `requires.<class>`, `[pool] requires.<class>`, for each class the pool's class sends to, when `requires` is unsaid | `1` | `PoolSettings::DEFAULT_REQUIRES` |
-| fleet `[cluster.<name>] pins_local` | `false` | `Cluster::DEFAULT_PINS_LOCAL` |
+| fleet `[cluster.<name>] pins_local` | `false` | `KubernetesCluster::DEFAULT_PINS_LOCAL` |
+| fleet `[cluster.<name>] base_image`, on a Slurm site | `"debian:bookworm-slim"` | `SlurmSite::DEFAULT_BASE_IMAGE` |
+| fleet `[cluster.<name>] signal_lead_s`, on a Slurm site | `900` | `SlurmSite::DEFAULT_SIGNAL_LEAD_S` |
+| fleet `[cluster.<name>] no_kill`, on a Slurm site | `true` | `SlurmSite::DEFAULT_NO_KILL` |
 | `[pool] directory` | `"relay"` | `DirectoryBackend::DEFAULT` |
 | `[pool] summary_ms` | `10000` | `PoolSettings::DEFAULT_SUMMARY` |
 | `[pool] summary_ms`, its least | `1000` | `PoolSettings::MIN_SUMMARY` |
