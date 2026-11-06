@@ -111,6 +111,12 @@ impl SlurmSite {
     /// year is far below every one, so no limit taken here wraps there.
     pub const MAX_TIME_LIMIT_S: u64 = 365 * 86_400;
 
+    /// `limit`, a time limit in Slurm's format, in seconds: `None` for one
+    /// that `check` refuses at `time_limit`.
+    pub fn time_limit_seconds(limit: &str) -> Option<u64> {
+        slurm_seconds(limit)
+    }
+
     fn signal_lead_default() -> u64 {
         Self::DEFAULT_SIGNAL_LEAD_S
     }

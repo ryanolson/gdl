@@ -79,7 +79,8 @@ fn down_stops_children_first_then_the_global_pool_then_the_directory() {
         "{order:?} in {lines:#?}"
     );
     // The global pool's segments' steps, not its hub's or a container's
-    // preparation, and the job that joined it get `SIGTERM`, once each;
+    // preparation, and the segment's step of the job that joined it, not
+    // its batch shell, get `SIGTERM`, once each;
     // its job and the joiner's are cancelled once its hub lists no
     // instance.
     let signalled: Vec<&Vec<String>> = lines
@@ -97,7 +98,7 @@ fn down_stops_children_first_then_the_global_pool_then_the_directory() {
             &vec![
                 "scancel".to_string(),
                 "--signal=TERM".into(),
-                joined.to_string()
+                format!("{joined}.1")
             ],
         ]
     );

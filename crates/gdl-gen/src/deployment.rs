@@ -412,7 +412,8 @@ mod tree;
 mod variables;
 
 pub use deploy::{
-    Deploy, Kube, Kubectl, Reply, Slurm, SlurmCli, SlurmCommand, Waits, deploy, down,
+    Deploy, JoinBy, Joiner, Kube, Kubectl, Launched, Reply, Slurm, SlurmCli, SlurmCommand, Waits,
+    deploy, down, join, leave,
 };
 pub use dgd::Dgds;
 pub use dgd::tunables_warnings;

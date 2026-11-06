@@ -25,6 +25,39 @@ pub trait Slurm {
     fn wait(&mut self, how_long: Duration) {
         std::thread::sleep(how_long);
     }
+
+    /// Start `command` and return without waiting for it: it outlives this
+    /// process, with what it prints appended to `log`. `cargo gdl join
+    /// --in-job` starts a step this way, whose `srun` lives as long as the
+    /// step. The handle tells whether it has exited. An error is only a
+    /// command that could not start.
+    ///
+    /// By default it starts nothing and says so: only `join --in-job`
+    /// starts a command, and a Slurm that is given to `deploy` or `down`
+    /// alone never needs to.
+    fn start(&mut self, command: &SlurmCommand, log: &Path) -> Result<Box<dyn Launched>, Error> {
+        Err(Error::new(format!(
+            "this Slurm starts no command that outlives `cargo gdl`: `{}`, logged to {}",
+            command.program,
+            log.display()
+        )))
+    }
+}
+
+/// A command [`Slurm::start`] started, which this process does not wait
+/// for.
+pub trait Launched {
+    /// Whether it has exited.
+    fn exited(&mut self) -> bool;
+}
+
+/// A process [`SlurmCli::start`] started.
+struct Started(std::process::Child);
+
+impl Launched for Started {
+    fn exited(&mut self) -> bool {
+        !matches!(self.0.try_wait(), Ok(None))
+    }
 }
 
 /// One command a Slurm site runs.
@@ -68,6 +101,38 @@ impl Slurm for SlurmCli {
             Some(Instant::now() + line.budget),
             &late,
         )
+    }
+
+    /// Start `line` in a process group of its own, so that a Ctrl-C to
+    /// `cargo gdl` does not reach it, with no stdin and its output appended
+    /// to `log`. Its budget does not apply: it runs as long as its step.
+    fn start(&mut self, line: &SlurmCommand, log: &Path) -> Result<Box<dyn Launched>, Error> {
+        use std::os::unix::process::CommandExt as _;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+            .map_err(|e| Error::new(format!("{}: {e}", log.display())))?;
+        let copy = file
+            .try_clone()
+            .map_err(|e| Error::new(format!("{}: {e}", log.display())))?;
+        let mut process = Command::new(&line.program);
+        process
+            .args(&line.args)
+            .env_remove("RUNNER_NAME")
+            .stdin(std::process::Stdio::null())
+            .stdout(file)
+            .stderr(copy)
+            .process_group(0);
+        if let Some(dir) = &line.dir {
+            process.current_dir(dir);
+        }
+        // Not waited for: it outlives this process, which reaps it only
+        // while it watches it.
+        process
+            .spawn()
+            .map(|child| Box::new(Started(child)) as Box<dyn Launched>)
+            .map_err(|e| Error::new(format!("starting `{}`: {e}", line.program)))
     }
 }
 
@@ -123,6 +188,97 @@ impl Lines {
                 ALL_PARTITIONS,
                 "--noheader",
                 "--format=%i|%j",
+            ],
+            budget,
+        )
+    }
+
+    /// The steps of job `id`: each one's id, name, and the nodes it runs
+    /// on.
+    pub(super) fn placed_steps(id: &str, budget: Duration) -> SlurmCommand {
+        slurm(
+            "squeue",
+            [
+                "--steps",
+                &format!("--jobs={id}"),
+                ALL_PARTITIONS,
+                "--noheader",
+                "--format=%i|%j|%N",
+            ],
+            budget,
+        )
+    }
+
+    /// When job `id` ends, and how long it has left, as `squeue` prints
+    /// them: `2026-11-06T16:00:00|7:59:59`, or `UNLIMITED` left for a job
+    /// with no time limit.
+    pub(super) fn end(id: &str, budget: Duration) -> SlurmCommand {
+        slurm(
+            "squeue",
+            [
+                &format!("--jobs={id}"),
+                ALL_PARTITIONS,
+                ALL_STATES,
+                "--noheader",
+                "--format=%e|%L",
+            ],
+            budget,
+        )
+    }
+
+    /// The IPv4 addresses of interface `interface` on node `node`, read
+    /// there by a step of job `id`, as srt-slurm reads a node's address.
+    pub(super) fn addresses(
+        id: &str,
+        node: &str,
+        interface: &str,
+        budget: Duration,
+    ) -> SlurmCommand {
+        slurm(
+            "srun",
+            [
+                &format!("--jobid={id}"),
+                "--overlap",
+                "--nodes=1",
+                "--ntasks=1",
+                &format!("--nodelist={node}"),
+                "--quiet",
+                "ip",
+                "-4",
+                "-o",
+                "addr",
+                "show",
+                "dev",
+                interface,
+            ],
+            budget,
+        )
+    }
+
+    /// A step of job `id` named `name` on node `node`, which runs `script`
+    /// under `bash -c` in `image`, with `mounts`, as srt-slurm starts a
+    /// service's process: Pyxis's flags, no entrypoint, no home mount. It
+    /// makes its step within `step.immediate`, or exits: Slurm applies
+    /// `--immediate` to a step's allocation too, and without it `srun`
+    /// waits for a step with no bound.
+    pub(super) fn launch(step: &Launch<'_>, budget: Duration) -> SlurmCommand {
+        slurm(
+            "srun",
+            [
+                &format!("--jobid={}", step.job),
+                "--overlap",
+                &format!("--immediate={}", step.immediate.as_secs().max(1)),
+                "--nodes=1",
+                "--ntasks=1",
+                &format!("--nodelist={}", step.node),
+                &format!("--job-name={}", step.name),
+                &format!("--container-image={}", step.image),
+                "--no-container-entrypoint",
+                "--no-container-mount-home",
+                &format!("--container-mounts={}", step.mounts.join(",")),
+                "bash",
+                "-c",
+                step.script,
             ],
             budget,
         )
@@ -189,6 +345,18 @@ impl Lines {
         line.dir = Some(checkout.to_path_buf());
         line
     }
+}
+
+/// A step that [`Lines::launch`] starts in a running job.
+pub(super) struct Launch<'a> {
+    pub(super) job: &'a str,
+    pub(super) node: &'a str,
+    pub(super) name: &'a str,
+    pub(super) image: &'a str,
+    pub(super) mounts: &'a [String],
+    pub(super) script: &'a str,
+    /// How long it may take to make its step.
+    pub(super) immediate: Duration,
 }
 
 /// `program` with `args`, bounded by `budget`.

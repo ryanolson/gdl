@@ -1,6 +1,8 @@
 //! The Slurm site: a fleet's pools as jobs that srt-slurm submits, one per
 //! pool, beside the job of the directory's store (DynamoDB Local or etcd), reached through `srtctl`,
-//! `squeue`, `scancel`, `sacct`, and each hub's routes over `curl`. See
+//! `squeue`, `scancel`, `sacct`, and each hub's routes over `curl`. A running
+//! pool grows by joiners, jobs of their own or steps on its spare nodes
+//! (`join`), and shrinks as they leave (`leave`). See
 //! `docs/src/guides/slurm.md`.
 //!
 //! No state file: `squeue` lists the fleet's jobs by the comment each
@@ -30,11 +32,15 @@ use crate::{Error, Files};
 mod cli;
 mod hubs;
 mod jobs;
+mod join;
+mod leave;
+mod reservations;
 
+pub use cli::{Launched, Slurm, SlurmCli, SlurmCommand};
 use cli::{Lines, submitted};
-pub use cli::{Slurm, SlurmCli, SlurmCommand};
 use hubs::{Address, Hubs, Withdrawn};
 use jobs::{Job, Kind, Ran};
+pub use join::{JoinBy, Joiner};
 
 /// The pointer the directory's job writes in the fleet's directory: a link
 /// to its own file of the store's address.
@@ -69,6 +75,9 @@ pub(super) struct SlurmPlace<'s> {
     /// Whether `scancel` was found to filter a cancel by state in Slurm's
     /// controller ([`SlurmPlace::filters_in_controller`]).
     filters: bool,
+    /// What a stop said where it is given no `say`, such as that a
+    /// joiner's launch was abandoned, for [`Site::finish`] to say.
+    notes: Vec<String>,
 }
 
 /// The oldest Slurm whose `scancel --ctld --state=PENDING` has the
@@ -87,6 +96,11 @@ struct Home {
     /// `<run_dir>/<fleet>`.
     dir: PathBuf,
     reach: SlurmReach,
+    /// The compute nodes' interface for traffic between nodes, when the
+    /// site names it.
+    interface: Option<String>,
+    /// How long before a job's time limit Slurm sends it `SIGTERM`.
+    lead: u64,
 }
 
 #[derive(Default)]
@@ -159,6 +173,8 @@ impl<'s> SlurmPlace<'s> {
                 srtctl: PathBuf::from(&site.srtctl),
                 dir: Path::new(&site.run_dir).join(name),
                 reach: site.reach,
+                interface: site.network_interface.clone(),
+                lead: site.signal_lead_s,
             },
             waits,
             replace,
@@ -171,6 +187,7 @@ impl<'s> SlurmPlace<'s> {
             hubs: BTreeMap::new(),
             cancelled: 0,
             filters: false,
+            notes: Vec::new(),
         })
     }
 
@@ -771,7 +788,10 @@ impl<'s> SlurmPlace<'s> {
     /// runs, leave: its hub refuses a drain, so each of its segments' steps
     /// and each job that joined it gets `SIGTERM`, on which each instance
     /// retires and leaves; then wait until its hub lists no instance,
-    /// bounded by its stop grace and the drain wait.
+    /// bounded by its stop grace and the drain wait. The steps and the
+    /// joining jobs are read again on each turn of the wait, and each that
+    /// appears gets its signal then: a joiner's step can start after the
+    /// first read, from a launch that outlived its `cargo gdl join`.
     fn leave(
         &mut self,
         pool: &str,
@@ -780,37 +800,104 @@ impl<'s> SlurmPlace<'s> {
         say: &mut dyn FnMut(&str),
     ) -> Result<(), Error> {
         let what = format!("stopping pool `{pool}`");
-        // The steps and the joining jobs are read just before the signal.
-        // Each gets its own `scancel`, once: a second `SIGTERM` stops a gdl
-        // instance at once and cuts its drain, so a target is never sent
-        // one again, and one that ended before its signal is passed over.
-        let text = self.run(&Lines::steps(&job.id, self.waits.objects), &what)?;
+        let mut tried = Vec::new();
+        let mut first = BTreeMap::new();
+        self.signal_new(pool, job, &what, &mut tried, say)?;
+        let bound = Duration::from_secs(grace) + self.waits.drain;
+        let deadline = Instant::now() + bound;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let answer = self.hub(&self.home.name.clone()).instances(pool, left)?;
+            // An empty list says no instance is registered, not that no
+            // joiner is still starting. Read after the list, so that an
+            // instance registered since has a step here: every step must
+            // have had its signal, and no launch may still hold a node.
+            let outstanding = self.reserved(pool, job, &tried, &mut first, deadline, say)?;
+            let listed = match &answer {
+                Answer::Body(body) => serde_json::from_str::<Value>(body)
+                    .ok()
+                    .and_then(|body| body["instances"].as_array().map(Vec::len)),
+                _ => None,
+            };
+            if listed == Some(0) && outstanding.is_empty() {
+                say(&format!("stop: pool `{pool}`'s hub lists no instance"));
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                let last = match (&answer, listed) {
+                    (_, Some(count)) => format!("its hub still lists {count} instance(s)"),
+                    (Answer::NoHub(why) | Answer::Failed(why), _) => {
+                        format!("its hub does not answer: {}", why.trim())
+                    }
+                    _ => "its hub does not list its instances".to_string(),
+                };
+                let last = match outstanding.is_empty() {
+                    true => last,
+                    false => format!(
+                        "{last}, and joiners still start: {}",
+                        outstanding.join(", ")
+                    ),
+                };
+                return Err(Error::new(format!(
+                    "pool `{pool}` has no parent, and its instances did not leave within {} s, so job {} is not cancelled: {last}",
+                    bound.as_secs(),
+                    job.id
+                )));
+            }
+            std::thread::sleep(self.waits.interval);
+            self.signal_new(pool, job, &what, &mut tried, say)?;
+        }
+    }
+
+    /// The steps of pool `pool`'s job `job` that its stop signals, as Slurm
+    /// lists them now, each `<job>.<step>`: the job's segment steps, a
+    /// joiner's among them, and the segment steps of each job that joined
+    /// the pool and runs, never a batch shell. srt-slurm may still be
+    /// starting a joining job's segment, so each read lists them afresh.
+    fn targets(&mut self, pool: &str, job: &Job, what: &str) -> Result<Vec<String>, Error> {
+        let joining: Vec<(String, String)> = self
+            .list()?
+            .into_iter()
+            .filter(|join| {
+                join.kind == Kind::Join(pool.to_string()) && !join.pending() && !join.ending()
+            })
+            .filter_map(|join| Some((join.id.clone(), join.segment(&self.fleet)?.to_string())))
+            .collect();
+        let text = self.run(&Lines::steps(&job.id, self.waits.objects), what)?;
         let mut targets = jobs::segment_steps(&text);
-        targets.extend(
-            self.list()?
-                .into_iter()
-                .filter(|join| {
-                    join.kind == Kind::Join(pool.to_string()) && !join.pending() && !join.ending()
-                })
-                .map(|join| join.id),
-        );
+        for (join, segment) in &joining {
+            let text = self.run(&Lines::steps(join, self.waits.objects), what)?;
+            targets.extend(jobs::joining_steps(&text, segment));
+        }
+        Ok(targets)
+    }
+
+    /// Send `SIGTERM` to each segment step of `pool`'s job `job`, and each
+    /// job that joined it and runs, that is not in `tried`, and add it
+    /// there. Each gets its own `scancel`, once: a second `SIGTERM` stops a
+    /// gdl instance at once and cuts its drain, so a target is never sent
+    /// one again, and one that ended before its signal is passed over.
+    fn signal_new(
+        &mut self,
+        pool: &str,
+        job: &Job,
+        what: &str,
+        tried: &mut Vec<String>,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<(), Error> {
+        let mut targets = self.targets(pool, job, what)?;
+        targets.retain(|target| !tried.contains(target));
         let mut signalled = Vec::new();
         for target in &targets {
+            tried.push(target.clone());
             let line = Lines::terminate(&[target], self.waits.objects);
             let reply = self.slurm.run(&line)?;
             if reply.success {
                 signalled.push(target.as_str());
                 continue;
             }
-            // Ended meanwhile, or not: a step is read among its job's
-            // steps, a joiner among the fleet's jobs.
-            let still = match target.split_once('.') {
-                Some(_) => jobs::segment_steps(
-                    &self.run(&Lines::steps(&job.id, self.waits.objects), &what)?,
-                )
-                .contains(target),
-                None => self.list()?.iter().any(|join| &join.id == target),
-            };
+            // Ended meanwhile, or not: read the steps again.
+            let still = self.targets(pool, job, what)?.contains(target);
             if still {
                 return Err(Error::new(format!(
                     "{what}: `scancel {}` failed: {}",
@@ -825,37 +912,7 @@ impl<'s> SlurmPlace<'s> {
                 signalled.join(", ")
             ));
         }
-        let bound = Duration::from_secs(grace) + self.waits.drain;
-        let deadline = Instant::now() + bound;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            let answer = self.hub(&self.home.name.clone()).instances(pool, left)?;
-            let listed = match &answer {
-                Answer::Body(body) => serde_json::from_str::<Value>(body)
-                    .ok()
-                    .and_then(|body| body["instances"].as_array().map(Vec::len)),
-                _ => None,
-            };
-            if listed == Some(0) {
-                say(&format!("stop: pool `{pool}`'s hub lists no instance"));
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                let last = match (&answer, listed) {
-                    (_, Some(count)) => format!("its hub still lists {count} instance(s)"),
-                    (Answer::NoHub(why) | Answer::Failed(why), _) => {
-                        format!("its hub does not answer: {}", why.trim())
-                    }
-                    _ => "its hub does not list its instances".to_string(),
-                };
-                return Err(Error::new(format!(
-                    "pool `{pool}` has no parent, and its instances did not leave within {} s, so job {} is not cancelled: {last}",
-                    bound.as_secs(),
-                    job.id
-                )));
-            }
-            std::thread::sleep(self.waits.interval);
-        }
+        Ok(())
     }
 
     /// Refuse `what`, which cancels jobs that wait in the queue, unless
@@ -1227,7 +1284,9 @@ impl Site for SlurmPlace<'_> {
                         false => Some(job.id.as_str()),
                     };
                     if let Some(grace) = self.found.parentless.remove(*pool) {
-                        self.leave(pool, &job, grace, &mut |_| {})?;
+                        let mut notes = Vec::new();
+                        self.leave(pool, &job, grace, &mut |note| notes.push(note.to_string()))?;
+                        self.notes.extend(notes);
                     }
                     let joins = self.found.joins.remove(*pool).unwrap_or_default();
                     let ids: Vec<&str> = pool_job
@@ -1347,6 +1406,9 @@ impl Site for SlurmPlace<'_> {
     ) -> Result<(), Error> {
         if !self.home(place) {
             return Ok(());
+        }
+        for note in std::mem::take(&mut self.notes) {
+            say(&note);
         }
         match scope {
             Scope::Prune if self.cancelled > 0 => say(&format!(

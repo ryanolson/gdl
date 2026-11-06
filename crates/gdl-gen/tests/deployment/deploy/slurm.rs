@@ -27,16 +27,26 @@ mod down;
 mod gone;
 #[path = "slurm/hostnames.rs"]
 mod hostnames;
+#[path = "slurm/join.rs"]
+mod join;
+#[path = "slurm/latejob.rs"]
+mod latejob;
+#[path = "slurm/leave.rs"]
+mod leave;
 #[path = "slurm/monitoring.rs"]
 mod monitoring;
 #[path = "slurm/pending.rs"]
 mod pending;
 #[path = "slurm/reconcile.rs"]
 mod reconcile;
+#[path = "slurm/recovery.rs"]
+mod recovery;
 #[path = "slurm/scheduling.rs"]
 mod scheduling;
 #[path = "slurm/signalling.rs"]
 mod signalling;
+#[path = "slurm/starting.rs"]
+mod starting;
 #[path = "slurm/version.rs"]
 mod version;
 #[path = "slurm/visibility.rs"]
@@ -223,6 +233,12 @@ struct Job {
     terminated: bool,
     /// How many reads of its hub's `withdrawn` answered.
     withdrawn_reads: usize,
+    /// Its steps beyond the hub's and its first segment's, each `(id, name,
+    /// node)`: its spare nodes' placeholders, and the joiners started on
+    /// them.
+    steps: Vec<(String, String, String)>,
+    /// The index of its next step.
+    next_step: u64,
 }
 
 /// A Slurm in memory, with one srt-slurm checkout. Each command line it
@@ -254,6 +270,15 @@ struct Fake {
     holder: Option<u64>,
     /// What `scancel --version` prints.
     version: &'static str,
+    /// What `squeue --format=%e|%L` prints for a pool's job: its end, and
+    /// the time it has left.
+    end: &'static str,
+    /// What `ip -4 -o addr show` prints on each node.
+    ips: std::collections::BTreeMap<String, String>,
+    /// Each recipe submitted, as it was when submitted.
+    recipes: Vec<Value>,
+    /// Each command started and not waited for, and the log it appends to.
+    started: Vec<(gdl_gen::SlurmCommand, PathBuf)>,
 }
 
 impl Fake {
@@ -272,6 +297,10 @@ impl Fake {
             waits: Vec::new(),
             holder: None,
             version: "slurm 24.05.4\n",
+            end: "2026-11-06T16:00:00|7:59:59",
+            ips: std::collections::BTreeMap::new(),
+            recipes: Vec::new(),
+            started: Vec::new(),
         }
     }
 
@@ -376,8 +405,37 @@ impl Fake {
             comment,
             terminated: false,
             withdrawn_reads: 0,
+            steps: Vec::new(),
+            next_step: 3,
         });
+        // A spare node's placeholder is a step of its own, as srt-slurm runs
+        // it, on a node named for the job.
+        let spare = recipe_json["services"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|service| service["name"] == "spare")
+            .and_then(|service| service["nodes"].as_u64())
+            .unwrap_or(0);
+        for node in 0..spare {
+            let name = match spare {
+                1 => "service_spare".to_string(),
+                _ => format!("service_spare_spare-{id}-{node}"),
+            };
+            self.add_step(id, &name, &format!("spare-{id}-{node}"));
+        }
+        self.recipes.push(recipe_json);
         id
+    }
+
+    /// Add step `name` on `node` to job `id`: its id.
+    fn add_step(&mut self, id: u64, name: &str, node: &str) -> String {
+        let job = self.job(id);
+        let step = format!("{id}.{}", job.next_step);
+        job.next_step += 1;
+        job.steps
+            .push((step.clone(), name.to_string(), node.to_string()));
+        step
     }
 
     fn line(job: &Job) -> String {
@@ -418,13 +476,39 @@ impl Fake {
             ["--steps", jobs, "--all", "--noheader", "--format=%i|%j"] => {
                 let id = number(jobs.strip_prefix("--jobs=").expect("--jobs"));
                 let job = self.job(id);
-                let front = match job.name.as_str() {
-                    "gdl-api-global-us" => "front",
-                    _ => "engine",
+                let front = match job.name.split_once("-join-") {
+                    Some((_, segment)) => segment,
+                    None if job.name == "gdl-api-global-us" => "front",
+                    None => "engine",
                 };
-                gdl_gen::Reply::ok(format!(
+                let mut out = format!(
                     "{id}.0|service_hub\n{id}.1|service_{front}\n{id}.2|service_hub.container-prepare\n"
-                ))
+                );
+                for (step, name, _) in &job.steps {
+                    out.push_str(&format!("{step}|{name}\n"));
+                }
+                gdl_gen::Reply::ok(out)
+            }
+            ["--steps", jobs, "--all", "--noheader", "--format=%i|%j|%N"] => {
+                let id = number(jobs.strip_prefix("--jobs=").expect("--jobs"));
+                let job = self.job(id);
+                let mut out =
+                    format!("{id}.0|service_hub|node-{id}\n{id}.1|service_engine|node-{id}\n");
+                for (step, name, node) in &job.steps {
+                    out.push_str(&format!("{step}|{name}|{node}\n"));
+                }
+                gdl_gen::Reply::ok(out)
+            }
+            [
+                jobs,
+                "--all",
+                "--states=all",
+                "--noheader",
+                "--format=%e|%L",
+            ] => {
+                let id = number(jobs.strip_prefix("--jobs=").expect("--jobs"));
+                assert_eq!(self.job(id).state, "RUNNING", "the end of a job that runs");
+                gdl_gen::Reply::ok(format!("{}\n", self.end))
             }
             other => panic!("squeue {other:?}"),
         }
@@ -445,7 +529,18 @@ impl Fake {
             Some("--signal=TERM") => {
                 for target in &args[1..] {
                     let id = number(target.split('.').next().expect("a job"));
-                    self.job(id).terminated = true;
+                    let job = self.job(id);
+                    job.terminated = true;
+                    // A joiner leaves on the signal: a step started by
+                    // `join --in-job` ends, and a joining job, whose
+                    // segment is its terminal service, completes.
+                    job.steps.retain(|(step, name, _)| {
+                        !(name.starts_with("gdl-join-")
+                            && (step == target || !target.contains('.')))
+                    });
+                    if job.name.contains("-join-") {
+                        job.state = "COMPLETED";
+                    }
                 }
             }
             _ => {
@@ -573,6 +668,19 @@ impl gdl_gen::Slurm for Fake {
                 gdl_gen::Reply::ok(format!("{id}|{state}|1:0\n{id}.batch|{state}|1:0\n"))
             }
             "curl" => self.curl(&command.args),
+            "srun" if command.args.iter().any(|arg| arg == "ip") => {
+                let node = command
+                    .args
+                    .iter()
+                    .find_map(|arg| arg.strip_prefix("--nodelist="))
+                    .expect("a node");
+                match self.ips.get(node) {
+                    Some(said) => gdl_gen::Reply::ok(said.clone()),
+                    None => {
+                        gdl_gen::Reply::failed(format!("Device \"ib0\" does not exist on {node}\n"))
+                    }
+                }
+            }
             "srun" => {
                 let at = command
                     .args
@@ -584,6 +692,49 @@ impl gdl_gen::Slurm for Fake {
             other => panic!("{other} {:?}", command.args),
         })
     }
+
+    /// A joiner's `srun`, which the fake runs as a step of its job on its
+    /// node at once.
+    fn start(
+        &mut self,
+        command: &gdl_gen::SlurmCommand,
+        log: &Path,
+    ) -> Result<Box<dyn gdl_gen::Launched>, gdl_gen::Error> {
+        self.calls.borrow_mut().push(command.clone());
+        self.started.push((command.clone(), log.to_path_buf()));
+        assert_eq!(command.program, "srun", "{command:?}");
+        let flag = |name: &str| {
+            command
+                .args
+                .iter()
+                .find_map(|arg| arg.strip_prefix(name))
+                .unwrap_or_else(|| panic!("{name} in {command:?}"))
+                .to_string()
+        };
+        let id = number(&flag("--jobid="));
+        self.add_step(id, &flag("--job-name="), &flag("--nodelist="));
+        Ok(Box::new(Alive))
+    }
+}
+
+/// A launch that has not exited.
+pub(super) struct Alive;
+
+impl gdl_gen::Launched for Alive {
+    fn exited(&mut self) -> bool {
+        false
+    }
+}
+
+/// The holds that launches have on spare nodes, in the registry of the
+/// pool whose directory is `dir`: one line each, `<job> <node> <launch>
+/// <log>`.
+pub(super) fn holds(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("join.reservations"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 fn number(text: &str) -> u64 {
@@ -813,8 +964,10 @@ fn each_kind_of_site_refuses_the_other_kinds_flags() {
 }
 
 /// A job that fails while the deploy waits for health stops the deploy
-/// at once, naming the job, how Slurm says it ended, and where its logs
-/// are, long before the health wait would run out.
+/// at the first read that observes it, naming the job, how Slurm says it
+/// ended, and where its logs are: one listing of the fleet's jobs after the
+/// failure, and no hub's health read again. Asserted by the reads, not a
+/// clock, which a busy host stretches.
 #[test]
 fn a_job_that_fails_during_the_health_wait_stops_the_deploy_at_once() {
     let mirror = Mirror::new();
@@ -824,12 +977,14 @@ fn a_job_that_fails_during_the_health_wait_stops_the_deploy_at_once() {
     waits.health = Duration::from_secs(60);
     // The pool's job fails once the deploy first asks about it.
     slurm.hold.push("gdl-api-model-x-01".into());
-    let started = Instant::now();
     let mut said = Vec::new();
-    let error = {
+    let (error, failed) = {
         let mut slurm_ref = Failing {
             fake: &mut slurm,
             pool: "model-x-01",
+            failed: false,
+            listings: 0,
+            health: 0,
         };
         let how = gdl_gen::Deploy {
             spec: site.files.spec.clone(),
@@ -848,16 +1003,18 @@ fn a_job_that_fails_during_the_health_wait_stops_the_deploy_at_once() {
             fail: false,
         };
         let mut kube = Kube::new(&log);
-        gdl_gen::deploy(&how, &mut docker, &mut kube, &mut slurm_ref, &mut |step| {
+        let error = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut slurm_ref, &mut |step| {
             said.push(step.to_string())
         })
         .expect_err("the job failed")
-        .to_string()
+        .to_string();
+        assert!(slurm_ref.failed, "the job failed");
+        (error, (slurm_ref.listings, slurm_ref.health))
     };
-    assert!(
-        started.elapsed() < Duration::from_secs(20),
-        "{:?}",
-        started.elapsed()
+    assert_eq!(
+        failed,
+        (1, 0),
+        "the fleet's jobs listed, and hubs' health read, after the failure"
     );
     for named in [
         "pool `model-x-01`",
@@ -875,20 +1032,35 @@ fn a_job_that_fails_during_the_health_wait_stops_the_deploy_at_once() {
 struct Failing<'f> {
     fake: &'f mut Fake,
     pool: &'static str,
+    /// Whether the job has failed.
+    failed: bool,
+    /// How many times the fleet's jobs were listed, and a hub's health
+    /// read, after the failure.
+    listings: usize,
+    health: usize,
 }
 
 impl gdl_gen::Slurm for Failing<'_> {
     fn run(&mut self, command: &gdl_gen::SlurmCommand) -> Result<gdl_gen::Reply, gdl_gen::Error> {
         let name = format!("gdl-api-{}", self.pool);
-        if command.program == "curl"
+        let health = command.program == "curl"
             && command
                 .args
                 .last()
-                .is_some_and(|url| url.ends_with("/health"))
-            && let Some(job) = self.fake.jobs.iter_mut().find(|job| job.name == name)
-        {
+                .is_some_and(|url| url.ends_with("/health"));
+        if self.failed {
+            self.listings += usize::from(
+                command.program == "squeue"
+                    && command.args.first().is_some_and(|arg| arg == "--me"),
+            );
+            self.health += usize::from(health);
+        } else if health && let Some(job) = self.fake.jobs.iter_mut().find(|job| job.name == name) {
             job.state = "FAILED";
+            self.failed = true;
         }
         gdl_gen::Slurm::run(self.fake, command)
     }
 }
+
+#[path = "slurm/empty.rs"]
+mod empty;

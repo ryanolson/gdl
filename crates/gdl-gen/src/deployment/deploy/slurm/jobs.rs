@@ -102,6 +102,17 @@ impl Job {
         live(&self.state)
     }
 
+    /// The segment it runs, for a job that joins a pool of fleet `fleet`:
+    /// its name is `gdl-<fleet>-<pool>-join-<segment>`.
+    pub(super) fn segment(&self, fleet: &str) -> Option<&str> {
+        let Kind::Join(pool) = &self.kind else {
+            return None;
+        };
+        self.name
+            .strip_prefix(&format!("gdl-{fleet}-{pool}-join-"))
+            .filter(|segment| !segment.is_empty())
+    }
+
     /// Whether it waits in Slurm's queue: its processes have not started.
     pub(super) fn pending(&self) -> bool {
         self.state == "PENDING"
@@ -202,17 +213,152 @@ impl Ran {
 /// --steps` printed, one per line as `id|name`: srt-slurm names each
 /// service's step `service_<service>`, or `service_<service>_<node>` for
 /// one instance of several, where a node's name may hold dots, and the
-/// hub's `service_hub`. A step that prepares a container,
+/// hub's `service_hub`; `cargo gdl join --in-job` names each of its steps
+/// `gdl-join-<segment>+<launch>` ([`JOIN_STEP`]). A step that prepares a
+/// container,
 /// `<step>.container-prepare`, is passed over.
 pub(super) fn segment_steps(text: &str) -> Vec<String> {
     text.lines()
         .filter_map(|line| line.trim().split_once('|'))
         .filter(|(_, name)| {
-            name.starts_with("service_")
+            (name.starts_with("service_") || name.starts_with(JOIN_STEP))
                 && *name != "service_hub"
                 && !name.ends_with(".container-prepare")
         })
         .map(|(id, _)| id.to_string())
+        .collect()
+}
+
+/// The steps of a joining job that run its segment `segment`, from what
+/// `squeue --steps` printed, one per line as `id|name`: srt-slurm names
+/// them `service_<segment>`, or `service_<segment>_<node>` for one of
+/// several. Its `resolve` step is not one: it ends with the job, and a
+/// `SIGTERM` before it has written its file would fail the job.
+pub(super) fn joining_steps(text: &str, segment: &str) -> Vec<String> {
+    let one = format!("service_{segment}");
+    let several = format!("service_{segment}_");
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.trim().split('|');
+            Some((fields.next()?, fields.next()?))
+        })
+        .filter(|(_, name)| {
+            (*name == one || name.starts_with(&several)) && !name.ends_with(".container-prepare")
+        })
+        .map(|(id, _)| id.to_string())
+        .collect()
+}
+
+/// The start of the name of each step that `cargo gdl join --in-job`
+/// starts in a pool's job, `gdl-join-<segment>+<launch>`: the segment, and
+/// the launch that started it, which owns it and the file that holds its
+/// node while it starts. A segment's name never holds `+`. srt-slurm
+/// names its own steps `service_<service>`.
+pub(super) const JOIN_STEP: &str = "gdl-join-";
+
+/// One step of a job, as `squeue --steps --format=%i|%j|%N` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Step {
+    /// `<job>.<step>`.
+    pub(super) id: String,
+    pub(super) name: String,
+    /// The nodes it runs on, as Slurm writes a node list.
+    pub(super) nodes: String,
+}
+
+impl Step {
+    /// The steps in what `squeue` printed, one per line as `id|name|nodes`.
+    pub(super) fn list(text: &str) -> Vec<Step> {
+        text.lines()
+            .filter_map(|line| {
+                let mut fields = line.trim().splitn(3, '|');
+                let (id, name, nodes) = (fields.next()?, fields.next()?, fields.next()?);
+                (!id.is_empty()).then(|| Step {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    nodes: nodes.trim().to_string(),
+                })
+            })
+            .collect()
+    }
+
+    /// Whether it holds a spare node of a pool's job: srt-slurm's
+    /// `service_spare`, or `service_spare_<node>` for one of several.
+    pub(super) fn spare(&self) -> bool {
+        (self.name == "service_spare" || self.name.starts_with("service_spare_"))
+            && !self.name.ends_with(".container-prepare")
+    }
+
+    /// The segment it runs, when `cargo gdl join --in-job` started it.
+    pub(super) fn joined(&self) -> Option<&str> {
+        self.joiner().map(|(segment, _)| segment)
+    }
+
+    /// The launch that started it, when `cargo gdl join --in-job` did.
+    pub(super) fn launch(&self) -> Option<&str> {
+        self.joiner().map(|(_, launch)| launch)
+    }
+
+    /// Its segment and its launch, from `gdl-join-<segment>+<launch>`.
+    fn joiner(&self) -> Option<(&str, &str)> {
+        self.name
+            .strip_prefix(JOIN_STEP)
+            .filter(|rest| !rest.ends_with(".container-prepare"))?
+            .split_once('+')
+            .filter(|(segment, launch)| !segment.is_empty() && !launch.is_empty())
+    }
+}
+
+/// How long a job has left, in seconds, from `%L` as `squeue` prints it:
+/// `[days-]hours:minutes:seconds`, `minutes:seconds`, or `seconds`.
+/// `None` for one it cannot read; `UNLIMITED` is read by the caller.
+pub(super) fn left(text: &str) -> Option<u64> {
+    let (days, clock) = match text.split_once('-') {
+        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
+        None => (0, text),
+    };
+    let mut seconds = 0u64;
+    let parts: Vec<&str> = clock.split(':').collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return None;
+    }
+    for part in parts {
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        seconds = seconds.checked_mul(60)?.checked_add(part.parse().ok()?)?;
+    }
+    days.checked_mul(86_400)?.checked_add(seconds)
+}
+
+/// Whether `text` is a time `sbatch --deadline` takes as it is, as `squeue
+/// %e` prints one: `YYYY-MM-DDTHH:MM:SS`.
+pub(super) fn timestamp(text: &str) -> bool {
+    let shape = "dddd-dd-ddTdd:dd:dd";
+    text.len() == shape.len()
+        && text
+            .bytes()
+            .zip(shape.bytes())
+            .all(|(byte, want)| match want {
+                b'd' => byte.is_ascii_digit(),
+                want => byte == want,
+            })
+}
+
+/// The IPv4 addresses in what `ip -4 -o addr show dev <interface>`
+/// printed: one line per address, `<n>: <name> inet <address>/<prefix>
+/// ...`.
+pub(super) fn addresses(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            words.find(|word| *word == "inet")?;
+            let address = words.next()?.split('/').next()?;
+            address
+                .parse::<std::net::Ipv4Addr>()
+                .ok()
+                .map(|address| address.to_string())
+        })
         .collect()
 }
 
@@ -232,4 +378,75 @@ pub(super) fn ended(text: &str, id: &str) -> Option<(String, String)> {
             (state, exit)
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `%L` in each form `squeue` prints it; anything else is unread.
+    #[test]
+    fn time_left_reads_each_form_squeue_prints() {
+        assert_eq!(left("1-02:03:04"), Some(86_400 + 2 * 3600 + 3 * 60 + 4));
+        assert_eq!(left("7:59:59"), Some(7 * 3600 + 59 * 60 + 59));
+        assert_eq!(left("20:00"), Some(1200));
+        assert_eq!(left("45"), Some(45));
+        for unread in [
+            "UNLIMITED",
+            "NOT_SET",
+            "INVALID",
+            "",
+            "1:2:3:4",
+            "-1:00",
+            "1-",
+            "a:00",
+        ] {
+            assert_eq!(left(unread), None, "{unread}");
+        }
+    }
+
+    /// Only `YYYY-MM-DDTHH:MM:SS` goes into a `#SBATCH --deadline` line.
+    #[test]
+    fn a_deadline_is_only_a_timestamp() {
+        assert!(timestamp("2026-11-06T16:00:00"));
+        for not in [
+            "N/A",
+            "Unknown",
+            "2026-11-06T16:00",
+            "2026-11-06T16:00:00\n#SBATCH --x",
+            "2026-11-06 16:00:00",
+        ] {
+            assert!(!timestamp(not), "{not:?}");
+        }
+    }
+
+    /// One IPv4 address per `inet` line of `ip -4 -o addr show`.
+    #[test]
+    fn addresses_are_read_from_each_inet_line() {
+        let text = "4: ib0    inet 10.1.0.7/16 brd 10.1.255.255 scope global ib0\\       valid_lft forever\n\
+                    4: ib0    inet 10.2.0.7/16 scope global secondary ib0:1\\       valid_lft forever\n";
+        assert_eq!(addresses(text), ["10.1.0.7", "10.2.0.7"]);
+        assert!(addresses("").is_empty());
+        assert!(addresses("Device \"ib0\" does not exist.\n").is_empty());
+    }
+
+    /// A spare node's placeholder, and a joiner's step, by their names;
+    /// srt-slurm's container preparation is neither.
+    #[test]
+    fn steps_are_told_apart_by_their_names() {
+        let steps = Step::list(
+            "9.0|service_hub|n0\n9.3|service_spare|n3\n9.4|service_spare_n4|n4\n9.5|gdl-join-engine+a1|n3\n9.6|service_spare.container-prepare|n3\n",
+        );
+        let spare: Vec<&str> = steps
+            .iter()
+            .filter(|s| s.spare())
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(spare, ["9.3", "9.4"]);
+        let joined: Vec<Option<&str>> = steps.iter().map(Step::joined).collect();
+        assert_eq!(joined, [None, None, None, Some("engine"), None]);
+        assert_eq!(steps[3].launch(), Some("a1"));
+        assert_eq!(Step::list("9.7|gdl-join-engine|n3\n")[0].joined(), None);
+        assert_eq!(steps[3].nodes, "n3");
+    }
 }

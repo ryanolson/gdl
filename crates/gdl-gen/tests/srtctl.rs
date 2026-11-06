@@ -75,18 +75,19 @@ fn spec_file(dir: &Path) -> PathBuf {
     file
 }
 
-/// A global pool and a pool under it on Slurm site `lab`.
-fn fleet_file(dir: &Path, srtctl: &Path, run_dir: &Path) -> PathBuf {
+/// A global pool and a pool under it on Slurm site `lab`, with `site`'s
+/// keys on the site and `model`'s on the pool under it.
+fn fleet_file(dir: &Path, srtctl: &Path, run_dir: &Path, site: &str, model: &str) -> PathBuf {
     let file = dir.join("fleet.toml");
     std::fs::write(
         &file,
         format!(
             "[fleet]\nname = \"api\"\n\n\
-             [cluster.lab]\nkind = \"slurm\"\nregion = \"slurm-lab\"\nsrtctl = {:?}\nrun_dir = {:?}\nregistry = \"registry.example/gdl\"\nplatform = \"linux/amd64\"\n\n\
+             [cluster.lab]\nkind = \"slurm\"\nregion = \"slurm-lab\"\nsrtctl = {:?}\nrun_dir = {:?}\nregistry = \"registry.example/gdl\"\nplatform = \"linux/amd64\"\n{site}\n\
              [directory]\nbackend = \"dynamodb\"\nrecords_table = \"gdl-pools\"\nlists_table = \"gdl-pool-lists\"\nlocal = true\ncluster = \"lab\"\n\n\
              [class.global]\nready = {{ front = 1 }}\n[class.model_x]\nready = {{ engine = 1 }}\n\n\
              [pool.global-us]\nclass = \"global\"\ncluster = \"lab\"\n\n\
-             [pool.model-x-01]\nclass = \"model_x\"\ncluster = \"lab\"\nparents = \"global\"\n",
+             [pool.model-x-01]\nclass = \"model_x\"\ncluster = \"lab\"\nparents = \"global\"\n{model}\n",
             srtctl.display().to_string(),
             run_dir.display().to_string()
         ),
@@ -191,7 +192,7 @@ while [ ! -e "$rep.code" ]; do
   sleep 0.05
 done
 cat "$rep.out"; cat "$rep.err" >&2; code="$(cat "$rep.code")"; rm -f "$rep.out" "$rep.err" "$rep.code"; exit "$code""#;
-    for name in ["srtctl", "squeue", "scancel", "sacct"] {
+    for name in ["srtctl", "squeue", "scancel", "sacct", "srun"] {
         script(&dir.join(name), &format!("#!/bin/sh\n{log}\n{ask}\n"));
     }
     script(
@@ -255,8 +256,14 @@ fn port_of(line: &str) -> u16 {
 struct Step {
     id: String,
     name: String,
+    /// The recipe's service it runs, or the joiner it is.
+    service: String,
+    /// The fake node it runs on.
+    node: String,
     process: Running,
     _stderr: Lines,
+    /// Its system listener's port, for a segment.
+    system: Option<u16>,
 }
 
 /// One job of the fake Slurm.
@@ -267,6 +274,8 @@ struct Job {
     steps: Vec<Step>,
     /// When it was cancelled: its steps are killed if they outlive [`WAIT`].
     cancelled: Option<Instant>,
+    /// Its terminal services: the job ends when one of them exits.
+    terminal: BTreeSet<String>,
 }
 
 /// The fake Slurm's jobs, and what it runs them with.
@@ -280,9 +289,21 @@ struct Cluster {
     hub: PathBuf,
     /// The `dir` pool directory.
     pools: PathBuf,
+    /// Where each job's logs go, `<logs>/<id>`, which srt-slurm mounts at
+    /// `/logs`.
+    logs: PathBuf,
     /// What went wrong in a launch, for the test to report.
     failures: Vec<String>,
+    /// The port of the last front's HTTP listener: the fake's nodes share
+    /// this host, so no front keeps the example's fixed port.
+    front: Option<u16>,
+    /// Each recipe submitted, as it was when submitted.
+    recipes: Vec<Value>,
 }
+
+/// When every pool's job ends, as the fake `squeue` says: its end, and the
+/// time it has left.
+const END: &str = "2099-01-01T00:00:00|7:59:59";
 
 type Shared = Arc<Mutex<Cluster>>;
 
@@ -368,6 +389,74 @@ fn answer(cluster: &Shared, program: &str, pwd: &str, args: &[String]) -> (Strin
                 }
             }
             (out, String::new(), 0)
+        }
+        ("squeue", ["--steps", jobs, "--all", "--noheader", "--format=%i|%j|%N"]) => {
+            let id: u64 = jobs
+                .strip_prefix("--jobs=")
+                .expect("--jobs")
+                .parse()
+                .expect("an id");
+            let job = held.jobs.get_mut(&id).expect("a job");
+            let mut out = String::new();
+            for step in &mut job.steps {
+                if step.process.0.try_wait().expect("a state").is_none() {
+                    out.push_str(&format!("{}|{}|{}\n", step.id, step.name, step.node));
+                }
+            }
+            (out, String::new(), 0)
+        }
+        (
+            "squeue",
+            [
+                jobs,
+                "--all",
+                "--states=all",
+                "--noheader",
+                "--format=%e|%L",
+            ],
+        ) => {
+            let id: u64 = jobs
+                .strip_prefix("--jobs=")
+                .expect("--jobs")
+                .parse()
+                .expect("an id");
+            assert_eq!(
+                held.jobs[&id].state, "RUNNING",
+                "the end of a job that runs"
+            );
+            (format!("{END}\n"), String::new(), 0)
+        }
+        // Every fake node has one address, on loopback.
+        ("srun", [.., "ip", "-4", "-o", "addr", "show", "dev", interface]) => (
+            format!(
+                "1: {interface}    inet 127.0.0.1/8 scope host {interface}\\       valid_lft forever preferred_lft forever\n"
+            ),
+            String::new(),
+            0,
+        ),
+        ("srun", [.., "bash", "-c", script]) => {
+            let flag = |name: &str| {
+                words
+                    .iter()
+                    .find_map(|word| word.strip_prefix(name))
+                    .unwrap_or_else(|| panic!("{name} in {words:?}"))
+                    .to_string()
+            };
+            let id: u64 = flag("--jobid=").parse().expect("an id");
+            let (name, node) = (flag("--job-name="), flag("--nodelist="));
+            let image = flag("--container-image=");
+            let script = script.to_string();
+            drop(held);
+            if let Err(why) = step(cluster, id, &name, &node, &image, &script) {
+                cluster
+                    .lock()
+                    .expect("the cluster")
+                    .failures
+                    .push(format!("step {name} of job {id}: {why}"));
+            }
+            // A real `srun` lives as long as its step; this one hands it
+            // to the fake and ends.
+            (String::new(), String::new(), 0)
         }
         ("sacct", [jobs, ..]) => {
             let id: u64 = jobs
@@ -456,6 +545,13 @@ fn submit(cluster: &Shared, recipe: &Path) -> u64 {
     held.next += 1;
     let name = recipe["name"].as_str().expect("a name").to_string();
     let hold = held.hold.contains(&name);
+    let terminal = recipe["services"]
+        .as_array()
+        .expect("services")
+        .iter()
+        .filter(|service| service["terminal"] == true)
+        .map(|service| service["name"].as_str().expect("a name").to_string())
+        .collect();
     held.jobs.insert(
         id,
         Job {
@@ -467,8 +563,10 @@ fn submit(cluster: &Shared, recipe: &Path) -> u64 {
             state: "PENDING".into(),
             steps: Vec::new(),
             cancelled: None,
+            terminal,
         },
     );
+    held.recipes.push(recipe.clone());
     drop(held);
     if !hold {
         let cluster = Arc::clone(cluster);
@@ -478,6 +576,9 @@ fn submit(cluster: &Shared, recipe: &Path) -> u64 {
                 held.failures.push(format!("job {id}: {why}"));
                 if let Some(job) = held.jobs.get_mut(&id) {
                     job.state = "FAILED".into();
+                    for step in &mut job.steps {
+                        let _ = step.process.0.kill();
+                    }
                 }
             }
         });
@@ -485,13 +586,27 @@ fn submit(cluster: &Shared, recipe: &Path) -> u64 {
     id
 }
 
+/// The port of the control listener of the hub that wrote its address in
+/// `dir`, a pool's directory: where the fake's joiners find it, since its
+/// ports are not the defaults that a joiner keeps.
+fn hub_control(dir: &Path) -> Option<u16> {
+    std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+        let name = entry.file_name().into_string().ok()?;
+        (name.starts_with("hub.") && name.ends_with(".address")).then_some(())?;
+        let text = std::fs::read_to_string(entry.path()).ok()?;
+        Some(port_of(text.split_whitespace().nth(1)?))
+    })
+}
+
 /// Run job `id` of `recipe` as srt-slurm runs it.
 fn launch(cluster: &Shared, id: u64, recipe: &Value) -> Result<(), String> {
-    let (bin, hub_bin, pools) = {
+    let (bin, hub_bin, pools, logs) = {
         let mut held = cluster.lock().expect("the cluster");
         held.jobs.get_mut(&id).expect("a job").state = "RUNNING".into();
-        (held.bin.clone(), held.hub.clone(), held.pools.clone())
+        let logs = held.logs.join(id.to_string());
+        (held.bin.clone(), held.hub.clone(), held.pools.clone(), logs)
     };
+    std::fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
     let mounts: BTreeMap<String, PathBuf> = recipe["extra_mount"]
         .as_array()
         .expect("mounts")
@@ -517,34 +632,90 @@ fn launch(cluster: &Shared, id: u64, recipe: &Value) -> Result<(), String> {
         return Ok(());
     }
     let settings = &mounts["/gdl"];
+    let joining = comment.contains(":join:");
     let (mut public, mut control) = (0, 0);
     let mut index = 0;
     for service in recipe["services"].as_array().expect("services") {
         let name = service["name"].as_str().expect("a name");
         let instances = service["nodes"].as_u64().unwrap_or(1);
+        let words: Vec<&str> = service["command"]
+            .as_array()
+            .expect("a command")
+            .iter()
+            .map(|word| word.as_str().expect("a word"))
+            .collect();
+        if name == "resolve" {
+            // `gdl-hub --resolve <class>/<pool> --write <file>`, as its
+            // script runs it, then a wait the fake does not need: the file
+            // is what the segment reads, and its probe.
+            let script = words.last().expect("a script");
+            let pool = script
+                .split_whitespace()
+                .skip_while(|word| *word != "--resolve")
+                .nth(1)
+                .expect("a pool");
+            let resolved = generated(&hub_bin)
+                .args(["--resolve", pool, "--write"])
+                .arg(logs.join("gdl-hub.toml"))
+                .env("GDL_POOL__DIRECTORY", "dir")
+                .env("GDL_POOL__DIR", &pools)
+                .stdin(Stdio::null())
+                .output()
+                .map_err(|e| format!("resolve: {e}"))?;
+            if !resolved.status.success() {
+                return Err(format!(
+                    "resolve: {}",
+                    String::from_utf8_lossy(&resolved.stderr).trim()
+                ));
+            }
+            continue;
+        }
         for node in 0..instances {
-            let words: Vec<&str> = service["command"]
-                .as_array()
-                .expect("a command")
-                .iter()
-                .map(|word| word.as_str().expect("a word"))
-                .collect();
-            let repository = service["container"]
-                .as_str()
-                .expect("an image")
-                .split_once('#')
-                .and_then(|(_, rest)| rest.split_once('@'))
-                .map(|(path, _)| path.rsplit('/').next().expect("a name"))
-                .expect("a repository");
+            let node_name = match name {
+                "spare" => format!("spare-{id}-{node}"),
+                _ => format!("node-{id}-{index}"),
+            };
+            let step_name = match instances {
+                1 => format!("service_{name}"),
+                _ => format!("service_{name}_{node_name}"),
+            };
+            if name == "spare" {
+                // A placeholder that holds its node for joiners.
+                let mut process = Running(
+                    Command::new("sleep")
+                        .arg("3600")
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                        .map_err(|e| format!("{name}: {e}"))?,
+                );
+                let stderr = process.stderr();
+                let mut held = cluster.lock().expect("the cluster");
+                let job = held.jobs.get_mut(&id).expect("a job");
+                job.steps.push(Step {
+                    id: format!("{id}.{index}"),
+                    name: step_name,
+                    service: name.to_string(),
+                    node: node_name,
+                    process,
+                    _stderr: stderr,
+                    system: None,
+                });
+                index += 1;
+                continue;
+            }
+            let repository = repository(service["container"].as_str().expect("an image"));
             let is_hub = name == "hub";
             let mut command = generated(match is_hub {
                 true => hub_bin.clone(),
                 false => bin.join(repository),
             });
             for word in &words[1..] {
-                match word.strip_prefix("/gdl/") {
-                    Some(file) => command.arg(settings.join(file)),
-                    None => command.arg(word),
+                match (word.strip_prefix("/gdl/"), word.strip_prefix("/logs/")) {
+                    (Some(file), _) => command.arg(settings.join(file)),
+                    (_, Some(file)) => command.arg(logs.join(file)),
+                    _ => command.arg(word),
                 };
             }
             for (key, value) in service["env"].as_object().expect("env") {
@@ -575,16 +746,29 @@ fn launch(cluster: &Shared, id: u64, recipe: &Value) -> Result<(), String> {
                     .env("GDL_HUB__PUBLIC_PORT", public.to_string())
                     .env("GDL_HUB__CONTROL_PORT", control.to_string())
                     .env("GDL_POOL__HUB", format!("127.0.0.1:{public}"));
+            } else if joining {
+                // Its hub's host and public port come from the file
+                // `resolve` wrote, as on a cluster; its control port is
+                // the default on a cluster, and the fake hub's own here.
+                let control = hub_control(settings).ok_or("no hub wrote its address")?;
+                command
+                    .env("GDL_HUB__CONTROL_PORT", control.to_string())
+                    .env("GDL_SYSTEM__PORT", "0");
             } else {
                 command
                     .env("GDL_HUB__PUBLIC_PORT", public.to_string())
                     .env("GDL_HUB__CONTROL_PORT", control.to_string())
                     .env("GDL_POOL__HUB", format!("127.0.0.1:{public}"))
-                    .env("GDL_SYSTEM__PORT", "0")
-                    // The api example's `Http` source listens on a fixed
-                    // port, which a second fleet on this host would take
-                    // too: a test running beside this one, for one.
-                    .env("GDL_FRONTEND__LISTEN", format!("127.0.0.1:{}", free_port()));
+                    .env("GDL_SYSTEM__PORT", "0");
+            }
+            if name == "front" {
+                // The api example's `Http` source listens on a fixed
+                // port, which a second fleet on this host would take
+                // too: a test running beside this one, for one. The test
+                // sends its requests to the last front's.
+                let port = free_port();
+                command.env("GDL_FRONTEND__LISTEN", format!("127.0.0.1:{port}"));
+                cluster.lock().expect("the cluster").front = Some(port);
             }
             let mut process = Running(
                 command
@@ -608,10 +792,6 @@ fn launch(cluster: &Shared, id: u64, recipe: &Value) -> Result<(), String> {
                 }
                 false => port_of(&stderr.find("system listener at", WAIT)),
             };
-            let step_name = match instances {
-                1 => format!("service_{name}"),
-                _ => format!("service_{name}_node{node}"),
-            };
             {
                 let mut held = cluster.lock().expect("the cluster");
                 let job = held.jobs.get_mut(&id).expect("a job");
@@ -621,29 +801,151 @@ fn launch(cluster: &Shared, id: u64, recipe: &Value) -> Result<(), String> {
                 job.steps.push(Step {
                     id: format!("{id}.{index}"),
                     name: step_name,
+                    service: name.to_string(),
+                    node: node_name,
                     process,
                     _stderr: stderr,
+                    system: (!is_hub).then_some(port),
                 });
             }
             index += 1;
-            let path = service["readiness"]["http"]["path"]
-                .as_str()
-                .expect("a probe");
-            let deadline = Instant::now() + WAIT;
-            while get(port, path).map(|(status, _)| status) != Some(200) {
-                if Instant::now() > deadline {
-                    return Err(format!("{name}[{node}] did not pass its probe {path}"));
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
+            probe(port, service, name, node)?;
         }
     }
     Ok(())
 }
 
-/// End jobs as Slurm would: a job ends when its hub exits, its terminal
-/// service, and a cancelled job once its steps have exited, or are
-/// killed past [`WAIT`].
+/// The repository of `image`, as Pyxis names it: the binary the fake runs
+/// for it.
+fn repository(image: &str) -> &str {
+    image
+        .split_once('#')
+        .and_then(|(_, rest)| rest.split_once('@'))
+        .map(|(path, _)| path.rsplit('/').next().expect("a name"))
+        .expect("a repository")
+}
+
+/// Wait until the instance of `service` on node `node`, whose listener is
+/// at `port`, passes the service's readiness probe.
+fn probe(
+    port: u16,
+    service: &Value,
+    name: &str,
+    node: impl std::fmt::Display,
+) -> Result<(), String> {
+    let path = service["readiness"]["http"]["path"]
+        .as_str()
+        .expect("a probe");
+    let deadline = Instant::now() + WAIT;
+    while get(port, path).map(|(status, _)| status) != Some(200) {
+        if Instant::now() > deadline {
+            return Err(format!("{name}[{node}] did not pass its probe {path}"));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
+}
+
+/// Start step `name` of job `id` on node `node`, which runs `script` as
+/// `cargo gdl join --in-job` writes it: its variables, its preamble, then
+/// its binary and its settings. The fake takes the variables and the
+/// binary, and runs the binary in the directory of the pool's settings,
+/// with the `dir` directory in place of the preamble's store.
+fn step(
+    cluster: &Shared,
+    id: u64,
+    name: &str,
+    node: &str,
+    image: &str,
+    script: &str,
+) -> Result<(), String> {
+    let (bin, pools, settings) = {
+        let held = cluster.lock().expect("the cluster");
+        let job = &held
+            .recipes
+            .iter()
+            .find(|recipe| recipe["name"] == held.jobs[&id].name.as_str());
+        let settings = job
+            .and_then(|recipe| recipe["extra_mount"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .find_map(|mount| mount.strip_suffix(":/gdl"))
+            .map(PathBuf::from)
+            .ok_or("the pool's settings")?;
+        (held.bin.clone(), held.pools.clone(), settings)
+    };
+    let unquote = |word: &str| -> String {
+        word.strip_prefix('\'')
+            .and_then(|word| word.strip_suffix('\''))
+            .unwrap_or(word)
+            .replace("'\\''", "'")
+    };
+    let mut env = Vec::new();
+    let mut words = Vec::new();
+    for part in script.split(" && ") {
+        if let Some((key, value)) = part
+            .strip_prefix("export ")
+            .and_then(|it| it.split_once('='))
+        {
+            env.push((key.to_string(), unquote(value)));
+        } else if let Some(exec) = part.strip_prefix("exec ") {
+            words = exec.split(' ').map(unquote).collect();
+        }
+    }
+    let [binary, file] = words.as_slice() else {
+        return Err(format!("no binary and settings in {script}"));
+    };
+    assert_eq!(
+        binary.as_str(),
+        "/usr/local/bin/segment",
+        "the image's binary"
+    );
+    let repository = repository(image);
+    let mut command = generated(bin.join(repository));
+    command.arg(settings.join(file.strip_prefix("/gdl/").expect("a settings file")));
+    command.envs(env);
+    for key in [
+        "GDL_POOL__RECORDS_TABLE",
+        "GDL_POOL__LISTS_TABLE",
+        "GDL_POOL__AWS_REGION",
+        "GDL_POOL__ENDPOINT",
+    ] {
+        command.env_remove(key);
+    }
+    command
+        .env("GDL_POOL__DIRECTORY", "dir")
+        .env("GDL_POOL__DIR", &pools)
+        .env("GDL_SYSTEM__PORT", "0");
+    let mut process = Running(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("{name}: {e}"))?,
+    );
+    let stderr = process.stderr();
+    let port = port_of(&stderr.find("system listener at", WAIT));
+    let mut held = cluster.lock().expect("the cluster");
+    let job = held.jobs.get_mut(&id).expect("a job");
+    let index = job.steps.len();
+    job.steps.push(Step {
+        id: format!("{id}.{index}"),
+        name: name.to_string(),
+        service: name.to_string(),
+        node: node.to_string(),
+        process,
+        _stderr: stderr,
+        system: Some(port),
+    });
+    Ok(())
+}
+
+/// End jobs as Slurm would: a job ends once every instance of its terminal
+/// services has exited, as a pool's job does when its hub exits and a
+/// joining job when its segments do, `COMPLETED` when each exited 0; and a cancelled job once its steps have exited, or
+/// are killed past [`WAIT`].
 fn reap(cluster: &Shared) {
     let mut held = cluster.lock().expect("the cluster");
     for job in held.jobs.values_mut() {
@@ -656,11 +958,20 @@ fn reap(cluster: &Shared) {
                 alive += 1;
             }
         }
-        let hub_gone = job
+        // srt-slurm ends the job once every instance of its terminal
+        // services has exited, with the worst exit code.
+        let terminal = &job.terminal;
+        let exits: Vec<Option<std::process::ExitStatus>> = job
             .steps
             .iter_mut()
-            .find(|step| step.name == "service_hub")
-            .is_some_and(|step| step.process.0.try_wait().expect("a state").is_some());
+            .filter(|step| terminal.contains(&step.service))
+            .map(|step| step.process.0.try_wait().expect("a state"))
+            .collect();
+        let ended = !exits.is_empty() && exits.iter().all(Option::is_some);
+        let clean = exits
+            .iter()
+            .flatten()
+            .all(std::process::ExitStatus::success);
         match job.cancelled {
             Some(_) if alive == 0 => job.state = "CANCELLED".into(),
             Some(at) if at.elapsed() > WAIT => {
@@ -669,11 +980,16 @@ fn reap(cluster: &Shared) {
                 }
             }
             Some(_) => {}
-            None if hub_gone => {
+            None if ended => {
+                // The others get srt-slurm's teardown: a signal, which the
+                // fake makes a kill.
                 for step in &mut job.steps {
                     let _ = step.process.0.kill();
                 }
-                job.state = "COMPLETED".into();
+                job.state = match clean {
+                    true => "COMPLETED".into(),
+                    false => "FAILED".into(),
+                };
             }
             None => {}
         }
@@ -846,6 +1162,8 @@ fn find(calls: &[String], from: usize, prefix: &str) -> usize {
         .unwrap_or_else(|| panic!("no call `{prefix}` after {from} in {calls:#?}"))
 }
 
+/// A Slurm site under the fake, with the api example built and its images'
+/// digests written: what each test deploys and drives.
 /// A fleet's scratch directories, its built programs, and the fake Slurm
 /// that runs them.
 struct Up {
@@ -865,23 +1183,31 @@ impl Up {
     /// Build the fleet's programs and start the fake Slurm: nothing is
     /// submitted yet.
     fn new() -> Self {
+        Self::with("", "", &["gdl-api-model-x-01-join-engine"])
+    }
+
+    /// As [`Up::new`], with `site`'s keys on the fleet's site and `model`'s
+    /// on its model pool, under a fake that holds jobs named in `hold` in
+    /// the queue.
+    fn with(site: &str, model: &str, hold: &[&str]) -> Self {
         let temp = tempfile::Builder::new()
             .prefix("gdl-srtctl-")
             .tempdir()
             .expect("scratch");
         let dir = temp.path();
-        let (srtctl, run_dir, pools, state, bins) = (
+        let (srtctl, run_dir, pools, state, bins, logs) = (
             dir.join("srt-slurm"),
             dir.join("runs"),
             dir.join("pools"),
             dir.join("state"),
             dir.join("fakes"),
+            dir.join("logs"),
         );
-        for made in [&srtctl, &run_dir, &pools] {
+        for made in [&srtctl, &run_dir, &pools, &logs] {
             std::fs::create_dir_all(made).expect("a directory");
         }
         let spec = spec_file(dir);
-        let fleet = fleet_file(dir, &srtctl, &run_dir);
+        let fleet = fleet_file(dir, &srtctl, &run_dir, site, model);
         let digests = dir.join("images.json");
         images(&spec, &fleet, &digests);
         let (bin, hub) = build(&spec, dir);
@@ -891,12 +1217,15 @@ impl Up {
             Cluster {
                 next: 1001,
                 jobs: BTreeMap::new(),
-                hold: BTreeSet::from(["gdl-api-model-x-01-join-engine".to_string()]),
+                hold: hold.iter().map(|name| name.to_string()).collect(),
                 srtctl,
                 bin,
                 hub,
                 pools,
+                logs,
                 failures: Vec::new(),
+                front: None,
+                recipes: Vec::new(),
             },
         );
         Self {
@@ -936,6 +1265,12 @@ impl Up {
             &self.state,
             &["down".as_ref(), "--fleet".as_ref(), self.fleet.as_os_str()],
         )
+    }
+
+    /// `cargo gdl` with `args`: whether it succeeded, and what it said.
+    fn gdl(&self, args: &[&str]) -> (bool, String) {
+        let args: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsStr::new).collect();
+        gdl(&self.bins, &self.state, &args)
     }
 }
 
@@ -1156,4 +1491,422 @@ fn down_withdraws_a_pool_whose_job_is_gone_through_its_parents_hub() {
     assert_eq!(up.fake.listed(), Vec::<String>::new());
     let held = up.fake.cluster.lock().expect("the cluster");
     assert!(held.failures.is_empty(), "{:?}", held.failures);
+}
+
+/// One streamed chat request of `words` words to the front's HTTP listener
+/// at `port`: `Err` with why unless it is answered 200, whole, with no
+/// error.
+fn chat(port: u16, words: usize) -> Result<(), String> {
+    let prompt: Vec<String> = (0..words).map(|word| format!("w{word}")).collect();
+    let body = format!("{{\"messages\":[\"{}\"]}}", prompt.join(" "));
+    let address = ([127, 0, 0, 1], port).into();
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+        .map_err(|e| format!("connect: {e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .map_err(|e| e.to_string())?;
+    write!(
+        stream,
+        "POST /v1/chat/completions HTTP/1.0\r\nHost: 127.0.0.1\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .map_err(|e| format!("send: {e}"))?;
+    let mut answer = String::new();
+    std::io::Read::read_to_string(&mut stream, &mut answer).map_err(|e| format!("read: {e}"))?;
+    let status = answer.split_whitespace().nth(1).unwrap_or_default();
+    let deltas = answer.matches("\"delta\"").count();
+    match (status, deltas, answer.contains("\"error\"")) {
+        ("200", n, false) if n == words => Ok(()),
+        _ => Err(answer),
+    }
+}
+
+/// Requests sent from threads of their own until stopped: how many were
+/// answered, and why each other one was not.
+struct Load {
+    stop: Arc<AtomicBool>,
+    workers: Vec<std::thread::JoinHandle<(usize, Vec<String>)>>,
+}
+
+impl Load {
+    fn start(port: u16, workers: usize) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let workers = (0..workers)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    let (mut answered, mut failed) = (0, Vec::new());
+                    while !stop.load(Ordering::Relaxed) {
+                        match chat(port, 4) {
+                            Ok(()) => answered += 1,
+                            Err(why) => failed.push(why),
+                        }
+                    }
+                    (answered, failed)
+                })
+            })
+            .collect();
+        Self { stop, workers }
+    }
+
+    fn stop(self) -> (usize, Vec<String>) {
+        self.stop.store(true, Ordering::Relaxed);
+        let (mut answered, mut failed) = (0, Vec::new());
+        for worker in self.workers {
+            let (count, why) = worker.join().expect("a worker");
+            answered += count;
+            failed.extend(why);
+        }
+        (answered, failed)
+    }
+}
+
+/// How many instances of `segment` the hub of the pool whose directory is
+/// `dir` lists, at the control address it wrote.
+fn listed(dir: &Path, segment: &str) -> Option<usize> {
+    let address = std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+        let name = entry.file_name().into_string().ok()?;
+        (name.starts_with("hub.") && name.ends_with(".address")).then_some(())?;
+        std::fs::read_to_string(entry.path()).ok()
+    })?;
+    let control = port_of(address.split_whitespace().nth(1)?);
+    let (status, body) = get(control, "/v1/ext/gdl-pool/instances")?;
+    (status == 200).then_some(())?;
+    let body: Value = serde_json::from_str(&body).ok()?;
+    Some(
+        body["instances"]
+            .as_array()?
+            .iter()
+            .filter(|instance| instance["segment"] == segment)
+            .count(),
+    )
+}
+
+/// Wait, bounded by [`WAIT`], until the pool's hub in `dir` lists `count`
+/// instances of `segment`.
+fn until_listed(dir: &Path, segment: &str, count: usize) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let now = listed(dir, segment);
+        if now == Some(count) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the hub lists {now:?} instances of `{segment}`, not {count}, after {WAIT:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// How many requests the engine whose system listener is at `port` has
+/// taken, by its metrics.
+fn served(port: u16) -> u64 {
+    let (status, scrape) = get(port, "/metrics").expect("its metrics");
+    assert_eq!(status, 200, "{scrape}");
+    scrape
+        .lines()
+        .filter(|line| {
+            line.starts_with("dynamo_component_requests_total{")
+                && line.contains("dynamo_endpoint=\"Engine\"")
+        })
+        .filter_map(|line| line.rsplit(' ').next()?.parse::<f64>().ok())
+        .sum::<f64>() as u64
+}
+
+/// The system ports of job `id`'s steps of `service`, which still run.
+fn systems(fake: &Fake, id: u64, service: &str) -> Vec<u16> {
+    let mut held = fake.cluster.lock().expect("the cluster");
+    let job = held.jobs.get_mut(&id).expect("a job");
+    job.steps
+        .iter_mut()
+        .filter(|step| step.service == service || step.service.starts_with(&format!("{service}+")))
+        .filter_map(|step| {
+            let running = step.process.0.try_wait().expect("a state").is_none();
+            step.system.filter(|_| running)
+        })
+        .collect()
+}
+
+/// The id after `prefix` in what `cargo gdl` said.
+fn said_id(said: &str, prefix: &str) -> String {
+    said.lines()
+        .find_map(|line| line.split_once(prefix))
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("`{prefix}` in {said}"))
+        .to_string()
+}
+
+/// The first check of growing a pool on Slurm: a new backend joins the
+/// running pool's working set by a job of its own, serves requests, and
+/// leaves on one signal with no failed request; a joiner in the pool's
+/// job is refused; and a joiner queued after its pool has gone fails at
+/// once. Real hubs and
+/// segments run under the fake Slurm. One test, since each deploy of real
+/// processes costs seconds: it runs for about a minute.
+#[test]
+fn a_new_backend_joins_a_running_pool_and_leaves_without_a_failed_request() {
+    let up = Up::with(
+        "network_interface = \"ib0\"",
+        "slurm = { spare_nodes = 1 }",
+        &[],
+    );
+    let fleet = up.fleet.to_str().expect("a path");
+    let (ok, said) = up.deploy();
+    assert!(ok, "{said}\n{}", up.fake.report(&up.fleet_dir));
+    let front = up
+        .fake
+        .cluster
+        .lock()
+        .expect("the cluster")
+        .front
+        .expect("a front");
+    let model = up.fleet_dir.join("model-x-01");
+    until_listed(&model, "engine", 1);
+    // The front serves once it has followed the model pool, which its
+    // pool's health need not wait for.
+    let deadline = Instant::now() + WAIT;
+    while let Err(why) = chat(front, 4) {
+        assert!(
+            Instant::now() < deadline,
+            "the front at {front} answers no request: {why}\n{}",
+            up.fake.report(&up.fleet_dir)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // A joining job of two engines, which ends by the pool's job's end.
+    let join = [
+        "join",
+        "--fleet",
+        fleet,
+        "--pool",
+        "model-x-01",
+        "--segment",
+        "engine",
+    ];
+    let (ok, said) = up.gdl(&[&join[..], &["--nodes", "2"]].concat());
+    assert!(ok, "{said}\n{}", up.fake.report(&up.fleet_dir));
+    let job = said_id(&said, "join: job ");
+    let recipe = up
+        .fake
+        .cluster
+        .lock()
+        .expect("the cluster")
+        .recipes
+        .last()
+        .cloned()
+        .expect("the joiner's recipe");
+    assert_eq!(recipe["name"], "gdl-api-model-x-01-join-engine");
+    let (end, _) = END.split_once('|').expect("an end");
+    assert_eq!(recipe["sbatch_directives"]["deadline"], end);
+    assert_eq!(recipe["sbatch_directives"]["time-min"], "00:25:00");
+    until_listed(&model, "engine", 3);
+    let id: u64 = job.parse().expect("a job id");
+    let joiners = systems(&up.fake, id, "engine");
+    assert_eq!(joiners.len(), 2);
+    let load = Load::start(front, 8);
+    std::thread::sleep(Duration::from_secs(2));
+    let (answered, failed) = load.stop();
+    assert!(failed.is_empty(), "{failed:#?}");
+    assert!(answered > 0);
+    for port in &joiners {
+        assert!(served(*port) > 0, "joiner at {port} served no request");
+    }
+
+    // It leaves under load, and its job completes.
+    let load = Load::start(front, 4);
+    let (ok, said) = up.gdl(&["leave", "--fleet", fleet, "--job", &job]);
+    assert!(ok, "{said}\n{}", up.fake.report(&up.fleet_dir));
+    assert!(
+        said.contains(&format!("leave: job {job} ended COMPLETED")),
+        "{said}"
+    );
+    until_listed(&model, "engine", 1);
+    let (answered, failed) = load.stop();
+    assert!(failed.is_empty(), "{} failed: {failed:#?}", failed.len());
+    assert!(answered > 0);
+    // One signal to each engine step, by its id, and none to the job.
+    let signals: Vec<String> = up
+        .fake
+        .calls()
+        .into_iter()
+        .filter(|call| call.starts_with(&format!("scancel --signal=TERM {job}")))
+        .collect();
+    assert_eq!(signals.len(), 2, "{signals:#?}");
+    assert!(
+        signals
+            .iter()
+            .all(|call| call.starts_with(&format!("scancel --signal=TERM {job}."))),
+        "{signals:#?}"
+    );
+
+    // A joiner in the pool's job is refused, before any Slurm command.
+    let before = up.fake.calls().len();
+    let (ok, said) = up.gdl(&[&join[..], &["--in-job"]].concat());
+    assert!(!ok, "{said}");
+    assert!(
+        said.contains("`cargo gdl join --in-job` is not available yet"),
+        "{said}"
+    );
+    assert_eq!(up.fake.calls().len(), before, "{:#?}", up.fake.calls());
+
+    // The fleet comes down.
+    let (ok, said) = up.gdl(&["down", "--fleet", fleet]);
+    assert!(ok, "{said}\n{}", up.fake.report(&up.fleet_dir));
+    assert_eq!(up.fake.listed(), Vec::<String>::new());
+
+    // A joiner that starts once its pool is gone fails at once: its
+    // `resolve` finds no record of the pool to join.
+    let late = submit(&up.fake.cluster, &model.join("join-engine.yaml"));
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let held = up.fake.cluster.lock().expect("the cluster");
+        if held.jobs[&late].state == "FAILED" {
+            let why = held
+                .failures
+                .iter()
+                .find(|failure| failure.starts_with(&format!("job {late}: resolve:")))
+                .expect("resolve's failure");
+            // The pool withdrew its record as it drained: a directory
+            // keeps a withdrawal, or drops the record.
+            assert!(
+                why.contains("withdrawn") || why.contains("not in the directory"),
+                "{why}"
+            );
+            assert_eq!(held.failures.len(), 1, "{:?}", held.failures);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "job {late} is {}",
+            held.jobs[&late].state
+        );
+        drop(held);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// `join` takes `--nodes` or `--in-job`, not both, and a count of at least
+/// 1; `leave` takes `--job` or `--step`, one of them; neither takes a spec,
+/// and no other command takes their flags. Each refusal comes before any
+/// command runs.
+#[test]
+fn join_and_leave_refuse_flags_they_do_not_take() {
+    let fleet = ["--fleet", "fleet.toml"];
+    let join = [&fleet[..], &["--pool", "p", "--segment", "s"]].concat();
+    for (args, said) in [
+        (
+            [&["join"][..], &join, &["--nodes", "2", "--in-job"]].concat(),
+            "give one",
+        ),
+        (
+            [&["join"][..], &join, &["--nodes", "0"]].concat(),
+            "at least 1, not `0`",
+        ),
+        ([&["leave"][..], &fleet].concat(), "give --job <id>"),
+        (
+            [&["leave"][..], &fleet, &["--job", "1", "--step", "1.2"]].concat(),
+            "give --job <id>",
+        ),
+        (
+            [&["join"][..], &join, &["--spec", "gdl.toml"]].concat(),
+            "usage:",
+        ),
+        ([&["down"][..], &fleet, &["--job", "1"]].concat(), "usage:"),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
+            .arg("gdl")
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("cargo gdl");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?}: {stderr}");
+        assert!(stderr.contains(said), "{args:?}: {said} in {stderr}");
+    }
+}
+
+/// A joiner on the pool job's spare node, at the node's address, serves,
+/// leaves under load with no failed request, and another takes the node;
+/// then `down` stops the pool with the joiner in it. Real hubs and
+/// segments under the fake Slurm: it runs for about a minute.
+#[test]
+#[ignore = "in-job launches are refused until the in-job launcher lands"]
+fn a_joiner_in_the_pools_job_serves_and_leaves_without_a_failed_request() {
+    let up = Up::with(
+        "network_interface = \"ib0\"",
+        "slurm = { spare_nodes = 1 }",
+        &[],
+    );
+    let fleet = up.fleet.to_str().expect("a path");
+    let (ok, said) = up.deploy();
+    assert!(ok, "{said}\n{}", up.fake.report(&up.fleet_dir));
+    let front = up
+        .fake
+        .cluster
+        .lock()
+        .expect("the cluster")
+        .front
+        .expect("a front");
+    let model = up.fleet_dir.join("model-x-01");
+    until_listed(&model, "engine", 1);
+    // The front serves once it has followed the model pool, which its
+    // pool's health need not wait for.
+    let deadline = Instant::now() + WAIT;
+    while let Err(why) = chat(front, 4) {
+        assert!(
+            Instant::now() < deadline,
+            "the front at {front} answers no request: {why}\n{}",
+            up.fake.report(&up.fleet_dir)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // A joining job of two engines, which ends by the pool's job's end.
+    let join = [
+        "join",
+        "--fleet",
+        fleet,
+        "--pool",
+        "model-x-01",
+        "--segment",
+        "engine",
+    ];
+
+    // A joiner on the pool job's spare node, at the node's address.
+    let in_job = [&join[..], &["--in-job"]].concat();
+    let (ok, said) = up.gdl(&in_job);
+    assert!(ok, "{said}\n{}", up.fake.report(&up.fleet_dir));
+    let step = said_id(&said, "join: step ");
+    assert!(said.contains("on node spare-1003-"), "{said}");
+    until_listed(&model, "engine", 2);
+    let pool_job = 1003;
+    let joiner = systems(&up.fake, pool_job, "gdl-join-engine");
+    assert_eq!(joiner.len(), 1);
+    let load = Load::start(front, 8);
+    std::thread::sleep(Duration::from_secs(2));
+    let (_, failed) = load.stop();
+    assert!(failed.is_empty(), "{failed:#?}");
+    assert!(
+        served(joiner[0]) > 0,
+        "the joiner in the job served no request"
+    );
+
+    // It leaves under load, and frees its node for another.
+    let load = Load::start(front, 4);
+    let (ok, said) = up.gdl(&["leave", "--fleet", fleet, "--step", &step]);
+    assert!(ok, "{said}\n{}", up.fake.report(&up.fleet_dir));
+    until_listed(&model, "engine", 1);
+    let (answered, failed) = load.stop();
+    assert!(failed.is_empty(), "{} failed: {failed:#?}", failed.len());
+    assert!(answered > 0);
+    let (ok, said) = up.gdl(&in_job);
+    assert!(ok, "{said}\n{}", up.fake.report(&up.fleet_dir));
+    assert_ne!(said_id(&said, "join: step "), step);
+    until_listed(&model, "engine", 2);
+
+    let (ok, said) = up.gdl(&["down", "--fleet", fleet]);
+    assert!(ok, "{said}\n{}", up.fake.report(&up.fleet_dir));
+    assert_eq!(up.fake.listed(), Vec::<String>::new());
 }

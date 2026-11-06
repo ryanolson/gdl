@@ -1,5 +1,6 @@
 //! `cargo gdl deploy` and `cargo gdl down`: a fleet applied to its
-//! clusters, and taken off them. See `docs/src/guides/kubernetes.md` and
+//! clusters, and taken off them; and `cargo gdl join` and `cargo gdl
+//! leave`, which grow and shrink a running pool on Slurm. See `docs/src/guides/kubernetes.md` and
 //! `docs/src/guides/slurm.md`.
 //!
 //! This module is the driver: it runs the steps in order and stops at the
@@ -34,7 +35,7 @@ use site::{
     Answer, Driven, Readiness, RenderInput, Running, Scope, Site, Stopping, Which, Withdrawal,
 };
 use slurm::SlurmPlace;
-pub use slurm::{Slurm, SlurmCli, SlurmCommand};
+pub use slurm::{JoinBy, Joiner, Launched, Slurm, SlurmCli, SlurmCommand};
 
 /// What `deploy` deploys, and where it builds.
 #[derive(Debug, Clone)]
@@ -586,6 +587,84 @@ fn healthy(site: &mut dyn Site, pools: &[(String, String)], waits: &Waits) -> Re
             return Err(Error::new(message));
         }
         std::thread::sleep(waits.interval);
+    }
+}
+
+/// Add instances of `segment` to running pool `pool` of the fleet in file
+/// `fleet`, on its Slurm site, `by` a job of their own or a step on a
+/// spare node of the pool's job; say each step to `say`. Returns what
+/// started, which [`leave`] takes.
+///
+/// A joining job is submitted from the pool's `join-<segment>.yaml`, which
+/// `deploy` wrote, with as many nodes as instances, and `sbatch
+/// --deadline` set to the end `squeue` gives for the pool's job, with a
+/// `--time-min` long enough to serve before it leaves: it never outlives
+/// its pool. Its `resolve` step finds the pool's hub when it starts, and
+/// fails the job at once when the pool is gone or draining.
+///
+/// A step on a spare node of the pool's job ([`JoinBy::Step`]) is refused
+/// for now, before any Slurm command runs: its `srun` would run detached
+/// on the login node, and a `down` that runs meanwhile can cancel the
+/// joiner it starts unsignalled. It returns with a launcher inside the
+/// pool's job; the code below the refusal stays, and is tested.
+///
+/// # Errors
+///
+/// A step on a spare node, refused; the fleet is not on Slurm; the pool
+/// has no running job, or the render no recipe that joins `segment` to
+/// it; or the pool's job ends too soon.
+pub fn join(
+    fleet: &Path,
+    pool: &str,
+    segment: &str,
+    by: JoinBy,
+    waits: &Waits,
+    slurm: &mut dyn Slurm,
+    say: &mut dyn FnMut(&str),
+) -> Result<Joiner, Error> {
+    if by == JoinBy::Step {
+        return Err(Error::new(
+            "`cargo gdl join --in-job` is not available yet: a joiner in the pool's job needs a launcher inside the job, which gdl does not have yet. A join by a job of its own works: run `cargo gdl join` without `--in-job`",
+        ));
+    }
+    let fleet = slurm_fleet(fleet, "join")?;
+    SlurmPlace::new(slurm, &fleet, *waits, false)?.join(&fleet, pool, segment, by, say)
+}
+
+/// Remove `joiner`, which [`join`] started in the fleet in file `fleet`:
+/// one `SIGTERM` to its steps, on which its instances retire, drain, and
+/// exit; then wait until Slurm no longer lists it. A joining job that
+/// still waits in the queue is cancelled, which needs Slurm 23.11.6 or
+/// later, as `down` does.
+///
+/// # Errors
+///
+/// The fleet is not on Slurm; `joiner` is not a joining job or a joiner's
+/// step of the fleet; or it did not end within its stop grace and the
+/// drain wait, or a job ended other than `COMPLETED`.
+pub fn leave(
+    fleet: &Path,
+    joiner: &Joiner,
+    waits: &Waits,
+    slurm: &mut dyn Slurm,
+    say: &mut dyn FnMut(&str),
+) -> Result<(), Error> {
+    let fleet = slurm_fleet(fleet, "leave")?;
+    SlurmPlace::new(slurm, &fleet, *waits, false)?.leave_joiner(joiner, say)
+}
+
+/// The fleet in file `path`, checked, refused unless it runs on Slurm:
+/// `command` is for a fleet on Slurm.
+fn slurm_fleet(path: &Path, command: &str) -> Result<Fleet, Error> {
+    let fleet = read_fleet(path)?;
+    fleet
+        .check(None)
+        .map_err(|errors| Error::from(gdl_model::Problems::from(errors)))?;
+    match Kind::of(&fleet)? {
+        Kind::Slurm => Ok(fleet),
+        Kind::Kubernetes => Err(Error::new(format!(
+            "`cargo gdl {command}` is for a fleet on Slurm, and this fleet has no Slurm site: a pool on Kubernetes grows and shrinks with its `ready` counts and `cargo gdl deploy`"
+        ))),
     }
 }
 

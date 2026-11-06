@@ -1,6 +1,6 @@
 # Deploy a fleet on Slurm
 
-A Slurm site runs each pool of a fleet as one job, which [srt-slurm](https://github.com/NVIDIA/srt-slurm) submits and runs. `cargo gdl slurm` writes the srt-slurm recipes of a fleet's Slurm sites, and the settings each job reads. It needs no Docker, no srt-slurm, and no cluster. `cargo gdl deploy`, run on a login node of the site, writes the recipes there, submits the jobs, and waits for each pool's health; `cargo gdl down` stops the pools again.
+A Slurm site runs each pool of a fleet as one job, which [srt-slurm](https://github.com/NVIDIA/srt-slurm) submits and runs. `cargo gdl slurm` writes the srt-slurm recipes of a fleet's Slurm sites, and the settings each job reads. It needs no Docker, no srt-slurm, and no cluster. `cargo gdl deploy`, run on a login node of the site, writes the recipes there, submits the jobs, and waits for each pool's health; `cargo gdl join` and `cargo gdl leave` grow and shrink a running pool ([Grow and shrink a running pool](#grow-and-shrink-a-running-pool)); `cargo gdl down` stops the pools again.
 
 The recipes are written for srt-slurm at commit `acfb4dcc`.
 
@@ -123,7 +123,7 @@ cargo gdl down --fleet fleet.toml
 
 1. It cancels each job that waits to join the pool (`PENDING`), with `scancel --state=PENDING --ctld`, so that the controller applies the filter as it cancels: the pool will have no hub to join. A joiner that starts meanwhile is left to the pool's drain, and cancelled with the pool.
 2. A pool with a parent drains: `POST /v1/ext/gdl-pool/drain` on its hub, then a wait until its hub's `/v1/ext/gdl-pool/withdrawn` says that the directory holds its withdrawal. Then `scancel` cancels its job, and the jobs that joined it.
-3. A pool with no parent, such as a global pool, cannot drain: its hub refuses a drain. `scancel --signal=TERM` goes to each of its segments' steps, not its hub's, and to each job that joined it, once, so that each instance retires and leaves: a second `SIGTERM` would stop an instance at once and cut its drain. Once its hub lists no instance on `/v1/ext/gdl-pool/instances`, `scancel` cancels its job.
+3. A pool with no parent, such as a global pool, cannot drain: its hub refuses a drain. `scancel --signal=TERM` goes to each of its segments' steps, not its hub's, and to the segment's steps of each job that joined it, not its batch shell, once each, so that each instance retires and leaves: a second `SIGTERM` would stop an instance at once and cut its drain. The steps and the joining jobs are read again while it waits, and one that starts meanwhile, such as a joining job's segment that srt-slurm starts late, gets its signal then. Once its hub lists no instance on `/v1/ext/gdl-pool/instances`, and a listing of the steps taken after that list shows each step signalled, `scancel` cancels its job. An empty list says that no instance is registered, not that none is still starting.
 4. A pool's job that still waits in the queue has no hub and no record, and one that is ending (`COMPLETING`) is being stopped: each is cancelled at once. A waiting job is cancelled only while it still waits: one that starts after it was listed is left running, undrained, and `down` stops; run it again to drain it.
 5. A pool whose job is gone, because it was killed, preempted, or lost with its hub's node, has a recipe in the fleet's directory but no job in `squeue`. Its record may still be in the directory, where its parents hold it as missing. If the pool has a parent, `down` withdraws the record once, through the hub of a running pool of its parent's class, its `home` first. The call is `POST /v1/ext/gdl-pool/children/<class>/<pool>/withdraw` on that hub's control port. Under DynamoDB and etcd, no parent's hub holds the record. So the parent's hub writes the withdrawal in the directory, at an epoch past the pool's last record, and answers 204 once the directory has stored it. A hub that holds no record of the pool answers 404, and the next pool of the class is asked: the pool's recipe is the last render, which may name another home than the one its job ran under. When none holds a record, for example after an earlier withdrawal, nothing is left to withdraw. A hub that still hears the pool, within its record's lease on the hub's own clock, refuses with 409 and how long until the lease passes: `down` says so, waits that long, at most one lease, lists the jobs again, and asks once more. A pool whose hub has just died is then withdrawn. A pool submitted again during the wait is not: `down` stops, as for a pool submitted again before the withdrawal. A pool still heard, such as one that another user's job runs, which `squeue --me` does not list, stops `down` before any pool above it stops, with one line that names the pool. Any other answer stops `down` the same way. If no parent's hub runs, `down` names the pool and goes on ([Limitations](../operations/limitations.md#a-pool-whose-job-is-gone-keeps-its-record-while-no-parents-hub-runs)).
 
@@ -139,7 +139,7 @@ A pool's recipe has no frontend (`frontend.type: none`) and these services, whic
 
 - `hub`, on the head node: `critical` and `terminal`, so the job ends when the hub exits. It is ready when its own `/v1/health` answers 200 on port 1337. It publishes `{node_ip}:1337` as its pool's hub, and drains its pool on the first `SIGTERM` (`GDL_POOL__DRAIN_ON_STOP=true`, for the pool's `stop_wait_ms`). Before it starts, it writes `{node_ip}:1337 {node_ip}:8337` to `hub.<job id>.address` in the pool's directory, where `cargo gdl deploy` and `down` read where to reach it; a hub that cannot write the file does not start. The job's teardown removes the file.
 - one service per segment of the pool's class, in name order, on nodes of its own: one instance per node, as many as the pool's `ready` count. Each finds its hub at `{head_ip}` and gives velo `{node_ip}:0`, a port the OS chooses. A segment with `ready` 0 has no service.
-- `spare`, when the pool has `slurm.spare_nodes`: a placeholder that holds those nodes for segments that join inside the job.
+- `spare`, when the pool has `slurm.spare_nodes`: a placeholder that holds those nodes for segments that join inside the job ([A step on a spare node](#a-step-on-a-spare-node)).
 
 Each segment's preamble sets `GLIBC_TUNABLES=glibc.malloc.hugetlb=0` when the job's environment has none, and keeps the user's value when it has one ([Binary](../appendix/spec-reference.md#binary)).
 
@@ -173,11 +173,56 @@ The store runs on the Slurm site of every Slurm pool, since a job reads the poin
 
 The directory's job takes no `signal`. Each pool withdraws its record from the directory as it drains, on the signal before its own time limit. Run the directory's job on a partition with a longer time limit than its pools'.
 
-## A segment that joins a running pool
+## Grow and shrink a running pool
 
-`join-<segment>.yaml` adds one instance of a segment to a running pool, as a job of its own. Its `resolve` service runs `gdl-hub --resolve <class>/<pool> --write /logs/gdl-hub.toml` when the job starts, not when it is queued, since a queued job may outlive the hub it was queued for. Then the segment starts with that file over its settings. It has no `GDL_HUB__HOST`, which would override the file. The segment is `terminal`, so the job ends when it leaves.
+A running pool takes more instances of a segment of its class as a job of their own, which waits in Slurm's queue like any job. `cargo gdl join` adds them, and prints the job's id; `cargo gdl leave` removes them. A step on a spare node of the pool's job is not available yet ([A step on a spare node](#a-step-on-a-spare-node)). Both run on a login node of the site, as `deploy` does, and read the recipes `deploy` wrote: they take no spec.
+
+```bash
+cargo gdl join --fleet fleet.toml --pool model-x-01 --segment engine --nodes 2   # prints the job's id
+cargo gdl leave --fleet fleet.toml --job <id>
+```
+
+Each joiner registers with the pool's hub as any instance does ([Joining](../concepts/lifecycle.md#joining)): once it is `ready`, the hub lists it on `/v1/ext/gdl-pool/instances`, and its peers and the pool's parents send it requests.
+
+```mermaid
+sequenceDiagram
+    participant U as cargo gdl join / leave (login node)
+    participant S as srtctl / Slurm
+    participant R as joining job: resolve
+    participant J as joiner: segment
+    participant H as pool's hub
+    U->>S: squeue: the pool's job runs, and when it ends
+    U->>S: srtctl apply join-engine.yaml, with --deadline and --time-min
+    Note over S: queued, then started
+    S->>R: gdl-hub --resolve model_x/model-x-01 --write
+    R-->>J: /logs/gdl-hub.toml: the hub's host and port
+    J->>H: register, loaded, ready
+    U->>S: leave: scancel --signal=TERM <job>
+    J->>H: retired, drained, gone
+    Note over S: the segment exits 0; the job ends COMPLETED
+```
+
+### A job of its own
+
+`join-<segment>.yaml` adds instances of a segment to a running pool, as a job of its own. Its `resolve` service runs `gdl-hub --resolve <class>/<pool> --write /logs/gdl-hub.toml` when the job starts, not when it is queued, since a queued job may outlive the hub it was queued for. Then the segment starts with that file over its settings. It has no `GDL_HUB__HOST`, which would override the file. The segment is `terminal`, so the job ends when it leaves. A pool that is gone, or draining, when the job starts has no hub to join: `resolve` exits 1 with one line, and the job fails at once.
 
 `resolve` waits once it has written the file. srt-slurm probes the file, then asks whether the process still runs: a `resolve` that exited between the two would fail the job. `resolve` is not `critical`: the job's `TERM` before its time limit ends its wait, and srt-slurm would take a critical service's end on a signal as a failure, and cut the segment's drain short. A `resolve` that fails before it writes the file still fails the job, through its probe.
+
+`cargo gdl join --pool <pool> --segment <segment> [--nodes <n>]` submits that recipe through `srtctl`, with `n` instances, one per node (1 when unsaid). It refuses a pool whose job does not run, or a segment the pool's class does not run, before it submits anything. A joiner never outlives its pool: `join` reads the pool's job's end and time left with `squeue -o %e|%L`, and submits the recipe with `sbatch --deadline=<that end>` and a `--time-min` that covers the joiner's leave, the longer of the site's `signal_lead_s` and the segment's stop grace, and 600 s of service. Slurm then shortens the joiner's time limit to end by the deadline, and starts it only while that leaves it its `--time-min`. A pool's job that ends sooner than that is refused, naming its end, and so is a joiner whose own time limit, its pool's `slurm.time_limit` or the site's, is shorter, which `sbatch` would refuse. A pool's job with no time limit takes a joiner with neither. These directives go in a copy of the recipe for this submission alone: `join-<segment>.yaml` stays as `deploy` wrote it, and its hash in the job's comment is the same. `join` prints the job's id, and returns once Slurm has it: the job may wait in the queue.
+
+### A step on a spare node
+
+`cargo gdl join --in-job` would start one instance as a step of the pool's own job, on one of the nodes that `slurm = { spare_nodes = <n> }` holds, with no wait in the queue. It is not available yet: it fails at once, before it runs any Slurm command, in one line that says to join by a job of its own. Such a step would be started by an `srun` on the login node, detached from `cargo gdl`, and the step exists only once that `srun` has made it. A `down` that runs meanwhile cannot be sure that every such launch has made its step and had its signal before it cancels the pool's job, and in review it could cancel a joiner unsignalled ([Limitations](../operations/limitations.md#cargo-gdl-join---in-job-is-not-available-yet)). A launcher inside the pool's job, which starts joiners on its spare nodes itself, will lift this. A pool's spare nodes are still held, by srt-slurm's placeholder.
+
+### Leave
+
+`cargo gdl leave --job <id>` removes a joining job. Each step of its segment gets one `scancel --signal=TERM <job>.<step>`, never the batch shell: each instance retires through its hub, drains, and exits 0, and the job ends `COMPLETED`. A second `SIGTERM` would stop an instance at once, so each step gets one. srt-slurm may still be starting the segment when the job runs, so `leave` reads the job's steps until the job ends, and signals each as it appears. It waits until Slurm no longer lists the job, bounded by the segment's stop grace and 60 s, and then reads how it ended from `sacct`: it stops with the state when the job ended other than `COMPLETED`, and when Slurm's accounting keeps no record of it within 60 s, since then nothing says the job completed. A joining job that still waits in the queue is cancelled with `scancel --state=PENDING --ctld`, which needs Slurm 23.11.6 or later, as `down` does; one that starts meanwhile gets the signal, and one that started and ended before the cancel reached it must have ended `CANCELLED` or `COMPLETED` by `sacct`.
+
+A retire through the hub alone (`POST /v1/ext/gdl-pool/instances/{id}/retire`) would not do: a retired instance holds after its drain until a signal ends it. `cargo gdl leave --step <job>.<step>` is for a joiner in a pool's job, which `join` does not start yet.
+
+`leave` refuses a pool's job and the directory's job, before it signals anything: `cargo gdl down` stops those.
+
+`down` stops a pool's joiners with it: it cancels each joining job that still waits, and a pool's drain reaches every running joiner. A pool with no parent cannot drain, so `down` signals each of its segments' steps, and the segment's steps of each joining job that runs ([Take the fleet down](#take-the-fleet-down)).
 
 ## Apply the recipes by hand
 

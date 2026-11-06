@@ -15,6 +15,8 @@
 //! cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--local] [--target-dir <dir>]
 //! cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--local] [--allow-pool-restart] [--images <images.json>] [--replace] [--target-dir <dir>]
 //! cargo gdl down --fleet <fleet.toml> [--spec <gdl.toml>] [--target-dir <dir>]
+//! cargo gdl join --fleet <fleet.toml> --pool <pool> --segment <segment> [--nodes <n> | --in-job]
+//! cargo gdl leave --fleet <fleet.toml> (--job <id> | --step <job>.<step>)
 //! cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]
 //! ```
 //!
@@ -98,7 +100,12 @@
 //! is unchanged, refuses a changed one unless `--replace`, which drains it
 //! and submits it again, and waits for each pool's health. `down` cancels
 //! each pool's job children first, after a drain, and the directory's job
-//! last.
+//! last. `join` adds instances of a segment to a running pool on Slurm, from
+//! the recipes `deploy` wrote: by a job of `--nodes` nodes (1 by default),
+//! submitted to end by the pool's job's end, whose id it prints. `--in-job`,
+//! a step on a spare node of the pool's job, is not available yet, and is
+//! refused before any Slurm command runs. `leave` removes one with a single `SIGTERM` and waits until it
+//! has ended, or cancels a joining job that still waits in the queue.
 //! `export` writes the generated crates as a `.tar.gz` with
 //! `build-all.sh`, to build each segment on its own. Programs are built in `--target-dir`, else `$CARGO_TARGET_DIR`,
 //! else `target` beside the spec or the crate.
@@ -122,6 +129,8 @@ const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <d
        cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--local] [--target-dir <dir>]
        cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--local] [--allow-pool-restart] [--images <images.json>] [--replace] [--target-dir <dir>]
        cargo gdl down --fleet <fleet.toml> [--spec <gdl.toml>] [--target-dir <dir>]
+       cargo gdl join --fleet <fleet.toml> --pool <pool> --segment <segment> [--nodes <n> | --in-job]
+       cargo gdl leave --fleet <fleet.toml> (--job <id> | --step <job>.<step>)
        cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]";
 
 enum Command {
@@ -163,6 +172,16 @@ enum Command {
     },
     Down {
         fleet: PathBuf,
+    },
+    Join {
+        fleet: PathBuf,
+        pool: String,
+        segment: String,
+        by: gdl_gen::JoinBy,
+    },
+    Leave {
+        fleet: PathBuf,
+        joiner: gdl_gen::Joiner,
     },
     Extract {
         krate: gdl_gen::Crate,
@@ -217,6 +236,9 @@ fn args() -> Result<Args, String> {
     let mut allow_pool_restart = false;
     let mut replace = false;
     let mut prepare_into = None;
+    // `join` and `leave`.
+    let (mut pool, mut segment, mut nodes, mut job, mut step) = (None, None, None, None, None);
+    let mut in_job = false;
     while let Some(arg) = args.next() {
         let mut value = || {
             args.next()
@@ -247,6 +269,12 @@ fn args() -> Result<Args, String> {
             Some("--replace") => replace = true,
             Some("--release") => release = true,
             Some("--prepare-into") => prepare_into = Some(value()?),
+            Some("--pool") => pool = Some(text(value()?, "--pool")?),
+            Some("--segment") => segment = Some(text(value()?, "--segment")?),
+            Some("--nodes") => nodes = Some(text(value()?, "--nodes")?),
+            Some("--in-job") => in_job = true,
+            Some("--job") => job = Some(text(value()?, "--job")?),
+            Some("--step") => step = Some(text(value()?, "--step")?),
             Some(other) if !other.starts_with("--") && krate.is_none() => {
                 krate = Some(other.to_string());
             }
@@ -326,6 +354,40 @@ fn args() -> Result<Args, String> {
         "down" => Command::Down {
             fleet: fleet.take().ok_or_else(|| USAGE.to_string())?,
         },
+        "join" => {
+            let by = match (nodes.take(), std::mem::take(&mut in_job)) {
+                (Some(_), true) => {
+                    return Err(format!(
+                        "join: --nodes adds a job of its own, and --in-job one step in the pool's job: give one\n{USAGE}"
+                    ));
+                }
+                (None, true) => gdl_gen::JoinBy::Step,
+                (Some(nodes), false) => gdl_gen::JoinBy::Job {
+                    nodes: nodes.parse().ok().filter(|nodes| *nodes > 0).ok_or_else(|| {
+                        format!("join: --nodes takes a count of nodes, at least 1, not `{nodes}`\n{USAGE}")
+                    })?,
+                },
+                (None, false) => gdl_gen::JoinBy::Job { nodes: 1 },
+            };
+            Command::Join {
+                fleet: fleet.take().ok_or_else(|| USAGE.to_string())?,
+                pool: pool.take().ok_or_else(|| USAGE.to_string())?,
+                segment: segment.take().ok_or_else(|| USAGE.to_string())?,
+                by,
+            }
+        }
+        "leave" => Command::Leave {
+            fleet: fleet.take().ok_or_else(|| USAGE.to_string())?,
+            joiner: match (job.take(), step.take()) {
+                (Some(job), None) => gdl_gen::Joiner::Job(job),
+                (None, Some(step)) => gdl_gen::Joiner::Step(step),
+                _ => {
+                    return Err(format!(
+                        "leave: give --job <id> for a joining job, or --step <job>.<step> for a joiner in a pool's job\n{USAGE}"
+                    ));
+                }
+            },
+        },
         "export" => Command::Export {
             out: out.ok_or_else(|| USAGE.to_string())?,
         },
@@ -352,14 +414,25 @@ fn args() -> Result<Args, String> {
         }
         _ => return Err(USAGE.to_string()),
     };
-    let needs_spec = !matches!(
-        command,
-        Command::Extract { .. } | Command::Catalog(_) | Command::Down { .. }
-    );
+    // `join` and `leave` read the recipes `deploy` wrote, not a spec.
+    let takes_spec = !matches!(command, Command::Join { .. } | Command::Leave { .. });
+    let needs_spec = takes_spec
+        && !matches!(
+            command,
+            Command::Extract { .. } | Command::Catalog(_) | Command::Down { .. }
+        );
     // `--fleet`, `--tag`, `--images`, `--push`, `--local`, `--release`,
-    // and `--direction` are for the commands that took them above.
-    // `--prepare-into` is internal to `run`, and in no usage line.
+    // `--direction`, and the flags of `join` and `leave` are for the
+    // commands that took them above. `--prepare-into` is internal to
+    // `run`, and in no usage line.
     if (needs_spec && spec.is_none())
+        || (!takes_spec && spec.is_some())
+        || pool.is_some()
+        || segment.is_some()
+        || nodes.is_some()
+        || in_job
+        || job.is_some()
+        || step.is_some()
         || direction.is_some()
         || prepare_into.is_some()
         || fleet.is_some()
@@ -377,6 +450,14 @@ fn args() -> Result<Args, String> {
         spec,
         target,
     })
+}
+
+/// `value`, the word after `flag`, as text.
+fn text(value: PathBuf, flag: &str) -> Result<String, String> {
+    value
+        .into_os_string()
+        .into_string()
+        .map_err(|given| format!("{flag} takes text, not {given:?}\n{USAGE}"))
 }
 
 /// Where the images take gdl and the crates they build: `--local`, from
@@ -659,6 +740,35 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 fleet,
                 &gdl_gen::Waits::default(),
                 &mut gdl_gen::Kubectl,
+                &mut gdl_gen::SlurmCli,
+                &mut say,
+            )?;
+        }
+        Command::Join {
+            fleet,
+            pool,
+            segment,
+            by,
+        } => {
+            let mut say = |step: &str| eprintln!("cargo gdl: {step}");
+            // What started, for `leave`, alone on stdout.
+            let joiner = gdl_gen::join(
+                fleet,
+                pool,
+                segment,
+                *by,
+                &gdl_gen::Waits::default(),
+                &mut gdl_gen::SlurmCli,
+                &mut say,
+            )?;
+            println!("{joiner}");
+        }
+        Command::Leave { fleet, joiner } => {
+            let mut say = |step: &str| eprintln!("cargo gdl: {step}");
+            gdl_gen::leave(
+                fleet,
+                joiner,
+                &gdl_gen::Waits::default(),
                 &mut gdl_gen::SlurmCli,
                 &mut say,
             )?;

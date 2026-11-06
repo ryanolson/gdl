@@ -76,6 +76,8 @@ A joiner launches as any instance does. Its roster is the hub's `loaded` instanc
 
 Peers add a joiner when it announces `ready`, not `serving`. A joiner's peers already send requests. A request routed to a joiner before its barrier would wait at its held roster.
 
+On a Slurm site, `cargo gdl join` adds instances of a segment to a running pool, by a job of their own, and `cargo gdl leave` removes them with one `SIGTERM`, on which each retires, drains, and exits ([Grow and shrink a running pool](../guides/slurm.md#grow-and-shrink-a-running-pool)). A joining job is submitted to end by its pool's job's end, so it never outlives the hub it joined.
+
 ## Membership while serving
 
 Each instance runs one follower task from just before it announces `loaded` until it leaves. The follower applies membership to the instance's routing:

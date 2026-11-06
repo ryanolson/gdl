@@ -712,7 +712,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Lifts:** a pool directory that both kinds of site reach, such as DynamoDB on AWS or an etcd outside both, and routes between the sites.
 
 ### `down` and `--replace` need Slurm 23.11.6 or later
-- **What:** on a Slurm site, `cargo gdl down`, and `cargo gdl deploy --replace`, read `scancel --version` before they change anything, and refuse a Slurm older than 23.11.6, or a version they cannot read, naming what they read. A deploy without `--replace` refuses the same way when its prune would cancel a job that waits in the queue.
+- **What:** on a Slurm site, `cargo gdl down`, and `cargo gdl deploy --replace`, read `scancel --version` before they change anything, and refuse a Slurm older than 23.11.6, or a version they cannot read, naming what they read. A deploy without `--replace` refuses the same way when its prune would cancel a job that waits in the queue, and so does `cargo gdl leave --job` for a joining job that still waits.
 - **Why:** they cancel a job only while it waits, with `scancel --ctld --state=PENDING`. From 23.11.6, Slurm's controller applies the filter as it cancels. Before it, `scancel` filters a listing of its own and then cancels by id, so a pool's job that starts in between would be cancelled while it runs, cutting its requests with no drain.
 - **Workaround:** on an older Slurm, stop the fleet's jobs by hand: drain each pool with a parent (`POST /v1/ext/gdl-pool/drain` on its hub's control port) and wait for `/v1/ext/gdl-pool/withdrawn`, then `scancel` its job; cancel the directory's job last.
 - **Lifts:** a cancel that does not depend on the version, such as holding a waiting job (`scontrol hold`) before cancelling it.
@@ -738,7 +738,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 ### A Slurm pool does not restart what dies in it
 - **What:** a segment instance that dies, for example with its node under `no_kill`, is not started again. Its lease lapses, its hub drops it, and the pool runs on with the rest, as `degraded` or `unavailable`. A pool's hub that dies ends the pool's job: its segments lose their lease and leave, and so do the jobs that joined it. `deploy` submits the pool again, whose new hub's record replaces the old one, and `down` withdraws the record through a parent's hub. The directory's job bounds the whole fleet: when it ends, its store is gone, and no hub can publish or read a record ([A Slurm site's pools need a directory job of the fleet's own](#a-slurm-sites-pools-need-a-directory-job-of-the-fleets-own)).
 - **Why:** srt-slurm does not restart a service, and a pool has one hub, which is `critical` and `terminal` in its job.
-- **Workaround:** replace a dead instance with a job that joins the pool (`join-<segment>.yaml`). Run `cargo gdl deploy` again for a pool whose job ended.
+- **Workaround:** replace a dead instance with a joiner: `cargo gdl join` ([Grow and shrink a running pool](../guides/slurm.md#grow-and-shrink-a-running-pool)). Run `cargo gdl deploy` again for a pool whose job ended.
 - **Lifts:** srt-slurm services that restart, and a hub that keeps its registrations across a restart.
 
 ### A running pool whose hub has not started cannot be stopped
@@ -758,6 +758,18 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** the generator writes the settings of its own gdl. A pin names a commit, which says nothing the render can read about the settings it takes.
 - **Workaround:** pin a gdl at least as recent as the generator that renders the recipes, or take gdl by `path`.
 - **Lifts:** a gdl version the render can compare, recorded with the images.
+
+### `cargo gdl join --in-job` is not available yet
+- **What:** `cargo gdl join --in-job`, which would add an instance to a running pool as a step of the pool's own job on one of its spare nodes, fails at once, before it runs any Slurm command. A pool's `slurm.spare_nodes` still hold their nodes, unused.
+- **Why:** such a step is started by an `srun` on the login node, detached from `cargo gdl`, and exists only once that `srun` has made it. A `down` that runs meanwhile cannot be sure that every such launch has made its step and had its signal before it cancels the pool's job: review found it could cancel a joiner unsignalled, with its requests in flight, through one race after another.
+- **Workaround:** add instances with `cargo gdl join` without `--in-job`: a job of their own, which waits in the queue.
+- **Lifts:** a launcher inside the pool's job, which starts and stops joiners on its spare nodes itself.
+
+### A joiner submitted by hand can outlive its pool
+- **What:** `srtctl apply -f join-<segment>.yaml` submits a joining job with no `--deadline`. A job that runs past its pool's end loses its hub: its instances lose their lease, finish what they hold, and exit.
+- **Why:** the recipe on the shared file system is the one `deploy` wrote. Only `cargo gdl join` reads the pool's job's end, when it submits.
+- **Workaround:** add joiners with `cargo gdl join`.
+- **Lifts:** none planned: the end of a pool's job is known only once it runs.
 
 ### A Slurm recipe replaces the cluster's default host setup
 - **What:** each pool's and joining job's recipe has a `host_setup`, which writes the job's end time. srt-slurm then runs it in place of `default_host_setup` in the cluster's `srtslurm.yaml`, which the job does not run.
